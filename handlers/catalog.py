@@ -23,7 +23,7 @@ async def cb_product(callback: CallbackQuery):
         await callback.answer("Товар не найден.", show_alert=True)
         return
 
-    file_status = "✅ Файл есть" if product.get("file_id") else "⚠️ Файл ещё не загружен"
+    file_status = "📥 После оплаты файл сразу придёт в этот чат" if product.get("file_id") else "⚠️ Файл ещё не загружен"
     text = (
         f"<b>{product['name']}</b>\n\n"
         f"{product['description']}\n\n"
