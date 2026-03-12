@@ -1,0 +1,18 @@
+[Unit]
+Description=Lut Bot — Telegram bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/lut-bot
+ExecStart=/root/lut-bot/venv/bin/python bot.py
+Restart=always
+RestartSec=5
+
+# Логи доступны через: journalctl -u lut-bot -f
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
