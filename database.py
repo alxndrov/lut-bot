@@ -89,6 +89,18 @@ async def update_product_active(product_id: int, active: bool):
         await db.commit()
 
 
+async def update_product_name(product_id: int, name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE products SET name = ? WHERE id = ?", (name, product_id))
+        await db.commit()
+
+
+async def update_product_description(product_id: int, description: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE products SET description = ? WHERE id = ?", (description, product_id))
+        await db.commit()
+
+
 async def delete_product(product_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM products WHERE id = ?", (product_id,))

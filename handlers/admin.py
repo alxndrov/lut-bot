@@ -23,6 +23,11 @@ class AddProduct(StatesGroup):
     price = State()
 
 
+class EditProduct(StatesGroup):
+    name = State()
+    description = State()
+
+
 class UploadFile(StatesGroup):
     waiting_file = State()
     product_id = State()
@@ -165,6 +170,71 @@ async def fsm_product_price(message: Message, state: FSMContext):
         f"✅ Товар <b>{product['name']}</b> создан!\n\n"
         f"Теперь загрузи файл через карточку товара.",
         parse_mode="HTML",
+        reply_markup=admin_product_keyboard(product),
+    )
+
+
+# --- Редактировать название ---
+
+@router.callback_query(F.data.startswith("admin:edit_name:"))
+async def cb_edit_name(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    await state.set_state(EditProduct.name)
+    await state.update_data(product_id=product_id)
+    await callback.message.edit_text(
+        "Введи новое <b>название</b> товара:",
+        parse_mode="HTML",
+        reply_markup=admin_back_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditProduct.name)
+async def fsm_edit_name(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    product_id = data["product_id"]
+    await db.update_product_name(product_id, message.text.strip())
+    await state.clear()
+    product = await db.get_product(product_id)
+    await message.answer(
+        f"✅ Название обновлено: <b>{product['name']}</b>",
+        parse_mode="HTML",
+        reply_markup=admin_product_keyboard(product),
+    )
+
+
+# --- Редактировать описание ---
+
+@router.callback_query(F.data.startswith("admin:edit_desc:"))
+async def cb_edit_desc(callback: CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return
+    product_id = int(callback.data.split(":")[2])
+    await state.set_state(EditProduct.description)
+    await state.update_data(product_id=product_id)
+    await callback.message.edit_text(
+        "Введи новое <b>описание</b> товара:",
+        parse_mode="HTML",
+        reply_markup=admin_back_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(EditProduct.description)
+async def fsm_edit_description(message: Message, state: FSMContext):
+    if not is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    product_id = data["product_id"]
+    await db.update_product_description(product_id, message.text.strip())
+    await state.clear()
+    product = await db.get_product(product_id)
+    await message.answer(
+        "✅ Описание обновлено.",
         reply_markup=admin_product_keyboard(product),
     )
 

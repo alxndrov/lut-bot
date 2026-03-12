@@ -13,27 +13,27 @@ DIR="$HOME/lut-bot"
 
 case "$1" in
   start)
-    sudo systemctl start $SERVICE && echo "✅ Бот запущен."
+    systemctl --user start $SERVICE && echo "✅ Бот запущен."
     ;;
   stop)
-    sudo systemctl stop $SERVICE && echo "⛔ Бот остановлен."
+    systemctl --user stop $SERVICE && echo "⛔ Бот остановлен."
     ;;
   restart)
-    sudo systemctl restart $SERVICE && echo "🔄 Бот перезапущен."
+    systemctl --user restart $SERVICE && echo "🔄 Бот перезапущен."
     ;;
   logs)
-    sudo journalctl -u $SERVICE -f --no-pager
+    journalctl --user -u $SERVICE -f --no-pager
     ;;
   status)
-    sudo systemctl status $SERVICE --no-pager
+    systemctl --user status $SERVICE --no-pager
     ;;
   update)
     echo "📥 Получаю обновления из GitHub..."
     cd $DIR && git pull
     echo "🔄 Перезапускаю бота..."
-    systemctl restart $SERVICE
+    systemctl --user restart $SERVICE
     echo "✅ Готово."
-    systemctl status $SERVICE --no-pager
+    systemctl --user status $SERVICE --no-pager
     ;;
   *)
     echo "Использование: bash bot.sh {start|stop|restart|logs|status|update}"
