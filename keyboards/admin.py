@@ -25,6 +25,10 @@ def admin_product_keyboard(product: dict) -> InlineKeyboardMarkup:
     pid = product["id"]
     toggle_text = "❌ Скрыть" if product["active"] else "✅ Показать"
     buttons = [
+        [
+            InlineKeyboardButton(text="✏️ Название", callback_data=f"admin:edit_name:{pid}"),
+            InlineKeyboardButton(text="✏️ Описание", callback_data=f"admin:edit_desc:{pid}"),
+        ],
         [InlineKeyboardButton(text="📎 Загрузить файл", callback_data=f"admin:upload_file:{pid}")],
         [InlineKeyboardButton(text="🖼 Загрузить фото", callback_data=f"admin:upload_photo:{pid}")],
         [InlineKeyboardButton(text=toggle_text, callback_data=f"admin:toggle:{pid}")],

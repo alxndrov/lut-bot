@@ -26,7 +26,7 @@ async def cb_product(callback: CallbackQuery):
     file_status = "📥 После оплаты файл сразу придёт в этот чат" if product.get("file_id") else "⚠️ Файл ещё не загружен"
     text = (
         f"<b>{product['name']}</b>\n\n"
-        f"{product['description']}\n\n"
+        f"<i>{product['description']}</i>\n\n"
         f"💰 Цена: <b>{product['price']} ₽</b>\n"
         f"{file_status}"
     )
