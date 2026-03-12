@@ -9,23 +9,23 @@
 #   bash bot.sh update   — git pull + перезапуск
 
 SERVICE="lut-bot"
-DIR="/root/lut-bot"
+DIR="$HOME/lut-bot"
 
 case "$1" in
   start)
-    systemctl start $SERVICE && echo "✅ Бот запущен."
+    sudo systemctl start $SERVICE && echo "✅ Бот запущен."
     ;;
   stop)
-    systemctl stop $SERVICE && echo "⛔ Бот остановлен."
+    sudo systemctl stop $SERVICE && echo "⛔ Бот остановлен."
     ;;
   restart)
-    systemctl restart $SERVICE && echo "🔄 Бот перезапущен."
+    sudo systemctl restart $SERVICE && echo "🔄 Бот перезапущен."
     ;;
   logs)
-    journalctl -u $SERVICE -f --no-pager
+    sudo journalctl -u $SERVICE -f --no-pager
     ;;
   status)
-    systemctl status $SERVICE --no-pager
+    sudo systemctl status $SERVICE --no-pager
     ;;
   update)
     echo "📥 Получаю обновления из GitHub..."
