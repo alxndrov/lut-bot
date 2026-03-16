@@ -37,6 +37,11 @@ async def show_catalog(message_or_callback, edit=False):
         kb = catalog_keyboard(products)
 
     if edit:
-        await message_or_callback.message.edit_text(text, reply_markup=kb)
+        msg = message_or_callback.message
+        if msg.photo or msg.document or msg.video or msg.audio:
+            await msg.delete()
+            await msg.answer(text, reply_markup=kb)
+        else:
+            await msg.edit_text(text, reply_markup=kb)
     else:
         await message_or_callback.answer(text, reply_markup=kb)
