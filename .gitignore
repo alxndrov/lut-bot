@@ -3,6 +3,8 @@
 
 # База данных (хранится на сервере)
 bot.db
+bot_data.db
+*.db
 
 # Python
 __pycache__/

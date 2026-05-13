@@ -1,12 +1,18 @@
 import asyncio
 import logging
 
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
 import config
 import database as db
-from handlers import start, catalog, payment, admin
+from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
+from handlers import funnel_handler, bonus_handler
+from handlers.prodamus_webhook import create_app as create_webhook_app
+from services.daily_report import daily_report_loop, monthly_report_loop
+from services.funnel import funnel_worker
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,10 +30,38 @@ async def main():
     dp.include_router(admin.router)   # Сначала админ, чтобы перехватывал FSM-состояния
     dp.include_router(start.router)
     dp.include_router(catalog.router)
+    dp.include_router(brief_handler.router)
+    dp.include_router(delivery.router)      # before payment!
+    dp.include_router(waitlist_handler.router)
     dp.include_router(payment.router)
+    dp.include_router(feedback.router)
+    dp.include_router(channel_access.router)
+    dp.include_router(funnel_handler.router)
+    dp.include_router(bonus_handler.router)
+
+    await bot.set_my_commands([
+        BotCommand(command="start",       description="🏠 В начало"),
+        BotCommand(command="catalog",     description="📦 Каталог товаров"),
+        BotCommand(command="mypurchases", description="🧾 Мои покупки"),
+        BotCommand(command="feedback",    description="💬 Оставить отзыв"),
+    ])
+
+    asyncio.create_task(daily_report_loop(bot))
+    asyncio.create_task(monthly_report_loop(bot))
+    asyncio.create_task(funnel_worker(bot))
+
+    # Запускаем aiohttp-сервер для приёма вебхуков от Prodamus
+    webhook_app = create_webhook_app(bot)
+    runner = web.AppRunner(webhook_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", config.PRODAMUS_WEBHOOK_PORT)
+    await site.start()
+    logging.info(f"Webhook-сервер запущен на порту {config.PRODAMUS_WEBHOOK_PORT}")
 
     logging.info("Бот запущен.")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query",
+                                                  "chat_join_request", "pre_checkout_query",
+                                                  "shipping_query"])
 
 
 if __name__ == "__main__":
