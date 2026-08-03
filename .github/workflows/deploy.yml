@@ -16,8 +16,13 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          # Скрипт по полному пути: форс-команда `deploy` в authorized_keys
-          # на сервере не настроена, и голая команда падала с
-          # «command not found». Путь тот же, что внутри deploy.sh.
-          script: bash /home/ubuntu/lut-bot/deploy.sh
+          # Сначала обновляем код, потом запускаем deploy.sh из репозитория.
+          # Порядок важен: скрипт деплоя сам лежит в репозитории, и на
+          # сервере его может ещё не быть — деплой не должен зависеть
+          # от того, что уже задеплоено.
+          script: |
+            cd /home/ubuntu/lut-bot
+            git fetch origin main
+            git reset --hard origin/main
+            bash deploy.sh
           script_stop: true
