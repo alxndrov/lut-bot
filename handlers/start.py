@@ -1,9 +1,12 @@
 import logging
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message
+from aiogram.types import (
+    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
+)
 from datetime import datetime
 
+import config
 from config import ADMIN_IDS
 from keyboards.user import catalog_keyboard, back_to_catalog_keyboard
 from keyboards.admin import admin_menu_keyboard
@@ -11,6 +14,60 @@ import database as db
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+def policy_keyboard() -> InlineKeyboardMarkup:
+    """Одна кнопка — сами документы даны ссылками в тексте."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Принимаю", callback_data="policy:accept")]
+    ])
+
+
+async def ask_policy(message: Message):
+    """Первый экран для нового пользователя: без согласия дальше не пускаем."""
+    policy = (f'<a href="{config.PRIVACY_POLICY_URL}">'
+              "согласие на обработку персональных данных</a>")
+    offer = (f' и <a href="{config.OFFER_URL}">оферту</a>'
+             if config.OFFER_URL else "")
+    await message.answer(
+        "Привет!\n\n"
+        f"Прежде чем я отправлю тебе всю информацию, пожалуйста, прими {policy}{offer}.",
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=policy_keyboard(),
+    )
+
+
+async def _start_funnel(user_id: int, payload: str | None):
+    """Запускает воронку по deep-link payload (после согласия)."""
+    if not payload or not payload.startswith("lm_"):
+        return
+    rest = payload[3:]
+    if "_src_" in rest:
+        funnel_id, source = rest.split("_src_", 1)
+    else:
+        funnel_id, source = rest, payload
+
+    funnel = await db.get_funnel_by_slug(funnel_id) or await db.get_funnel(funnel_id)
+    if not (funnel and funnel["active"]):
+        logger.warning(f"deep link lm_{funnel_id}: воронка не найдена или неактивна")
+        return
+    if funnel.get("product_id") and await db.get_purchase(user_id, funnel["product_id"]):
+        return
+    await db.enqueue_funnel(user_id, funnel["id"], source=source)
+    logger.info(f"funnel auto-start: user {user_id} → funnel {funnel['id']} source={source}")
+
+
+@router.callback_query(F.data == "policy:accept")
+async def cb_policy_accept(callback: CallbackQuery):
+    payload = await db.accept_policy(callback.from_user.id)
+    await callback.answer("Спасибо!")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await _start_funnel(callback.from_user.id, payload)
+    await show_catalog(callback.message, user_id=callback.from_user.id)
 
 
 @router.message(CommandStart())
@@ -45,44 +102,32 @@ async def cmd_start(message: Message):
         ref=ref,
     )
 
-    # Автозапуск воронки через deep link
+    # Без согласия на обработку данных ничего не показываем и воронку
+    # не запускаем — payload дождётся принятия
+    if config.POLICY_REQUIRED and not await db.is_policy_accepted(message.from_user.id):
+        await db.set_pending_payload(message.from_user.id, payload)
+        await ask_policy(message)
+        return
+
     if funnel_to_start:
-        # Ищем по slug (ASCII-safe), fallback — по id (старые воронки)
-        funnel = await db.get_funnel_by_slug(funnel_to_start)
-        if funnel is None:
-            funnel = await db.get_funnel(funnel_to_start)
+        await _start_funnel(message.from_user.id, payload)
 
-        if funnel and funnel["active"]:
-            already_bought = False
-            if funnel.get("product_id"):
-                purchase = await db.get_purchase(message.from_user.id, funnel["product_id"])
-                already_bought = bool(purchase)
-
-            if not already_bought:
-                await db.enqueue_funnel(
-                    message.from_user.id, funnel["id"], source=funnel_source
-                )
-                logger.info(
-                    f"funnel auto-start: user {message.from_user.id} → "
-                    f"funnel {funnel['id']} slug={funnel_to_start} source={funnel_source}"
-                )
-        else:
-            logger.warning(f"deep link lm_{funnel_to_start}: воронка не найдена или неактивна")
-
-    products = await db.get_all_products()
+    admin = message.from_user.id in ADMIN_IDS
+    products = await db.get_all_products(active_only=not admin)
     banner_file_id = await db.get_setting("catalog_banner_file_id")
 
     if not products:
         await message.answer("👋 Привет! Пока товаров нет, скоро появятся.")
         return
 
-    text = "👋 Привет! Выбери товар из каталога:"
-    kb = catalog_keyboard(products)
+    admin_hint = "\n\n<i>🔐 Вы видите скрытые товары, т.к. вы администратор</i>" if admin else ""
+    text = "👋 Привет! Выбери товар из каталога:" + admin_hint
+    kb = catalog_keyboard(products, is_admin=admin)
 
     if banner_file_id:
-        await message.answer_photo(banner_file_id, caption=text, reply_markup=kb)
+        await message.answer_photo(banner_file_id, caption=text, reply_markup=kb, parse_mode="HTML")
     else:
-        await message.answer(text, reply_markup=kb)
+        await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 @router.message(Command("catalog"))
@@ -96,8 +141,8 @@ async def cmd_mypurchases(message: Message):
 
     if not purchases:
         await message.answer(
-            "🛍 У вас пока нет покупок.\n\n"
-            "Загляните в /catalog!",
+            "🛍 У тебя пока нет покупок.\n\n"
+            "Загляни в /catalog!",
         )
         return
 
@@ -117,12 +162,13 @@ async def cmd_mypurchases(message: Message):
     await message.answer(text, parse_mode="HTML", reply_markup=back_to_catalog_keyboard())
 
 
-async def show_catalog(message_or_callback, edit=False):
-    user_id = getattr(
-        getattr(message_or_callback, "from_user", None) or
-        getattr(getattr(message_or_callback, "message", None), "from_user", None),
-        "id", 0,
-    )
+async def show_catalog(message_or_callback, edit=False, user_id: int | None = None):
+    if user_id is None:
+        user_id = getattr(
+            getattr(message_or_callback, "from_user", None) or
+            getattr(getattr(message_or_callback, "message", None), "from_user", None),
+            "id", 0,
+        )
     import config as _config
     admin = user_id in _config.ADMIN_IDS
     products = await db.get_all_products(active_only=not admin)
@@ -132,7 +178,8 @@ async def show_catalog(message_or_callback, edit=False):
         text = "😔 Товаров пока нет."
         kb = None
     else:
-        text = "📦 Каталог товаров:" + (" <i>(включая скрытые)</i>" if admin else "")
+        admin_hint = "\n\n<i>🔐 Вы видите скрытые товары, т.к. вы администратор</i>" if admin else ""
+        text = "📦 Каталог товаров:" + admin_hint
         kb = catalog_keyboard(products, is_admin=admin)
 
     if edit:
@@ -142,11 +189,11 @@ async def show_catalog(message_or_callback, edit=False):
         except Exception:
             pass
         if banner_file_id:
-            await msg.answer_photo(banner_file_id, caption=text, reply_markup=kb)
+            await msg.answer_photo(banner_file_id, caption=text, reply_markup=kb, parse_mode="HTML")
         else:
-            await msg.answer(text, reply_markup=kb)
+            await msg.answer(text, reply_markup=kb, parse_mode="HTML")
     else:
         if banner_file_id:
-            await message_or_callback.answer_photo(banner_file_id, caption=text, reply_markup=kb)
+            await message_or_callback.answer_photo(banner_file_id, caption=text, reply_markup=kb, parse_mode="HTML")
         else:
-            await message_or_callback.answer(text, reply_markup=kb)
+            await message_or_callback.answer(text, reply_markup=kb, parse_mode="HTML")

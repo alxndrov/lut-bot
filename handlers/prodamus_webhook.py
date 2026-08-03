@@ -3,11 +3,16 @@ aiohttp-обработчик вебхуков от Prodamus.
 Подпись — в HTTP-заголовке Sign.
 order_id в URL → order_num в вебхуке (сквозной идентификатор).
 """
+import asyncio
+import json
 import logging
+from functools import partial
+from typing import Optional
 from datetime import datetime, timezone
 
 from aiohttp import web
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 
 import config
 import database as db
@@ -15,8 +20,16 @@ from services.prodamus import verify_webhook
 
 logger = logging.getLogger(__name__)
 
+# Сообщение клиенту после оплаты физтовара. {order} → номер заказа.
+# Редактируется в админке: 📋 Опрос → «💬 После оплаты».
+DEFAULT_POST_PAYMENT = (
+    "✅ Оплата прошла! Спасибо за заказ 🎉\n\n"
+    "Номер заказа: {order}\n"
+    "В течение нескольких рабочих дней я отправлю вам заказ."
+)
 
-async def handle_webhook(request: web.Request) -> web.Response:
+
+async def handle_webhook(request: web.Request, secret: str = "") -> web.Response:
     bot: Bot = request.app["bot"]
 
     try:
@@ -25,13 +38,13 @@ async def handle_webhook(request: web.Request) -> web.Response:
         logger.error(f"prodamus webhook: ошибка разбора тела: {e}")
         return web.Response(text="bad request", status=400)
 
-    logger.info(f"prodamus webhook: headers.Sign={request.headers.get('Sign')!r}, body={raw}")
+    logger.info(f"prodamus webhook [{request.path}]: headers.Sign={request.headers.get('Sign')!r}, body={raw}")
 
-    # Проверяем подпись из заголовка Sign
-    if config.PRODAMUS_SECRET:
+    # Проверяем подпись из заголовка Sign (секрет — своего магазина)
+    if secret:
         sign_header = request.headers.get("Sign", "")
-        if not verify_webhook(dict(raw), sign_header, config.PRODAMUS_SECRET):
-            logger.warning("prodamus webhook: неверная подпись")
+        if not verify_webhook(dict(raw), sign_header, secret):
+            logger.warning(f"prodamus webhook [{request.path}]: неверная подпись")
             return web.Response(text="invalid sign", status=403)
 
     # Неуспешный платёж — уведомляем покупателя если знаем его user_id
@@ -66,8 +79,10 @@ async def handle_webhook(request: web.Request) -> web.Response:
         user_id = int(parts[1])
         product_id = int(parts[2])
     except Exception:
-        logger.error(f"prodamus webhook: неверный order_num={order_num!r}")
-        return web.Response(text="bad params", status=400)
+        # Тест из кабинета Prodamus или ручной платёж — привязать не к кому.
+        # Отвечаем 200, чтобы Prodamus не считал URL «отвечающим ошибкой».
+        logger.warning(f"prodamus webhook: order_num не распознан ({order_num!r}) — тест/ручной платёж, пропускаю")
+        return web.Response(text="ok")
 
     prodamus_order_id = raw.get("order_id", "")
     try:
@@ -75,10 +90,36 @@ async def handle_webhook(request: web.Request) -> web.Response:
     except Exception:
         amount = 0
 
+    ok = await provision_payment(bot, user_id, product_id, order_type,
+                                 prodamus_order_id, amount)
+    if ok is False:
+        return web.Response(text="product not found", status=404)
+    return web.Response(text="ok")
+
+
+async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type: str,
+                            prodamus_order_id: str, amount: int) -> bool | None:
+    """Проводит оплаченный заказ: покупка, уведомление админам, выдача товара.
+
+    Вызывается вебхуком Prodamus, а также вручную из админки, если вебхук
+    не дошёл (перезапуск бота, сбой сети). Повторный вызов безопасен —
+    уже проведённый платёж отсекается по prodamus_order_id.
+    """
+    # Идемпотентность: если этот платёж уже обработан (Prodamus повторил вебхук или
+    # уведомление пришло и из кабинета, и по urlNotification из ссылки) — не выдаём повторно.
+    if prodamus_order_id:
+        already = await db.get_purchase_by_payment_id(prodamus_order_id)
+        if already:
+            logger.info(
+                f"prodamus: платёж {prodamus_order_id} уже обработан "
+                f"(purchase id={already.get('id')}) — пропускаю повторную выдачу"
+            )
+            return None
+
     product = await db.get_product(product_id)
     if not product:
-        logger.error(f"prodamus webhook: товар {product_id} не найден")
-        return web.Response(text="product not found", status=404)
+        logger.error(f"prodamus: товар {product_id} не найден")
+        return False
 
     now = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M UTC")
 
@@ -125,39 +166,383 @@ async def handle_webhook(request: web.Request) -> web.Response:
         else:
             await _deliver_digital(bot, user_id, product)
 
+        # Ставим пуш отзыва в очередь (если настроен)
+        if product.get("review_push_delay"):
+            await db.enqueue_review_push(user_id, product_id, product["review_push_delay"])
+
     elif order_type == "p":
-        delivery_info = await db.get_pending_delivery(user_id, product_id) or "не указан"
+        pending = await db.get_pending_order(user_id, product_id) or {}
+        delivery_info = pending.get("delivery_str") or "не указан"
+        rounds = []
+        if pending.get("survey_json"):
+            try:
+                rounds = json.loads(pending["survey_json"])
+            except Exception as e:
+                logger.error(f"prodamus webhook: не разобрать survey_json: {e}")
         await db.delete_pending_delivery(user_id, product_id)
 
+        # Доставка внутри суммы — транзит, в выручку не идёт
         await db.add_purchase(
             user_id=user_id, username=username, product_id=product_id,
             telegram_payment_id=prodamus_order_id, amount=amount,
+            delivery_amount=int(pending.get("delivery_amount") or 0),
+            quantity=len([r for r in rounds if r]) or 1,
         )
 
-        await _send_notify(bot, (
-            f"💰 <b>Новый заказ (физический товар)</b>\n\n"
-            f"👤 {first_name} {username_str}\n"
-            f"🛍 {product['name']}\n"
-            f"💵 {amount} ₽\n"
-            f"📦 Доставка: {delivery_info}\n"
-            f"🕐 {now}"
-        ))
+        # Свой сквозной номер заказа: malimabi-store-001, -002, ...
+        order_code = await db.next_order_code()
 
-        await bot.send_message(
-            user_id,
-            "✅ Оплата прошла! Ваш заказ принят.\n\n"
-            "В ближайшее время мы свяжемся с вами для уточнения деталей доставки.",
+        # Полное уведомление о заказе — только сейчас, после успешной оплаты.
+        # Идёт в админский бот (malimadmins) с кнопкой «Взял заказ».
+        whos = await _routing_whos(product_id, product, rounds)
+        summary = _format_order(
+            first_name, username_str, product["name"], amount,
+            delivery_info, rounds, now, order_number=order_code,
+            routing_line=_routing_line(whos),
         )
+        order_row_id = await db.create_order(
+            user_id, product_id, prodamus_order_id, summary,
+            rounds_json=json.dumps(rounds, ensure_ascii=False),
+            order_code=order_code,
+            recipient_name=pending.get("recipient_name"),
+            recipient_phone=pending.get("recipient_phone"),
+            pvz_code=pending.get("pvz_code"),
+        )
+
+        # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
+        # Печатающих может быть несколько: заказ покажется каждому из них.
+        # Разметку позиций храним отдельно: её потом можно менять по одной
+        if whos:
+            await db.set_order_routing(order_row_id, whos)
+        printers = await _printer_admins(whos)
+        if printers:
+            await db.set_order_printers(order_row_id,
+                                        [p["user_id"] for p in printers])
+            await db.force_set_order_assignee(order_row_id, printers[0]["user_id"],
+                                              f"@{printers[0]['username']}")
+            from handlers.order_actions import _order_text
+            summary = _order_text(await db.get_order(order_row_id))
+
+        await _send_order_notify(order_row_id, summary, main_bot=bot, rounds=rounds,
+                                 order_number=order_code)
+
+        # Накладная СДЭК — отдельной задачей: создание асинхронное, ждать его
+        # внутри вебхука нельзя, Prodamus ждёт быстрый ответ 200.
+        if config.CDEK_AUTO_ORDER:
+            asyncio.create_task(_create_cdek_order(
+                order_row_id, pending, product, amount, len(rounds) or 1,
+                order_code, bot, user_id,
+            ))
+
+        # Таблица заказов обновится сама через несколько секунд
+        from services.gsheets import request_sync
+        request_sync()
+
+        paid_text = (product.get("post_payment_text") or DEFAULT_POST_PAYMENT)
+        paid_text = paid_text.replace("{order}", order_code)
+        await bot.send_message(user_id, paid_text)
+
+        # Ставим пуш отзыва в очередь (если настроен)
+        if product.get("review_push_delay"):
+            await db.enqueue_review_push(user_id, product_id, product["review_push_delay"])
     else:
-        logger.error(f"prodamus webhook: неизвестный order_type={order_type!r}")
+        logger.error(f"prodamus: неизвестный order_type={order_type!r}")
 
-    return web.Response(text="ok")
+    return True
+
+
+def _parse_routing(text: str) -> dict:
+    """'Даня: 1,2,3\\nПартнёр: 4,5' -> {'1':'Даня','2':'Даня',...,'4':'Партнёр',...}"""
+    import re
+    result = {}
+    for line in (text or "").splitlines():
+        if ":" not in line:
+            continue
+        name, nums = line.split(":", 1)
+        name = name.strip()
+        for n in re.findall(r"\d+", nums):
+            result[n] = name
+    return result
+
+
+async def _create_cdek_order(order_row_id: int, pending: dict, product: dict,
+                             amount: int, quantity: int, order_number: str,
+                             bot: Bot = None, client_id: int = 0):
+    """Заводит накладную в СДЭК после оплаты и сообщает результат админам.
+
+    Ошибка здесь не ломает заказ — деньги уже получены, заявка админам ушла.
+    Админ просто заведёт отправление в кабинете СДЭК руками.
+    """
+    from handlers.delivery import CDEK_CLIENT
+
+    pvz_code = (pending or {}).get("pvz_code")
+    name = (pending or {}).get("recipient_name")
+    phone = (pending or {}).get("recipient_phone")
+
+    missing = [n for n, v in (("ПВЗ", pvz_code), ("ФИО", name), ("телефон", phone)) if not v]
+    if not CDEK_CLIENT or missing:
+        reason = "СДЭК не настроен" if not CDEK_CLIENT else f"не хватает данных: {', '.join(missing)}"
+        logger.warning(f"CDEK order {order_number}: пропускаю — {reason}")
+        await _send_notify(None, (
+            f"⚠️ Заказ <code>{order_number}</code>: накладная СДЭК не создана "
+            f"({reason}). Заведите отправление вручную."
+        ))
+        return
+
+    pkg = db.product_package(product)
+    uuid = await CDEK_CLIENT.create_order(
+        number=order_number,
+        shipment_point=config.CDEK_SHIPMENT_POINT,
+        delivery_point=pvz_code,
+        recipient_name=name,
+        recipient_phone=phone,
+        tariff_code=config.CDEK_TARIFF_PVZ,
+        items=[{
+            "name": product["name"],
+            "ware_key": str(product["id"]),
+            "cost": product["price"],
+            "amount": quantity,
+            "weight": pkg["weight"],
+        }],
+        # Каждая ручка едет в своей коробке — столько же мест в накладной.
+        # На цену это не влияет (СДЭК считает по суммарному весу), зато
+        # наклейка печатается на каждую коробку
+        weight=pkg["weight"],
+        length=pkg["length"],
+        width=pkg["width"],
+        height=pkg["height"],
+        places=quantity,
+    )
+    if not uuid:
+        await _send_notify(None, (
+            f"⚠️ Заказ <code>{order_number}</code>: СДЭК не принял накладную. "
+            f"Заведите отправление вручную, подробности в логах."
+        ))
+        return
+
+    await db.set_order_cdek(order_row_id, uuid)
+
+    # Создание асинхронное — ждём результат, но недолго
+    for _ in range(6):
+        await asyncio.sleep(5)
+        info = await CDEK_CLIENT.get_order_info(uuid)
+        if not info:
+            continue
+        if info["state"] == "SUCCESSFUL":
+            track = info.get("cdek_number")
+            await db.set_order_cdek(order_row_id, uuid, track)
+            logger.info(f"CDEK order {order_number}: создан, трек {track}")
+            # трек-номер появился — подтянем его в таблицу
+            from services.gsheets import request_sync
+            request_sync()
+            await _send_track_to_client(bot, client_id, order_number, track,
+                                        pending.get("delivery_str"))
+            await _send_notify(None, (
+                f"📦 Заказ <code>{order_number}</code>: накладная СДЭК создана.\n"
+                f"Трек-номер: <code>{track}</code>\n"
+                f"ПВЗ: {pvz_code} · {name}, {phone}"
+            ))
+            return
+        if info["state"] == "INVALID":
+            errs = "; ".join(e.get("message", "") for e in info.get("errors", []))
+            logger.error(f"CDEK order {order_number}: отклонён — {errs}")
+            await _send_notify(None, (
+                f"⚠️ Заказ <code>{order_number}</code>: СДЭК отклонил накладную.\n"
+                f"<i>{errs}</i>\nЗаведите отправление вручную."
+            ))
+            return
+
+    logger.warning(f"CDEK order {order_number}: статус не подтвердился за 30 сек, uuid={uuid}")
+    await _send_notify(None, (
+        f"⏳ Заказ <code>{order_number}</code>: накладная СДЭК отправлена, "
+        f"но подтверждение не пришло за 30 секунд. Проверьте кабинет СДЭК."
+    ))
+
+
+async def _send_track_to_client(bot: Bot, client_id: int, order_number: str,
+                                track: str, delivery_str: str = None):
+    """Сообщает покупателю трек-номер, как только накладная СДЭК создана."""
+    if not bot or not client_id or not track:
+        return
+    # Из строки доставки берём только адрес пункта, без служебных пометок
+    pvz = ""
+    for line in (delivery_str or "").splitlines():
+        if "пункт выдачи" in line.lower():
+            pvz = line.split(":", 1)[-1].split("(код ПВЗ")[0].strip()
+            break
+    text = (
+        f"📦 <b>Заказ {order_number} передан в СДЭК</b>\n\n"
+        f"Трек-номер: <code>{track}</code>\n"
+    )
+    if pvz:
+        text += f"Пункт выдачи: {pvz}\n"
+    text += (
+        f"\n<a href=\"https://www.cdek.ru/ru/tracking?order_id={track}\">"
+        "Отследить посылку</a>\n\n"
+        "Я напишу, когда посылка приедет в пункт выдачи."
+    )
+    try:
+        await bot.send_message(client_id, text, parse_mode="HTML",
+                               disable_web_page_preview=True)
+    except Exception as e:
+        logger.error(f"CDEK: не отправить трек клиенту {client_id}: {e}")
+
+
+async def _routing_whos(product_id: int, product: dict, rounds: list) -> list:
+    """Кто печатает каждую позицию — по номеру цвета из вопроса-распределителя."""
+    import re
+    routing = product.get("order_routing_text") if product else None
+    if not routing:
+        return []
+    questions = await db.get_product_questions(product_id)
+    router_q = next((q for q in questions if q.get("is_router")), None)
+    if not router_q:
+        return []
+    rmap = _parse_routing(routing)
+
+    def who(answers):
+        val = next((a.get("text") for a in answers if a.get("q") == router_q["text"]), "") or ""
+        nums = re.findall(r"\d+", val)
+        return rmap.get(nums[0]) if nums else None
+
+    return [who(answers) for answers in rounds]
+
+
+def _routing_line(whos: list) -> str:
+    """Строка «кто печатает» — рисуется там же, где перерисовывается карточка."""
+    from handlers.order_actions import _routing_render
+    return _routing_render(whos)
+
+
+async def _printer_admins(whos: list) -> list[dict]:
+    """Все администраторы, печатающие этот заказ, в порядке позиций.
+
+    Если позиции печатают разные люди, заказ должен быть виден у каждого,
+    иначе чужая позиция потеряется.
+    """
+    found, seen = [], set()
+    for name in whos:
+        if not name:
+            continue
+        admin = await db.get_admin_by_username(name, config.ADMIN_IDS)
+        if not admin:
+            logger.warning(f"routing: не нашёл админа по нику {name!r}")
+            continue
+        if admin["user_id"] not in seen:
+            seen.add(admin["user_id"])
+            found.append(admin)
+    return found
+
+
+def _format_order(first_name: str, username_str: str, product_name: str, amount: int,
+                  delivery_info: str, rounds: list, now: str, order_number: str = "",
+                  routing_line: str = "") -> str:
+    """Уведомление о заказе: номер, кто печатает, покупатель, товар, ответы, доставка."""
+    multi = len(rounds) > 1
+    head = "🧾 <b>Новый заказ</b>"
+    if order_number:
+        head += f" <code>{order_number}</code>"
+    lines = [head]
+    if routing_line:
+        lines.append(routing_line)
+    lines += [
+        "",
+        f"👤 {first_name} {username_str}",
+        f"🛍 {product_name}" + (f"  ×{len(rounds)}" if multi else ""),
+        f"💵 {amount} ₽",
+        f"🕐 {now}",
+    ]
+    for ri, answers in enumerate(rounds, 1):
+        if multi:
+            lines.append(f"\n— <b>Позиция {ri}</b> —")
+        elif answers:
+            lines.append("")
+        for i, a in enumerate(answers, 1):
+            ans = a.get("text") or ("📷 фото" if a.get("photo")
+                                    else ("📎 файл" if a.get("doc") else "—"))
+            lines.append(f"<b>{i}. {a.get('q', '')}</b>\n{ans}")
+    lines.append(f"\n🚚 <b>Доставка:</b>\n{delivery_info}")
+    return "\n".join(lines)
+
+
+async def _send_order_notify(order_id: int, summary: str, main_bot: Bot = None,
+                             rounds: list = None, order_number: str = ""):
+    """Шлёт заказ в админский бот (malimadmins) с кнопками работы над ним,
+    сохраняя message_id каждой копии для синхронной простановки исполнителя.
+    Следом — фото/файлы из ответов клиента (перезаливкой, см. _fetch_media)."""
+    from handlers.order_actions import order_assigned_keyboard, _ensure_admin_names
+    await _ensure_admin_names()
+    order = await db.get_order(order_id)
+    try:
+        notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+    except Exception as e:
+        logger.error(f"order notify: не создать бота: {e}")
+        return
+    for admin_id in config.ADMIN_IDS:
+        try:
+            # Кнопки печати свои у каждого: показываем его позиции
+            msg = await notify_bot.send_message(
+                admin_id, summary, parse_mode="HTML",
+                reply_markup=order_assigned_keyboard(order, admin_id, [])
+            )
+            await db.add_order_message(order_id, admin_id, msg.message_id)
+        except Exception as e:
+            logger.error(f"order notify to {admin_id} failed: {e}")
+
+    if main_bot and rounds:
+        try:
+            await _send_order_media(main_bot, notify_bot, rounds, order_number)
+        except Exception as e:
+            logger.error(f"order media failed: {e}")
+    try:
+        await notify_bot.session.close()
+    except Exception:
+        pass
+
+
+async def _fetch_media(main_bot: Bot, file_id: str):
+    """Скачивает файл из основного бота: file_id одного бота не годится для другого,
+    поэтому перезаливаем байтами. -> (bytes, filename) | None"""
+    try:
+        f = await main_bot.get_file(file_id)
+        buf = await main_bot.download_file(f.file_path)
+        name = (f.file_path or "file").split("/")[-1]
+        return buf.read(), name
+    except Exception as e:
+        logger.error(f"order media download failed ({file_id}): {e}")
+        return None
+
+
+async def _send_order_media(main_bot: Bot, notify_bot: Bot, rounds: list, order_number: str = ""):
+    """Фото/файлы из ответов — в админский бот, следом за карточкой заказа."""
+    multi = len(rounds) > 1
+    head = f"№{order_number} · " if order_number else ""
+    for ri, answers in enumerate(rounds, 1):
+        prefix = f"Поз.{ri} · " if multi else ""
+        for i, a in enumerate(answers, 1):
+            file_id = a.get("photo") or a.get("doc")
+            if not file_id:
+                continue
+            fetched = await _fetch_media(main_bot, file_id)
+            if not fetched:
+                continue
+            data, name = fetched
+            caption = f"{head}{prefix}Ответ {i}: {str(a.get('q', ''))[:180]}"
+            for admin_id in config.ADMIN_IDS:
+                try:
+                    file = BufferedInputFile(data, filename=name)
+                    if a.get("photo"):
+                        await notify_bot.send_photo(admin_id, file, caption=caption)
+                    else:
+                        await notify_bot.send_document(admin_id, file, caption=caption)
+                except Exception as e:
+                    logger.error(f"Order media to {admin_id} failed: {e}")
 
 
 async def _deliver_digital(bot: Bot, user_id: int, product: dict):
     """Отправляет файл цифрового товара."""
     if not product.get("file_id"):
-        await bot.send_message(user_id, "Файл недоступен. Напишите в поддержку.")
+        await bot.send_message(user_id, "Файл недоступен. Напиши мне в личку.")
         return
 
     await bot.send_document(
@@ -213,7 +598,7 @@ async def _deliver_infobiz(bot: Bot, user_id: int, product: dict, purchase_num: 
         await bot.send_message(
             user_id,
             f"{'🧪 [ТЕСТ] ' if test_mode else ''}"
-            "Оплата прошла! Доступ к каналу будет выдан в ближайшее время.",
+            "Оплата прошла! Доступ к каналу будет открыт в ближайшее время.",
         )
 
     # Бонус для первых N покупателей — персональный разбор
@@ -231,7 +616,7 @@ async def _deliver_infobiz(bot: Bot, user_id: int, product: dict, purchase_num: 
             f"🎁 <b>Ты попал в число первых {bonus_limit} покупателей!</b>\n\n"
             f"Ты получаешь персональный разбор своего ролика 🎬\n\n"
             f"Пришли ссылку на свой ролик в любое удобное время — "
-            f"Миша посмотрит и напишет тебе разбор в личку."
+            f"я посмотрю и напишу тебе разбор в личку."
         )
         prefix = "🧪 [ТЕСТ] — бонус сработал:\n\n" if test_mode else ""
         await bot.send_message(user_id, prefix + bonus_text, parse_mode="HTML")
@@ -290,5 +675,11 @@ def _back_to_catalog_keyboard():
 def create_app(bot: Bot) -> web.Application:
     app = web.Application()
     app["bot"] = bot
-    app.router.add_post("/prodamus/webhook", handle_webhook)
+    # Основной (цифровой) магазин
+    app.router.add_post("/prodamus/webhook", partial(handle_webhook, secret=config.PRODAMUS_SECRET))
+    # Отдельный магазин для физических товаров (свой секрет; при откате — тот же секрет)
+    app.router.add_post(
+        "/prodamus/webhook/physical",
+        partial(handle_webhook, secret=config.PRODAMUS_SECRET_PHYSICAL),
+    )
     return app

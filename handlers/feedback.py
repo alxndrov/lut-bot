@@ -21,7 +21,7 @@ class FeedbackState(StatesGroup):
 async def cmd_feedback(message: Message, state: FSMContext):
     await state.set_state(FeedbackState.waiting_text)
     await message.answer(
-        "✍️ Напиши свой отзыв или вопрос — я передам его команде.\n\n"
+        "✍️ Напиши свой отзыв или вопрос — я лично прочитаю.\n\n"
         "Отправь /cancel чтобы отменить."
     )
 
@@ -57,5 +57,5 @@ async def receive_feedback(message: Message, state: FSMContext, bot: Bot):
         logger.error(f"Feedback notify bot error: {e}")
 
     await message.answer(
-        "✅ Спасибо! Твой отзыв отправлен. Мы обязательно его прочитаем 🙏"
+        "✅ Спасибо! Я обязательно прочитаю 🙏"
     )

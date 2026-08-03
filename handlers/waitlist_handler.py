@@ -27,7 +27,7 @@ async def cb_waitlist(callback: CallbackQuery, bot: Bot):
     # Check if already in waitlist
     existing = await db.get_waitlist_entry(user.id, product_id)
     if existing:
-        await callback.answer("Вы уже в списке ожидания для этого товара!", show_alert=True)
+        await callback.answer("Ты уже в списке ожидания для этого товара!", show_alert=True)
         return
 
     # Save to DB
@@ -56,8 +56,8 @@ async def cb_waitlist(callback: CallbackQuery, bot: Bot):
 
     # Confirm to user
     await callback.message.answer(
-        f"✅ Вы записаны в список ожидания для <b>{product['name']}</b>!\n\n"
-        "Мы уведомим вас, когда товар появится.",
+        f"✅ Ты в списке ожидания для <b>{product['name']}</b>!\n\n"
+        "Я уведомлю тебя, как только товар появится.",
         parse_mode="HTML",
         reply_markup=back_to_catalog_keyboard(),
     )
