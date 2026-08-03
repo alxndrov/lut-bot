@@ -11,6 +11,7 @@ from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton,
+    BufferedInputFile,
 )
 
 import config
@@ -118,6 +119,12 @@ def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
     else:
         rows.append([InlineKeyboardButton(text="🖨 Распечатал",
                                           callback_data=f"order_printed:{oid}:1")])
+
+    # Наклейка СДЭК — когда печатать больше нечего и пора клеить на коробку.
+    # Без накладной печатать нечего: её заводят вручную в кабинете
+    if order.get("cdek_uuid") and all(p in printed for p in range(1, total + 1)):
+        rows.append([InlineKeyboardButton(text="🏷 Штрихкод СДЭК",
+                                          callback_data=f"order_barcode:{oid}")])
 
     rows += [
         [InlineKeyboardButton(text="📦 Заказ отправил",
@@ -792,6 +799,56 @@ async def cb_order_unprint(callback: CallbackQuery):
             else f"Снята отметка: {_pos_list(sorted(targets))} ↩️")
     await callback.answer(note)
     await _sync_order_messages(callback, await db.get_order(order["id"]))
+
+
+@router.callback_query(F.data.startswith("order_barcode:"))
+async def cb_order_barcode(callback: CallbackQuery):
+    """Присылает наклейку ШК-места из СДЭК — её клеят на коробку.
+
+    Наклейка не меняется, поэтому первый присланный файл запоминаем:
+    жать кнопку будут повторно, а гонять СДЭК ради того же PDF незачем.
+    """
+    order = await _load(callback)
+    if not order:
+        return
+
+    name = (order.get("order_code") or order.get("prodamus_order_id")
+            or f"order-{order['id']}")
+    caption = f"🏷 Штрихкод СДЭК · {name}"
+
+    if order.get("cdek_barcode_file_id"):
+        await callback.answer()
+        await callback.message.answer_document(order["cdek_barcode_file_id"],
+                                               caption=caption)
+        return
+
+    if not order.get("cdek_uuid"):
+        await callback.answer(
+            "У этого заказа нет накладной СДЭК — распечатайте из кабинета.",
+            show_alert=True,
+        )
+        return
+
+    from handlers.delivery import CDEK_CLIENT
+    if not CDEK_CLIENT:
+        await callback.answer("СДЭК не подключён.", show_alert=True)
+        return
+
+    await callback.answer("Готовлю штрихкод, секунд десять…")
+    pdf = await CDEK_CLIENT.get_barcode_pdf(order["cdek_uuid"],
+                                            fmt=config.CDEK_BARCODE_FORMAT)
+    if not pdf:
+        await callback.message.answer(
+            f"⚠️ СДЭК не отдал штрихкод по заказу {name}. "
+            f"Нажмите ещё раз или распечатайте из кабинета СДЭК."
+        )
+        return
+
+    sent = await callback.message.answer_document(
+        BufferedInputFile(pdf, filename=f"{name}.pdf"), caption=caption,
+    )
+    if sent.document:
+        await db.set_order_barcode_file(order["id"], sent.document.file_id)
 
 
 @router.callback_query(F.data.startswith("order_shipped:"))

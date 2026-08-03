@@ -1,4 +1,5 @@
 import time
+import asyncio
 import aiohttp
 import logging
 from typing import Optional
@@ -255,6 +256,72 @@ class CDEKClient:
                 }
         except Exception as e:
             logger.error(f"CDEK get_order_info error: {e}")
+        return None
+
+    async def get_barcode_pdf(self, order_uuid: str, fmt: str = "A7",
+                              copy_count: int = 1,
+                              attempts: int = 10, delay: float = 3.0) -> Optional[bytes]:
+        """Наклейка ШК-места заказа — готовый PDF.
+
+        Форма собирается на стороне СДЭК не мгновенно: сначала уходит
+        заявка, потом её статус опрашивается до SUCCESSFUL, и только тогда
+        появляется ссылка на файл. Ссылка живёт около часа и требует того
+        же токена, поэтому качаем сразу и отдаём байтами.
+
+        fmt: A4, A5, A6 или A7. A7 — одна наклейка 74×105 мм на страницу.
+        Мест в заказе может быть несколько — тогда в PDF столько же страниц.
+        """
+        token = await self.get_token()
+        if not token:
+            return None
+        try:
+            async with aiohttp.ClientSession(
+                headers={"Authorization": f"Bearer {token}"}
+            ) as session:
+                resp = await session.post(
+                    f"{self.base_url}/print/barcodes",
+                    json={
+                        "orders": [{"order_uuid": order_uuid}],
+                        "copy_count": copy_count,
+                        "format": fmt,
+                    },
+                    timeout=aiohttp.ClientTimeout(total=30),
+                )
+                data = await resp.json()
+                form_uuid = (data.get("entity") or {}).get("uuid")
+                if not form_uuid:
+                    logger.error(f"CDEK get_barcode_pdf: нет uuid формы в ответе: {data}")
+                    return None
+
+                for _ in range(attempts):
+                    await asyncio.sleep(delay)
+                    resp = await session.get(
+                        f"{self.base_url}/print/barcodes/{form_uuid}",
+                        timeout=aiohttp.ClientTimeout(total=20),
+                    )
+                    info = await resp.json()
+                    requests_ = info.get("requests") or []
+                    req = next((r for r in requests_ if r.get("type") == "CREATE"),
+                               requests_[0] if requests_ else {})
+                    if req.get("state") == "INVALID":
+                        errs = "; ".join(e.get("message", "")
+                                         for e in (req.get("errors") or []))
+                        logger.error(f"CDEK get_barcode_pdf: форма отклонена — {errs}")
+                        return None
+                    url = (info.get("entity") or {}).get("url")
+                    if req.get("state") == "SUCCESSFUL" and url:
+                        pdf = await session.get(
+                            url, timeout=aiohttp.ClientTimeout(total=60))
+                        if pdf.status != 200:
+                            logger.error(f"CDEK get_barcode_pdf: файл не скачался, "
+                                         f"код {pdf.status}")
+                            return None
+                        return await pdf.read()
+
+                logger.warning(f"CDEK get_barcode_pdf: форма не готова за "
+                               f"{int(attempts * delay)} сек, uuid={form_uuid}")
+        except Exception as e:
+            logger.error(f"CDEK get_barcode_pdf error: {e}")
         return None
 
     async def get_pvz(self, city_code: int, limit: int = 1000) -> list:
