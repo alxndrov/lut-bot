@@ -46,7 +46,7 @@ async def handle_possible_video_link(message: Message, bot: Bot):
     first_name = message.from_user.first_name or "—"
 
     await message.answer(
-        "✅ Ссылка принята! Миша посмотрит ролик и напишет тебе разбор в личку 🎬"
+        "✅ Ссылка принята! Я посмотрю ролик и напишу тебе разбор в личку 🎬"
     )
 
     # Уведомляем всех админов

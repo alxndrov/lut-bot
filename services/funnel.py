@@ -7,6 +7,7 @@ import logging
 
 from aiogram import Bot
 
+import config
 import database as db
 
 logger = logging.getLogger(__name__)
@@ -17,7 +18,13 @@ async def funnel_worker(bot: Bot):
     while True:
         try:
             due = await db.get_due_funnel_messages()
+            held = 0
             for msg in due:
+                # Рекламные сообщения — только с согласия на обработку данных.
+                # Сообщение не отменяем: примет согласие — воронка продолжится.
+                if config.POLICY_REQUIRED and not await db.is_policy_accepted(msg["user_id"]):
+                    held += 1
+                    continue
                 try:
                     await bot.send_message(
                         msg["user_id"],
@@ -34,6 +41,8 @@ async def funnel_worker(bot: Bot):
                         f"funnel: failed to send to user {msg['user_id']}: {e}"
                     )
                     # Не помечаем как sent — попробуем снова через 30 сек
+            if held:
+                logger.info(f"funnel: придержано {held} сообщений — нет согласия")
         except Exception as e:
             logger.error(f"funnel_worker error: {e}")
 

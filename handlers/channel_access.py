@@ -55,6 +55,7 @@ async def handle_join_request(request: ChatJoinRequest):
                 product_id=product["id"],
                 order_type="d",
                 secret=config.PRODAMUS_SECRET,
+                notification_url=config.PRODAMUS_WEBHOOK_URL,
             )
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(

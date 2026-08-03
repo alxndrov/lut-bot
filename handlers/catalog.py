@@ -1,22 +1,26 @@
 from aiogram import Router, F
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 import config
 from keyboards.user import catalog_keyboard, product_keyboard
 import database as db
 from handlers.start import show_catalog
+from handlers.brief_handler import start_order_flow
 
 router = Router()
 
 
 @router.callback_query(F.data == "catalog")
-async def cb_catalog(callback: CallbackQuery):
+async def cb_catalog(callback: CallbackQuery, state: FSMContext):
+    # Возврат в каталог отменяет незавершённое оформление заказа
+    await state.clear()
     await show_catalog(callback, edit=True)
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("product:"))
-async def cb_product(callback: CallbackQuery):
+async def cb_product(callback: CallbackQuery, state: FSMContext):
     product_id = int(callback.data.split(":")[1])
     product = await db.get_product(product_id)
 
@@ -35,10 +39,17 @@ async def cb_product(callback: CallbackQuery):
 
     if category == "waitlist":
         category_label = "📋 Список ожидания"
-        file_status = "📋 Запишитесь и мы сообщим о появлении"
+        file_status = "📋 Запишись — я сообщу тебе, как только появится"
     elif category == "physical":
         category_label = ""
-        file_status = "🚚 Доставка впоследствии будет осуществляться удобным вам способом"
+        # Заказ оформляется прямо здесь — сразу объясняем, что будет дальше
+        if await db.get_product_questions(product_id):
+            file_status = (
+                "🛒 Для оформления заказа ответьте на несколько вопросов ниже — "
+                "это займёт минуту.\nОтвет можно писать текстом или прикреплять фото."
+            )
+        else:
+            file_status = "🛒 Для оформления заказа опишите свой запрос в сообщении ниже 👇"
     elif category == "infobiz":
         category_label = ""
         has_file = bool(product.get("file_id"))
@@ -75,14 +86,18 @@ async def cb_product(callback: CallbackQuery):
     if category == "infobiz" and product.get("counter_visible"):
         counter_line = f"🔥 Уже купили: <b>{purchase_count}</b>\n"
 
+    # Описание можно не заполнять — тогда его блок не выводим вовсе
+    desc = (product.get("description") or "").strip()
+    desc_block = f"<i>{desc}</i>\n\n" if desc and desc != "-" else ""
+
     text = (
         f"<b>{product['name']}</b>\n\n"
-        f"<i>{product['description']}</i>\n\n"
+        f"{desc_block}"
         f"{counter_line}"
         f"💰 Цена: <b>{effective_price} ₽</b>\n"
         f"{label_line}"
         f"{file_status}"
-    )
+    ).rstrip()
 
     kb = product_keyboard(product, user_id=callback.from_user.id,
                           effective_price=effective_price, is_admin=admin)
@@ -95,6 +110,10 @@ async def cb_product(callback: CallbackQuery):
             parse_mode="HTML",
             reply_markup=kb,
         )
+    elif callback.message.photo:
+        # Текущее сообщение — фото (каталог с баннером), edit_text невозможен
+        await callback.message.delete()
+        await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
     else:
         await callback.message.edit_text(
             text,
@@ -103,3 +122,7 @@ async def cb_product(callback: CallbackQuery):
         )
 
     await callback.answer()
+
+    # Физтовар: оформление стартует сразу за карточкой, без промежуточного шага
+    if category == "physical":
+        await start_order_flow(callback.message, state, product)

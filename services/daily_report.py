@@ -19,6 +19,56 @@ MSK = timezone(timedelta(hours=3))
 _SHARES = [("Миша", 0.80), ("Даня", 0.20)]
 
 
+NPD_RATE = 0.04
+
+
+def _money(gross: float, delivery: float, fee_pct: float,
+           expenses: float = 0.0) -> dict:
+    """Раскладка денег по одному заказу или периоду.
+
+    Комиссия Prodamus и НПД считаются от ВСЕЙ принятой суммы: агрегатор берёт
+    процент со всего платежа, а самозанятый платит налог с полного дохода —
+    вычесть комиссию из налоговой базы нельзя, на НПД расходов не бывает.
+    Именно так считает «Мой налог», поэтому цифры сходятся с приложением.
+
+    Доставка — транзит: клиент оплатил её с наценкой на комиссию, а в СДЭК
+    уходит исходный тариф. Вычитаем её последней.
+
+    Расходы (пластик, упаковка) на налог не влияют — на НПД их не вычесть,
+    но из общей прибыли они уходят до дележа: материалы покупаются на двоих.
+    """
+    fee = gross * fee_pct / 100
+    npd = gross * NPD_RATE
+    delivery_out = delivery * (1 - fee_pct / 100)
+    return {
+        "gross": gross,
+        "fee": fee,
+        "npd": npd,
+        "delivery_out": delivery_out,
+        "expenses": expenses,
+        "net": gross - fee - npd - delivery_out - expenses,
+    }
+
+
+async def _expenses_for(date_from: str, date_to: str) -> dict:
+    """Расходы за период: {'total', 'by_category'}. Ошибка не ломает отчёт."""
+    try:
+        return await db.get_expenses_summary(date_from, date_to)
+    except Exception as e:
+        logger.error(f"расходы за {date_from}..{date_to}: {e}")
+        return {"total": 0.0, "by_category": []}
+
+
+def _expense_lines(summary: dict) -> list[str]:
+    """Строки отчёта по расходам — с расшифровкой по статьям."""
+    total = float(summary.get("total") or 0)
+    if not total:
+        return []
+    by = summary.get("by_category") or []
+    detail = ", ".join(f"{r['category']} {float(r['total']):,.0f}" for r in by)
+    return [f"🧾 Расходы: −{total:,.2f} ₽" + (f"\n    <i>{detail}</i>" if detail else "")]
+
+
 async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
     """
     Возвращает {count, gross, net, fee, vat, fee_pct} за диапазон UTC ISO datetime.
@@ -26,7 +76,9 @@ async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
     """
     async with aiosqlite.connect(db.DB_PATH) as conn:
         async with conn.execute(
-            """SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM purchases
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0),
+                      COALESCE(SUM(delivery_amount), 0)
+               FROM purchases
                WHERE datetime(created_at) >= datetime(?)
                  AND datetime(created_at) <= datetime(?)""",
             (dt_from, dt_to),
@@ -34,15 +86,17 @@ async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
             row = await cur.fetchone()
             count = int(row[0] or 0)
             gross = float(row[1] or 0)
+            delivery = float(row[2] or 0)
 
     fee_pct = config.PRODAMUS_FEE_PERCENT
-    fee = gross * fee_pct / 100
-    net = gross - fee
+    m = _money(gross, delivery, fee_pct)
     return {
         "count": count,
         "gross": gross,
-        "net": net,
-        "fee": fee,
+        "delivery": delivery,
+        "net": m["net"],
+        "fee": m["fee"],
+        "npd": m["npd"],
         "vat": 0.0,          # не выделяем отдельно
         "fee_pct": round(fee_pct, 2),
     }
@@ -59,28 +113,33 @@ def _build_report(date_str: str, data: dict) -> str:
             "Продаж за этот день не было."
         )
 
+    delivery = float(data.get("delivery") or 0)
     fee_pct = config.PRODAMUS_FEE_PERCENT
-    total_fee = total_gross * fee_pct / 100
-    total_net = total_gross - total_fee
+    expenses = data.get("expenses") or {"total": 0.0, "by_category": []}
+    money = _money(total_gross, delivery, fee_pct, float(expenses.get("total") or 0))
 
-    npd_tax = total_net * 0.04
-    net_after_tax = total_net - npd_tax
-
-    share_lines = [
-        f"  {name} ({int(pct * 100)}%): <b>{net_after_tax * pct:,.2f} ₽</b>"
+    from services import payout
+    share = data.get("share")
+    share_lines = (payout.format_shares(share) if share else [
+        f"  {name} ({int(pct * 100)}%): <b>{money['net'] * pct:,.2f} ₽</b>"
         for name, pct in _SHARES
-    ]
+    ])
+
+    delivery_lines = [
+        f"🚚 Доставка в СДЭК (транзит): −{money['delivery_out']:,.2f} ₽",
+    ] if delivery else []
+    delivery_lines += _expense_lines(expenses)
 
     lines = [
         f"📊 <b>Отчёт за {date_str}</b>\n",
         f"🛍 Продаж: <b>{count}</b>",
-        f"💰 Выручка брутто: <b>{total_gross:,.2f} ₽</b>",
+        f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
         "",
-        f"🏦 Комиссия Prodamus ({fee_pct}%): <b>−{total_fee:,.2f} ₽</b>",
-        "",
-        f"✅ Итого к получению: <b>{total_net:,.2f} ₽</b>",
-        f"📋 НПД 4% (самозанятость): −{npd_tax:,.2f} ₽",
-        f"💵 После налога: <b>{net_after_tax:,.2f} ₽</b>",
+        f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
+        f"📋 НПД 4% со всей суммы: −{money['npd']:,.2f} ₽",
+        *delivery_lines,
+        "─" * 30,
+        f"💵 Чистыми: <b>{money['net']:,.2f} ₽</b>",
         "",
         "💰 <b>Расчёт:</b>",
     ] + share_lines
@@ -91,6 +150,7 @@ def _build_report(date_str: str, data: dict) -> str:
         for row in by_product:
             name = row["name"] or "Без названия"
             pct = round(float(row["subtotal"]) / total_gross * 100, 1) if total_gross else 0
+
             lines.append(
                 f"  • {name}: {row['cnt']} шт. — {float(row['subtotal']):,.2f} ₽ ({pct}%)"
             )
@@ -107,6 +167,9 @@ async def send_daily_report(bot: Bot):
         logger.error(f"daily_report: DB error: {e}")
         data = {"count": 0, "total": 0, "by_product": []}
 
+    data["expenses"] = await _expenses_for(yesterday, yesterday)
+    from services import payout
+    data["share"] = await payout.split(yesterday, yesterday)
     text = _build_report(yesterday, data)
 
     notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
@@ -149,11 +212,11 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
     if not count:
         return f"📅 <b>Месячный отчёт — {month_label}</b>\n\nПродаж в этом месяце не было."
 
+    delivery = float(data.get("delivery") or 0)
     fee_pct = config.PRODAMUS_FEE_PERCENT
-    total_fee = total_gross * fee_pct / 100
-    total_net = total_gross - total_fee
-    npd_tax = total_net * 0.04
-    net_after_tax = total_net - npd_tax
+    expenses = data.get("expenses") or {"total": 0.0, "by_category": []}
+    money = _money(total_gross, delivery, fee_pct, float(expenses.get("total") or 0))
+    net_after_tax = money["net"]
 
     lines = [
         f"📅 <b>Месячный отчёт — {month_label}</b>",
@@ -171,16 +234,26 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
 
     lines += [
         "",
-        f"💰 Выручка брутто: <b>{total_gross:,.2f} ₽</b>",
-        f"🏦 Комиссия Prodamus ({fee_pct}%): −{total_fee:,.2f} ₽",
-        f"📋 НПД 4%: −{npd_tax:,.2f} ₽",
+        f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
+        f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
+        f"📋 НПД 4% со всей суммы: −{money['npd']:,.2f} ₽",
+    ]
+    if delivery:
+        lines.append(f"🚚 Доставка в СДЭК (транзит): −{money['delivery_out']:,.2f} ₽")
+    lines += _expense_lines(expenses)
+    lines += [
         "─" * 30,
         f"💵 Чистыми: <b>{net_after_tax:,.2f} ₽</b>",
     ]
 
     # Доли
-    for name, pct in _SHARES:
-        lines.append(f"  {name} ({int(pct * 100)}%): <b>{net_after_tax * pct:,.2f} ₽</b>")
+    from services import payout
+    share = data.get("share")
+    if share:
+        lines += payout.format_shares(share)
+    else:
+        for name, pct in _SHARES:
+            lines.append(f"  {name} ({int(pct * 100)}%): <b>{net_after_tax * pct:,.2f} ₽</b>")
 
     # По товарам
     if by_product:
@@ -207,6 +280,12 @@ async def send_monthly_report(bot: Bot):
         logger.error(f"monthly_report: DB error: {e}")
         return
 
+    last_day = calendar.monthrange(year, month)[1]
+    m_from = f"{year:04d}-{month:02d}-01"
+    m_to = f"{year:04d}-{month:02d}-{last_day:02d}"
+    data["expenses"] = await _expenses_for(m_from, m_to)
+    from services import payout
+    data["share"] = await payout.split(m_from, m_to)
     text = _build_monthly_report(year, month, data)
 
     notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)

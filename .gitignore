@@ -5,6 +5,11 @@
 bot.db
 bot_data.db
 *.db
+*.db.bak*
+*.bak
+
+# Служебное
+.claude/
 
 # Python
 __pycache__/
@@ -34,3 +39,5 @@ Thumbs.db
 
 # Логи
 *.log
+
+google-service-account.json

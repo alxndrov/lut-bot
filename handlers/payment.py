@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 @router.callback_query(F.data.startswith("buy:"))
 async def cb_buy(callback: CallbackQuery):
     """Фолбэк — срабатывает только если PRODAMUS_SHOP_URL не задан."""
-    await callback.answer("Оплата временно недоступна. Напишите в поддержку.", show_alert=True)
+    await callback.answer("Оплата временно недоступна. Напиши мне в личку.", show_alert=True)
 
 
 @router.callback_query(F.data.startswith("check_payment:"))
@@ -35,7 +35,7 @@ async def cb_check_payment(callback: CallbackQuery, bot: Bot):
     purchase = await db.get_purchase(user_id, product_id)
     if not purchase:
         await callback.answer(
-            "Оплата не найдена. Если вы только что оплатили — подождите минуту и попробуйте снова.",
+            "Оплата не найдена. Если ты только что оплатил — подожди минуту и попробуй снова.",
             show_alert=True,
         )
         return
@@ -43,7 +43,7 @@ async def cb_check_payment(callback: CallbackQuery, bot: Bot):
     await callback.answer("✅ Оплата найдена! Отправляю товар…")
 
     if not product.get("file_id"):
-        await callback.message.answer("Файл недоступен. Напишите в поддержку.")
+        await callback.message.answer("Файл недоступен. Напиши мне в личку.")
         return
 
     await bot.send_document(
@@ -135,7 +135,7 @@ def _sim_confirm_keyboard(product_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="▶️ Запустить тест", callback_data=f"sim_run:{product_id}")],
         [InlineKeyboardButton(text="🔢 Изменить номер", callback_data=f"sim_success:{product_id}")],
-        [InlineKeyboardButton(text="◀️ Отмена", callback_data="catalog")],
+        [InlineKeyboardButton(text="◀️ Назад к товару", callback_data=f"admin:product:{product_id}")],
     ])
 
 
@@ -234,6 +234,13 @@ async def _run_sim_success(message, bot: Bot, product: dict, user, purchase_num:
                 first_name=user.first_name or "",
                 test_mode=True,
             )
+        elif category == "physical":
+            # Ровно то же сообщение, что уходит после настоящей оплаты:
+            # свой текст товара либо стандартный, с подставленным номером
+            from handlers.prodamus_webhook import DEFAULT_POST_PAYMENT
+            paid_text = product.get("post_payment_text") or DEFAULT_POST_PAYMENT
+            paid_text = paid_text.replace("{order}", await db.peek_order_code())
+            await bot.send_message(user_id, paid_text)
         else:
             await _deliver_digital(bot, user_id, product)
     except Exception as e:
@@ -257,8 +264,10 @@ async def cb_sim_fail(callback: CallbackQuery):
         "🧪 <b>Тест: неуспешная оплата</b>\n\nПокупатель получит это сообщение 👇",
         parse_mode="HTML",
     )
+    # Тот же текст и та же кнопка, что шлёт вебхук при отказе оплаты
+    from handlers.prodamus_webhook import _back_to_catalog_keyboard
     await callback.message.answer(
         "😔 К сожалению, оплата не прошла.\n\n"
         "Попробуйте ещё раз — вернитесь в каталог и нажмите «Купить».",
-        reply_markup=back_to_catalog_keyboard(),
+        reply_markup=_back_to_catalog_keyboard(),
     )

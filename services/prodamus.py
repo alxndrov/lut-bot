@@ -92,11 +92,15 @@ def build_payment_url(
     product_id: int,
     order_type: str = "d",
     secret: str = "",
+    notification_url: str = "",
 ) -> str:
     """
     Строит подписанную платёжную ссылку.
     - Цена зафиксирована подписью signature — покупатель не может её изменить.
     - order_id = '{order_type}_{user_id}_{product_id}' вернётся в вебхуке как order_num.
+    - notification_url → параметр urlNotification: адрес, куда Prodamus пришлёт webhook.
+      Задаётся в самой ссылке (участвует в подписи), поэтому не зависит от настроек
+      кабинета Prodamus и переживает переезд на другой сервер.
     """
     params = {
         "do": "pay",
@@ -105,6 +109,8 @@ def build_payment_url(
         "products[0][price]": str(price),
         "products[0][quantity]": "1",
     }
+    if notification_url:
+        params["urlNotification"] = notification_url
     if secret:
         params["signature"] = make_signature(params, secret)
     return shop_url.rstrip("/") + "/?" + _urlencode(params)
