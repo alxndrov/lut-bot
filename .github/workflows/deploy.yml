@@ -16,13 +16,13 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          # Сначала обновляем код, потом запускаем deploy.sh из репозитория.
-          # Порядок важен: скрипт деплоя сам лежит в репозитории, и на
-          # сервере его может ещё не быть — деплой не должен зависеть
-          # от того, что уже задеплоено.
+          # ВРЕМЕННО: диагностика. /home/<user>/lut-bot на сервере нет —
+          # ищем, где на самом деле живёт бот, потом вернём деплой.
           script: |
-            cd /home/ubuntu/lut-bot
-            git fetch origin main
-            git reset --hard origin/main
-            bash deploy.sh
+            whoami; echo "HOME=$HOME"
+            ls $HOME 2>/dev/null || true
+            systemctl show lut-bot -p FragmentPath -p WorkingDirectory -p ExecStart --no-pager 2>/dev/null || true
+            systemctl --user show lut-bot -p FragmentPath -p WorkingDirectory -p ExecStart --no-pager 2>/dev/null || true
+            ls -d /home/*/lut-bot 2>/dev/null || true
+            sudo -n ls -d /root/lut-bot 2>&1 || true
           script_stop: true
