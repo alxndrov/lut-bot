@@ -392,8 +392,10 @@ async def init_db():
             await db.execute("ALTER TABLE orders ADD COLUMN order_code TEXT DEFAULT NULL")
         except Exception:
             pass
-        # Migration: номер заказа в СДЭК (uuid + трек-номер)
-        for col in ("cdek_uuid TEXT DEFAULT NULL", "cdek_number TEXT DEFAULT NULL"):
+        # Migration: номер заказа в СДЭК (uuid + трек-номер) и telegram-файл
+        # наклейки ШК — чтобы повторное нажатие кнопки не гоняло СДЭК заново
+        for col in ("cdek_uuid TEXT DEFAULT NULL", "cdek_number TEXT DEFAULT NULL",
+                    "cdek_barcode_file_id TEXT DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except Exception:
@@ -1371,6 +1373,16 @@ async def set_order_cdek(order_id: int, cdek_uuid: str, cdek_number: str | None 
         await db.execute(
             "UPDATE orders SET cdek_uuid = ?, cdek_number = ? WHERE id = ?",
             (cdek_uuid, cdek_number, order_id),
+        )
+        await db.commit()
+
+
+async def set_order_barcode_file(order_id: int, file_id: str):
+    """Запоминает присланную наклейку ШК — повторно шлём её же, без СДЭК."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE orders SET cdek_barcode_file_id = ? WHERE id = ?",
+            (file_id, order_id),
         )
         await db.commit()
 

@@ -32,6 +32,9 @@ CDEK_PACKAGE_WIDTH: int = int(os.getenv("CDEK_PACKAGE_WIDTH", "15"))
 CDEK_PACKAGE_HEIGHT: int = int(os.getenv("CDEK_PACKAGE_HEIGHT", "5"))
 # Создавать ли заказ в СДЭК автоматически после оплаты
 CDEK_AUTO_ORDER: bool = CDEK_ENABLED and bool(CDEK_SHIPMENT_POINT)
+# Формат наклейки ШК-места: A4, A5, A6 или A7. A7 (74×105 мм) — под рулон
+# термоэтикеток 75×100 мм. Если ваш принтер под 100×150 мм, ставьте A6.
+CDEK_BARCODE_FORMAT: str = os.getenv("CDEK_BARCODE_FORMAT", "A7").upper()
 WAITLIST_BOT_TOKEN: str = os.getenv("WAITLIST_BOT_TOKEN", "")
 WAITLIST_CHAT_ID: int = int(os.getenv("WAITLIST_CHAT_ID", "0") or "0") or (ADMIN_IDS[0] if ADMIN_IDS else 0)
 
