@@ -327,6 +327,43 @@ async def init_db():
                 await db.execute(f"ALTER TABLE users ADD COLUMN {col}")
             except Exception:
                 pass
+        # Заказы (физтовары) — для кнопки «Взял заказ» и подписи исполнителя.
+        # Таблица создаётся ДО миграций ниже: они добавляют ей колонки, а на
+        # чистой базе добавлять было бы нечему — ALTER молча проглатывался бы
+        # except'ом, и заказы остались бы без половины полей.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS orders (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                product_id INTEGER,
+                prodamus_order_id TEXT,
+                summary TEXT,
+                assignee_id INTEGER DEFAULT NULL,
+                assignee_name TEXT DEFAULT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Копии уведомления о заказе в чатах админов (чтобы синхронно проставлять исполнителя)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS order_messages (
+                order_id INTEGER NOT NULL,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL
+            )
+        """)
+        # Migration: структурированные ответы заказа (для гибкой аналитики по цвету/текстуре/…)
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN rounds_json TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        # Migration: отметка об отправке заказа
+        for col in ("shipped_at TEXT DEFAULT NULL",
+                    "shipped_by_id INTEGER DEFAULT NULL",
+                    "shipped_by_name TEXT DEFAULT NULL"):
+            try:
+                await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
+            except Exception:
+                pass
         # Migration: когда клиенту сообщили, что посылка приехала в ПВЗ
         try:
             await db.execute("ALTER TABLE orders ADD COLUMN arrived_notified_at TIMESTAMP DEFAULT NULL")
@@ -415,40 +452,6 @@ async def init_db():
             await db.execute("ALTER TABLE products ADD COLUMN post_payment_text TEXT DEFAULT NULL")
         except Exception:
             pass
-        # Заказы (физтовары) — для кнопки «Взял заказ» и подписи исполнителя
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS orders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER,
-                product_id INTEGER,
-                prodamus_order_id TEXT,
-                summary TEXT,
-                assignee_id INTEGER DEFAULT NULL,
-                assignee_name TEXT DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        # Копии уведомления о заказе в чатах админов (чтобы синхронно проставлять исполнителя)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS order_messages (
-                order_id INTEGER NOT NULL,
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL
-            )
-        """)
-        # Migration: структурированные ответы заказа (для гибкой аналитики по цвету/текстуре/…)
-        try:
-            await db.execute("ALTER TABLE orders ADD COLUMN rounds_json TEXT DEFAULT NULL")
-        except Exception:
-            pass
-        # Migration: отметка об отправке заказа
-        for col in ("shipped_at TEXT DEFAULT NULL",
-                    "shipped_by_id INTEGER DEFAULT NULL",
-                    "shipped_by_name TEXT DEFAULT NULL"):
-            try:
-                await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
-            except Exception:
-                pass
         await db.commit()
 
 
