@@ -4,19 +4,19 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:        # кнопка «запустить вручную» во вкладке Actions
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy via SSH
+      - name: Обновить бота на сервере
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          script: |
-            cd ~/lut-bot
-            git pull
-            export XDG_RUNTIME_DIR=/run/user/$(id -u)
-            systemctl --user restart lut-bot
+          # Ключ на сервере привязан к deploy.sh: ничего другого им не запустить,
+          # поэтому команду выбирает сам сервер, а не мы отсюда
+          script: deploy
+          script_stop: true
