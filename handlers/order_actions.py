@@ -818,8 +818,11 @@ async def cb_order_barcode(callback: CallbackQuery):
 
     if order.get("cdek_barcode_file_id"):
         await callback.answer()
-        await callback.message.answer_document(order["cdek_barcode_file_id"],
-                                               caption=caption)
+        # Ответом на карточку заказа — чтобы наклейка была привязана к нему
+        # в чате так же, как пункты списка /myorders
+        await callback.message.reply_document(order["cdek_barcode_file_id"],
+                                              caption=caption,
+                                              allow_sending_without_reply=True)
         return
 
     if not order.get("cdek_uuid"):
@@ -844,8 +847,9 @@ async def cb_order_barcode(callback: CallbackQuery):
         )
         return
 
-    sent = await callback.message.answer_document(
+    sent = await callback.message.reply_document(
         BufferedInputFile(pdf, filename=f"{name}.pdf"), caption=caption,
+        allow_sending_without_reply=True,
     )
     if sent.document:
         await db.set_order_barcode_file(order["id"], sent.document.file_id)
