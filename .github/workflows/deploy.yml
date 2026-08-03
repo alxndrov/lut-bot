@@ -16,7 +16,8 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          # Ключ на сервере привязан к deploy.sh: ничего другого им не запустить,
-          # поэтому команду выбирает сам сервер, а не мы отсюда
-          script: deploy
+          # Скрипт по полному пути: форс-команда `deploy` в authorized_keys
+          # на сервере не настроена, и голая команда падала с
+          # «command not found». Путь тот же, что внутри deploy.sh.
+          script: bash /home/ubuntu/lut-bot/deploy.sh
           script_stop: true
