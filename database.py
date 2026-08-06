@@ -1714,6 +1714,19 @@ async def clear_order_shipped(order_id: int):
         await db.commit()
 
 
+def period_bounds(dt_from: str, dt_to: str) -> tuple[str, str]:
+    """Голую дату дотягиваем до полных суток.
+
+    Иначе '2026-08-05' с обеих сторон означает полночь, и всё, что было
+    в течение дня, в выборку не попадает.
+    """
+    if len(dt_from) == 10:
+        dt_from += " 00:00:00"
+    if len(dt_to) == 10:
+        dt_to += " 23:59:59"
+    return dt_from, dt_to
+
+
 async def get_period_revenue(dt_from: str, dt_to: str) -> dict:
     """Выручка за период по линейкам: физтовары, цифра и доставка отдельно.
 
@@ -1723,6 +1736,7 @@ async def get_period_revenue(dt_from: str, dt_to: str) -> dict:
     Доставка идёт транзитом в СДЭК, поэтому в стоимость товара не входит
     и в проценты партнёру не попадает.
     """
+    dt_from, dt_to = period_bounds(dt_from, dt_to)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1799,6 +1813,7 @@ async def delete_expense(expense_id: int) -> bool:
 
 async def get_expenses(date_from: str, date_to: str) -> list[dict]:
     """Расходы за период (даты 'ГГГГ-ММ-ДД' включительно), свежие сверху."""
+    date_from, date_to = period_bounds(date_from, date_to)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1811,6 +1826,7 @@ async def get_expenses(date_from: str, date_to: str) -> list[dict]:
 
 async def get_expenses_summary(date_from: str, date_to: str) -> dict:
     """{'total': сумма, 'by_category': [{'category','total','cnt'}]}."""
+    date_from, date_to = period_bounds(date_from, date_to)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(

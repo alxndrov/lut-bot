@@ -60,13 +60,7 @@ async def _print_credits(orders: list[dict]) -> dict[int, int]:
     return credits
 
 
-def _bounds(dt_from: str, dt_to: str) -> tuple[str, str]:
-    """Голые даты дотягиваем до полных суток, иначе хвост дня потеряется."""
-    if len(dt_from) == 10:
-        dt_from += " 00:00:00"
-    if len(dt_to) == 10:
-        dt_to += " 23:59:59"
-    return dt_from, dt_to
+_bounds = db.period_bounds      # правило одно на все выборки за период
 
 
 async def _orders_in_period(dt_from: str, dt_to: str) -> list[dict]:
