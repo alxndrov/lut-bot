@@ -258,7 +258,7 @@ class CDEKClient:
             logger.error(f"CDEK get_order_info error: {e}")
         return None
 
-    async def get_barcode_pdf(self, order_uuid: str, fmt: str = "A7",
+    async def get_barcode_pdf(self, order_uuid: str, fmt: str = "A6",
                               copy_count: int = 1,
                               attempts: int = 10, delay: float = 3.0) -> Optional[bytes]:
         """Наклейка ШК-места заказа — готовый PDF.
@@ -268,7 +268,7 @@ class CDEKClient:
         появляется ссылка на файл. Ссылка живёт около часа и требует того
         же токена, поэтому качаем сразу и отдаём байтами.
 
-        fmt: A4, A5, A6 или A7. A7 — одна наклейка 74×105 мм на страницу.
+        fmt: A4, A5, A6 или A7. A6 — одна наклейка 105×148 мм на страницу.
         Мест в заказе может быть несколько — тогда в PDF столько же страниц.
         """
         token = await self.get_token()
