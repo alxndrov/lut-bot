@@ -203,10 +203,14 @@ async def cmd_expenses(message: Message):
                      f"{e['amount']:,.2f} ₽{tail}{who}")
 
     await message.answer("\n".join(lines), parse_mode="HTML",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                             InlineKeyboardButton(text="🗑 Удалить расход",
-                                                  callback_data="exp_dellist")
-                         ]]))
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="🗑 Удалить расход",
+                                                   callback_data="exp_dellist")],
+                             # Счёт СДЭК живёт отдельно: доставку оплачивает
+                             # клиент, в расходы на двоих она не попадает
+                             [InlineKeyboardButton(text="🚚 Счёт СДЭК",
+                                                   callback_data="cdek_show")],
+                         ]))
 
 
 @router.callback_query(F.data == "exp_dellist")
