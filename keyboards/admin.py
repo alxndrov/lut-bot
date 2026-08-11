@@ -8,7 +8,6 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🛍 Каталог", callback_data="admin:menu_catalog")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="admin:stats")],
         [InlineKeyboardButton(text="📣 Маркетинг", callback_data="admin:menu_marketing")],
-        [InlineKeyboardButton(text="💰 Финансы", callback_data="admin:menu_finance")],
     ])
 
 
@@ -84,12 +83,6 @@ def marketing_submenu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def finance_submenu_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💳 Финансы", callback_data="admin:finance")],
-        [InlineKeyboardButton(text="🤝 Взаиморасчёт", callback_data="admin:debt")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu")],
-    ])
 
 
 def funnels_keyboard(funnels: list[dict]) -> InlineKeyboardMarkup:
@@ -146,24 +139,6 @@ def _delay_label(seconds: int) -> str:
     if seconds < 86400:
         return f"{seconds // 3600} ч"
     return f"{seconds // 86400} д"
-
-
-def finance_keyboard(has_unsettled: bool = True) -> InlineKeyboardMarkup:
-    buttons = []
-    if has_unsettled:
-        buttons.append([InlineKeyboardButton(text="✅ Мы в расчёте", callback_data="admin:settle")])
-    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:finance")])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu_finance")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def debt_keyboard(has_debt: bool = True) -> InlineKeyboardMarkup:
-    buttons = []
-    if has_debt:
-        buttons.append([InlineKeyboardButton(text="✅ Расчёт произведён", callback_data="admin:settle_debt")])
-    buttons.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:debt")])
-    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu_finance")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def admin_products_keyboard(products: list[dict]) -> InlineKeyboardMarkup:
@@ -456,12 +431,6 @@ def admin_back_keyboard() -> InlineKeyboardMarkup:
 def product_back_keyboard(product_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="◀️ Назад к товару", callback_data=f"admin:product:{product_id}")],
-    ])
-
-
-def finance_back_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu_finance")],
     ])
 
 
