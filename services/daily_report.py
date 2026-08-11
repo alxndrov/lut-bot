@@ -66,6 +66,27 @@ async def _expenses_for(date_from: str, date_to: str) -> dict:
         return {"total": 0.0, "by_category": []}
 
 
+async def _cdek_balance_line() -> str:
+    """Остаток на счёте СДЭК. Пока счётом не пользуются — строки нет.
+
+    Это не расход отчёта: доставка уже вычтена транзитом. Строка нужна,
+    чтобы не проспать пополнение — на пустом счёте накладные не создаются.
+    """
+    try:
+        a = await db.get_cdek_account()
+    except Exception as e:
+        logger.error(f"счёт СДЭК: {e}")
+        return ""
+    if not a["entries"]:
+        return ""
+    line = f"🚚 На счету СДЭК: <b>{a['balance']:,.2f} ₽</b>".replace("-", "−")
+    if a["balance"] < 0:
+        return line + "  ⚠️ минус"
+    if a["balance"] < config.CDEK_LOW_BALANCE:
+        return line + "  ⚠️ пора пополнить"
+    return line
+
+
 def _expense_lines(summary: dict) -> list[str]:
     """Строки отчёта по расходам — с расшифровкой по статьям."""
     total = float(summary.get("total") or 0)
@@ -186,6 +207,9 @@ async def send_daily_report(bot: Bot):
     from services import payout
     data["share"] = await payout.split(yesterday, yesterday)
     text = _build_report(yesterday, data)
+    cdek = await _cdek_balance_line()
+    if cdek:
+        text += f"\n\n{cdek}"
 
     notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
     try:
@@ -304,6 +328,9 @@ async def send_monthly_report(bot: Bot):
     from services import payout
     data["share"] = await payout.split(m_from, m_to)
     text = _build_monthly_report(year, month, data)
+    cdek = await _cdek_balance_line()
+    if cdek:
+        text += f"\n\n{cdek}"
 
     notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
     try:
