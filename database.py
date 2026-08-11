@@ -1903,13 +1903,24 @@ async def get_expenses_summary(date_from: str, date_to: str) -> dict:
 
 # Накладная набегает на счёт, когда заказ заведён в СДЭК (cdek_uuid) либо
 # отмечен отправленным — накладную могли создать руками в кабинете.
-# Сумма — счёт СДЭК по заказу (тариф + страховка + НДС) из purchases.
 _CDEK_ACCRUED_FROM = """
                FROM orders o
                LEFT JOIN purchases pu
                       ON pu.telegram_payment_id = o.prodamus_order_id
                WHERE (o.cdek_uuid IS NOT NULL OR o.shipped_at IS NOT NULL)
-                 AND COALESCE(pu.delivery_cost, 0) > 0"""
+                 AND (COALESCE(pu.delivery_cost, 0) > 0
+                      OR COALESCE(pu.delivery_amount, 0) > 0)"""
+
+# Две суммы, как в отчётах: по новым заказам счёт СДЭК сохранён
+# (тариф + страховка + НДС), у заказов до августа 2026 колонки не было —
+# для них в СДЭК уходило то, что осталось от delivery_amount после
+# комиссии Prodamus. Сводит их services.payout.delivery_out.
+_CDEK_ACCRUED_SUMS = """
+                      COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) > 0
+                                        THEN pu.delivery_cost ELSE 0 END), 0) AS cost,
+                      COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
+                                        THEN COALESCE(pu.delivery_amount, 0)
+                                        ELSE 0 END), 0) AS legacy"""
 
 # Дата, на которую набежала накладная: отправка, а пока её нет — дата
 # заказа. Накладная заводится сразу после оплаты, счёт идёт с того же дня.
@@ -1963,11 +1974,27 @@ async def get_cdek_payments_summary(date_from: str | None = None,
             return dict(await cur.fetchone())
 
 
+def _cdek_total(row: dict) -> dict:
+    """Дополняет строку выборки итогом: точные счета + оценка по старым."""
+    import config
+    from services.payout import delivery_out
+
+    row = dict(row)
+    row["cost"] = float(row["cost"])
+    row["legacy"] = float(row["legacy"])
+    row["total"] = delivery_out(row["cost"], row["legacy"],
+                                config.PRODAMUS_FEE_PERCENT)
+    return row
+
+
 async def get_cdek_accrued(date_from: str | None = None,
                            date_to: str | None = None) -> dict:
-    """Набежало по накладным: {'total': сумма, 'count': отправок}."""
-    sql = (f"SELECT COUNT(*) AS count, COALESCE(SUM(pu.delivery_cost), 0) AS total"
-           f"{_CDEK_ACCRUED_FROM}")
+    """Набежало по накладным: {'total', 'count', 'cost', 'legacy'}.
+
+    legacy — часть суммы, посчитанная по старой формуле: у заказов до
+    августа 2026 счёт СДЭК не сохранялся, и точной цифры для них нет.
+    """
+    sql = (f"SELECT COUNT(*) AS count,{_CDEK_ACCRUED_SUMS}{_CDEK_ACCRUED_FROM}")
     params: tuple = ()
     if date_from and date_to:
         date_from, date_to = period_bounds(date_from, date_to)
@@ -1977,21 +2004,20 @@ async def get_cdek_accrued(date_from: str | None = None,
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
-            return dict(await cur.fetchone())
+            return _cdek_total(await cur.fetchone())
 
 
 async def get_cdek_accrued_by_month(limit: int = 6) -> list[dict]:
-    """Накладные по месяцам: [{'month': 'ГГГГ-ММ', 'total', 'count'}]."""
+    """Накладные по месяцам: [{'month': 'ГГГГ-ММ', 'total', 'count', …}]."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             f"SELECT strftime('%Y-%m', {_CDEK_ACCRUED_DATE}) AS month, "
-            f"COUNT(*) AS count, COALESCE(SUM(pu.delivery_cost), 0) AS total"
-            f"{_CDEK_ACCRUED_FROM}"
+            f"COUNT(*) AS count,{_CDEK_ACCRUED_SUMS}{_CDEK_ACCRUED_FROM}"
             f" GROUP BY month ORDER BY month DESC LIMIT ?",
             (int(limit),),
         ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+            return [_cdek_total(r) for r in await cur.fetchall()]
 
 
 async def get_cdek_account(date_from: str | None = None,
@@ -2009,6 +2035,8 @@ async def get_cdek_account(date_from: str | None = None,
     account = {
         "accrued": float(accrued["total"]),
         "accrued_count": int(accrued["count"]),
+        # часть суммы посчитана по старой формуле — точного счёта нет
+        "accrued_legacy": float(accrued["legacy"]),
         "paid": float(paid["total"]),
         "paid_count": int(paid["count"]),
         "due": float(accrued["total"]) - float(paid["total"]),

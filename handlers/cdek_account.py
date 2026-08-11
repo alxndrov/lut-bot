@@ -115,6 +115,14 @@ def _account_text(a: dict) -> str:
     if a["period_paid"]:
         lines.append(f"📅 За {month} оплачено: <b>{_rub(a['period_paid'])} ₽</b>")
 
+    if a["accrued_legacy"]:
+        lines.append("\n⚠️ По отправкам до августа 2026 счёт СДЭК не сохранялся — "
+                     "они посчитаны по той же формуле, что и в отчётах, "
+                     "то есть примерно.")
+    if not a["paid_count"] and a["due"] > 0:
+        lines.append("\n💡 Если счета за эти отправки уже оплачены — нажмите "
+                     "«Оплатил счёт» и закройте остаток одной кнопкой.")
+
     lines.append("\n<i>Доставку оплачивает клиент, в дележ прибыли она "
                  "уже входит транзитом — эти деньги на расчёт не влияют.</i>")
     return "\n".join(lines)
@@ -288,8 +296,12 @@ async def cb_cdek_log(callback: CallbackQuery):
         lines.append("\n<b>Набежало по накладным:</b>")
         for row in by_month:
             year, month = (row["month"] or "____-__").split("-")
-            lines.append(f"  {month}.{year}: <b>{_rub(float(row['total']))} ₽</b> "
+            about = " ≈" if row["legacy"] else ""
+            lines.append(f"  {month}.{year}:{about} <b>{_rub(float(row['total']))} ₽</b> "
                          f"({_shipments(int(row['count']))})")
+        if any(r["legacy"] for r in by_month):
+            lines.append("  <i>≈ — счёт СДЭК за те месяцы не сохранялся, "
+                         "сумма расчётная</i>")
 
     rows = [[InlineKeyboardButton(
         text=f"🗑 {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
