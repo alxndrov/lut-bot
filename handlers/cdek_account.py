@@ -65,10 +65,13 @@ def _account_keyboard(due: float = 0.0) -> InlineKeyboardMarkup:
     ])
 
 
-async def _account_text() -> str:
+async def _account() -> dict:
+    """Состояние по СДЭК вместе с суммами за текущий месяц."""
+    return await db.get_cdek_account(*_month_bounds())
+
+
+def _account_text(a: dict) -> str:
     """Главный экран: сколько отложено на СДЭК и из чего это сложилось."""
-    date_from, date_to = _month_bounds()
-    a = await db.get_cdek_account(date_from, date_to)
     month = datetime.now(MSK).strftime("%m.%Y")
 
     if not a["accrued_count"] and not a["paid_count"]:
@@ -118,8 +121,8 @@ async def _account_text() -> str:
 
 
 async def _show_account(message: Message, edit: bool = False):
-    text = await _account_text()
-    a = await db.get_cdek_account()
+    a = await _account()
+    text = _account_text(a)
     markup = _account_keyboard(a["due"])
     if edit:
         try:
