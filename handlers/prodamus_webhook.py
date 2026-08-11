@@ -186,6 +186,7 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             user_id=user_id, username=username, product_id=product_id,
             telegram_payment_id=prodamus_order_id, amount=amount,
             delivery_amount=int(pending.get("delivery_amount") or 0),
+            delivery_cost=float(pending.get("delivery_cost") or 0),
             quantity=len([r for r in rounds if r]) or 1,
         )
 
