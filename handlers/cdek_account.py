@@ -46,8 +46,8 @@ def _shipments(n: int) -> str:
     return f"{n} {_plural(n, 'отправка', 'отправки', 'отправок')}"
 
 
-def _bills(n: int) -> str:
-    return f"{n} {_plural(n, 'счёт', 'счёта', 'счетов')}"
+def _payments(n: int) -> str:
+    return f"{n} {_plural(n, 'платёж', 'платежа', 'платежей')}"
 
 
 def _rub(value: float) -> str:
@@ -55,11 +55,10 @@ def _rub(value: float) -> str:
     return f"{value:,.2f}".replace("-", "−")
 
 
-def _account_keyboard(due: float = 0.0) -> InlineKeyboardMarkup:
-    """Кнопка оплаты сразу с суммой — обычно счёт закрывают целиком."""
-    pay = "✅ Оплатил счёт" if due <= 0 else f"✅ Оплатил счёт — {_rub(due)} ₽"
+def _account_keyboard() -> InlineKeyboardMarkup:
+    """Счёт от СДЭК приходит частями, поэтому сумму всегда спрашиваем."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=pay, callback_data="cdek_pay")],
+        [InlineKeyboardButton(text="💸 Внёс оплату", callback_data="cdek_pay")],
         [InlineKeyboardButton(text="📋 История", callback_data="cdek_log")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="cdek_show")],
     ])
@@ -102,8 +101,8 @@ def _account_text(a: dict) -> str:
         "",
         f"📦 Всего по накладным: <b>{_rub(a['accrued'])} ₽</b>"
         + (f" · {_shipments(a['accrued_count'])}" if a["accrued_count"] else ""),
-        f"✅ Оплачено счетов: <b>{_rub(a['paid'])} ₽</b>"
-        + (f" · {_bills(a['paid_count'])}" if a["paid_count"] else ""),
+        f"✅ Внесено оплат: <b>{_rub(a['paid'])} ₽</b>"
+        + (f" · {_payments(a['paid_count'])}" if a["paid_count"] else ""),
         "",
     ]
 
@@ -116,12 +115,13 @@ def _account_text(a: dict) -> str:
         lines.append(f"📅 За {month} оплачено: <b>{_rub(a['period_paid'])} ₽</b>")
 
     if a["accrued_legacy"]:
-        lines.append("\n⚠️ По отправкам до августа 2026 счёт СДЭК не сохранялся — "
-                     "они посчитаны по той же формуле, что и в отчётах, "
-                     "то есть примерно.")
+        lines.append("\n⚠️ По части отправок точной суммы счёта нет — бот начал "
+                     "сохранять её недавно. Они посчитаны по той же формуле, "
+                     "что и в отчётах, то есть примерно.")
     if not a["paid_count"] and a["due"] > 0:
-        lines.append("\n💡 Если счета за эти отправки уже оплачены — нажмите "
-                     "«Оплатил счёт» и закройте остаток одной кнопкой.")
+        lines.append("\n💡 Если счета за эти отправки уже оплачены — внесите их: "
+                     "сумму можно закрыть одним платежом или по частям, "
+                     "как приходили счета.")
 
     lines.append("\n<i>Доставку оплачивает клиент, в дележ прибыли она "
                  "уже входит транзитом — эти деньги на расчёт не влияют.</i>")
@@ -131,7 +131,7 @@ def _account_text(a: dict) -> str:
 async def _show_account(message: Message, edit: bool = False):
     a = await _account()
     text = _account_text(a)
-    markup = _account_keyboard(a["due"])
+    markup = _account_keyboard()
     if edit:
         try:
             await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
@@ -178,7 +178,7 @@ async def cb_cdek_cancel(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "cdek_pay")
 async def cb_cdek_pay(callback: CallbackQuery, state: FSMContext):
-    """Оплата счёта: весь остаток одной кнопкой или своя сумма."""
+    """Сколько внесли. Счёт от СДЭК обычно закрывает не всё сразу."""
     if not await _admin_only(callback):
         return
     a = await db.get_cdek_account()
@@ -187,18 +187,18 @@ async def cb_cdek_pay(callback: CallbackQuery, state: FSMContext):
 
     rows = []
     if a["due"] > 0:
+        # Изредка счёт закрывает всё — тогда не заставляем набирать сумму
         rows.append([InlineKeyboardButton(
-            text=f"✅ Весь остаток — {_rub(a['due'])} ₽",
+            text=f"Закрыть весь остаток — {_rub(a['due'])} ₽",
             callback_data="cdek_pay_all")])
     rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="cdek_cancel")])
 
-    hint = (f"Сейчас не оплачено <b>{_rub(a['due'])} ₽</b>.\n\n"
-            if a["due"] > 0 else "")
+    hint = (f"Всего отложено <b>{_rub(a['due'])} ₽</b> — "
+            f"внесённая сумма спишется из них.\n\n" if a["due"] > 0 else "")
     await callback.message.answer(
-        f"✅ <b>Оплата счёта СДЭК</b>\n\n{hint}"
-        "Нажмите кнопку, если оплатили весь остаток, "
-        "или напишите сумму счёта — можно с комментарием:\n"
-        "<code>3500 счёт за июль</code>",
+        f"💸 <b>Сколько внесли?</b>\n\n{hint}"
+        "Напишите сумму из счёта СДЭК, можно с комментарием:\n"
+        "<code>2350 счёт за июль</code>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
@@ -220,7 +220,7 @@ async def _save_payment(message: Message, amount: float, comment: str,
 
     tail = f"\n💬 {comment}" if comment else ""
     await message.answer(
-        f"✅ Записал оплату счёта\n\n🚚 <b>{_rub(amount)} ₽</b>{tail}\n\n{rest}",
+        f"✅ Записал оплату\n\n💸 Внесено: <b>{_rub(amount)} ₽</b>{tail}\n\n{rest}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🗑 Удалить",
@@ -284,14 +284,14 @@ async def cb_cdek_log(callback: CallbackQuery):
 
     lines = ["📋 <b>История расчётов со СДЭК</b>"]
     if payments:
-        lines.append("\n<b>Оплаченные счета:</b>")
+        lines.append("\n<b>Внесённые оплаты:</b>")
         for p in payments:
             comment = f" — {p['comment']}" if p.get("comment") else ""
             who = f" · {p['user_name']}" if p.get("user_name") else ""
-            lines.append(f"  {_msk(p['paid_at'])} ✅ "
+            lines.append(f"  {_msk(p['paid_at'])} 💸 "
                          f"{_rub(float(p['amount']))} ₽{comment}{who}")
     else:
-        lines.append("\nСчета ещё не оплачивали.")
+        lines.append("\nОплат ещё не вносили.")
     if by_month:
         lines.append("\n<b>Набежало по накладным:</b>")
         for row in by_month:
@@ -300,8 +300,7 @@ async def cb_cdek_log(callback: CallbackQuery):
             lines.append(f"  {month}.{year}:{about} <b>{_rub(float(row['total']))} ₽</b> "
                          f"({_shipments(int(row['count']))})")
         if any(r["legacy"] for r in by_month):
-            lines.append("  <i>≈ — счёт СДЭК за те месяцы не сохранялся, "
-                         "сумма расчётная</i>")
+            lines.append("  <i>≈ — точной суммы счёта нет, посчитано формулой</i>")
 
     rows = [[InlineKeyboardButton(
         text=f"🗑 {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
