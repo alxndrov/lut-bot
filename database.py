@@ -4,6 +4,15 @@ from typing import Optional
 
 DB_PATH = "bot.db"
 
+# Две суммы по доставке для отчётов: сколько реально ушло в СДЭК по новым
+# заказам и сколько «принято за доставку» по старым, где счёт не сохранялся.
+# Вторые пересчитываются формулой — см. services.payout.delivery_out.
+_DELIVERY_COST_SQL = """
+                      COALESCE(SUM(delivery_cost), 0) AS delivery_cost,
+                      COALESCE(SUM(CASE WHEN COALESCE(delivery_cost, 0) = 0
+                                        THEN delivery_amount ELSE 0 END), 0)
+                          AS delivery_legacy"""
+
 
 def question_photos(q: dict) -> list:
     """Список file_id фотографий вопроса (поддержка нескольких фото / альбома)."""
@@ -270,6 +279,15 @@ async def init_db():
             await db.execute("ALTER TABLE pending_deliveries ADD COLUMN delivery_amount INTEGER DEFAULT 0")
         except Exception:
             pass
+        # Migration: сколько из доставки реально уходит в СДЭК (тариф +
+        # страховка + НДС). У заказов до августа 2026 колонка пустая —
+        # отчёты для них выводят транзит по старой формуле
+        for table in ("purchases", "pending_deliveries"):
+            try:
+                await db.execute(
+                    f"ALTER TABLE {table} ADD COLUMN delivery_cost REAL DEFAULT 0")
+            except Exception:
+                pass
         # Migration: получатель для накладной СДЭК — ФИО и телефон
         for col in ("recipient_name TEXT DEFAULT NULL",
                     "recipient_phone TEXT DEFAULT NULL",
@@ -1172,20 +1190,22 @@ async def check_channel_access(user_id: int, channel_id: str) -> bool:
 
 async def add_purchase(user_id: int, username: Optional[str], product_id: int,
                        telegram_payment_id: str, amount: int,
-                       delivery_amount: int = 0, quantity: int = 1) -> int:
+                       delivery_amount: int = 0, quantity: int = 1,
+                       delivery_cost: float = 0.0) -> int:
     """Добавляет покупку и возвращает порядковый номер покупки этого товара (1-based).
 
     amount — вся сумма платежа, delivery_amount — сколько внутри неё доставка,
+    delivery_cost — сколько из доставки уйдёт в СДЭК по счёту,
     quantity — сколько единиц товара в этой покупке.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO purchases
                    (user_id, username, product_id, telegram_payment_id, amount,
-                    delivery_amount, quantity)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    delivery_amount, quantity, delivery_cost)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, username, product_id, telegram_payment_id, amount,
-             delivery_amount, max(1, quantity)),
+             delivery_amount, max(1, quantity), delivery_cost),
         )
         await db.commit()
         async with db.execute(
@@ -1317,17 +1337,21 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                                 recipient_name: str | None = None,
                                 recipient_phone: str | None = None,
                                 pvz_code: str | None = None,
-                                delivery_amount: int = 0):
+                                delivery_amount: int = 0,
+                                delivery_cost: float = 0.0):
     """Сохраняет детали будущего заказа (адрес + ответы опроса + сумму) до оплаты.
 
     ФИО, телефон и код ПВЗ нужны, чтобы после оплаты завести заказ в СДЭК.
+    delivery_amount — сколько взяли с клиента, delivery_cost — сколько из
+    этого уйдёт в СДЭК по счёту (тариф + страховка + НДС).
     """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO pending_deliveries
                    (user_id, product_id, delivery_str, survey_json, amount,
-                    recipient_name, recipient_phone, pvz_code, delivery_amount)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    recipient_name, recipient_phone, pvz_code, delivery_amount,
+                    delivery_cost)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, product_id) DO UPDATE SET
                    delivery_str = excluded.delivery_str,
                    survey_json = excluded.survey_json,
@@ -1336,9 +1360,11 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                    recipient_phone = excluded.recipient_phone,
                    pvz_code = excluded.pvz_code,
                    delivery_amount = excluded.delivery_amount,
+                   delivery_cost = excluded.delivery_cost,
                    created_at = CURRENT_TIMESTAMP""",
             (user_id, product_id, delivery_str, survey_json, amount,
-             recipient_name, recipient_phone, pvz_code, delivery_amount),
+             recipient_name, recipient_phone, pvz_code, delivery_amount,
+             delivery_cost),
         )
         await db.commit()
 
@@ -1742,6 +1768,10 @@ async def get_period_revenue(dt_from: str, dt_to: str) -> dict:
         async with db.execute(
             """SELECT COUNT(*) AS count,
                       COALESCE(SUM(pu.delivery_amount), 0) AS delivery,
+                      COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost,
+                      COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
+                                        THEN pu.delivery_amount ELSE 0 END), 0)
+                          AS delivery_legacy,
                       COALESCE(SUM(CASE WHEN pr.category = 'physical'
                                         THEN pu.amount - COALESCE(pu.delivery_amount, 0)
                                         ELSE 0 END), 0) AS physical,
@@ -2005,12 +2035,13 @@ async def get_monthly_earnings_breakdown(months: int = 12) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT
+            f"""SELECT
                 strftime('%Y', created_at) AS year,
                 strftime('%m', created_at) AS month,
                 COUNT(*) AS count,
                 COALESCE(SUM(amount), 0) AS total,
-                COALESCE(SUM(delivery_amount), 0) AS delivery
+                COALESCE(SUM(delivery_amount), 0) AS delivery,
+                {_DELIVERY_COST_SQL}
                FROM purchases
                GROUP BY year, month
                ORDER BY year DESC, month DESC
@@ -2036,8 +2067,9 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
         db.row_factory = aiosqlite.Row
 
         async with db.execute(
-            """SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total,
-                      COALESCE(SUM(delivery_amount), 0) as delivery
+            f"""SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total,
+                      COALESCE(SUM(delivery_amount), 0) as delivery,
+                      {_DELIVERY_COST_SQL}
                FROM purchases
                WHERE DATE(created_at) BETWEEN ? AND ?""",
             (month_from, month_to),
@@ -2046,6 +2078,8 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
             count = int(row["cnt"])
             total = float(row["total"])
             delivery = float(row["delivery"])
+            delivery_cost = float(row["delivery_cost"])
+            delivery_legacy = float(row["delivery_legacy"])
 
         async with db.execute(
             """SELECT pr.name, COALESCE(SUM(pu.quantity), COUNT(*)) as cnt,
@@ -2093,6 +2127,8 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
         "count": count,
         "total": total,
         "delivery": delivery,
+        "delivery_cost": delivery_cost,
+        "delivery_legacy": delivery_legacy,
         "by_product": by_product,
         "new_users": new_users,
         "avg_order": avg_order,
@@ -2108,8 +2144,9 @@ async def get_purchases_report(date_str: str) -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total,
-                      COALESCE(SUM(delivery_amount), 0) as delivery
+            f"""SELECT COUNT(*) as cnt, COALESCE(SUM(amount), 0) as total,
+                      COALESCE(SUM(delivery_amount), 0) as delivery,
+                      {_DELIVERY_COST_SQL}
                FROM purchases
                WHERE DATE(created_at) = ?""",
             (date_str,),
@@ -2118,6 +2155,8 @@ async def get_purchases_report(date_str: str) -> dict:
             count = row["cnt"]
             total = row["total"]
             delivery = row["delivery"]
+            delivery_cost = float(row["delivery_cost"])
+            delivery_legacy = float(row["delivery_legacy"])
 
         async with db.execute(
             """SELECT pr.name, COALESCE(SUM(pu.quantity), COUNT(*)) as cnt,
@@ -2133,6 +2172,7 @@ async def get_purchases_report(date_str: str) -> dict:
             by_product = [dict(r) for r in rows]
 
     return {"count": count, "total": total, "delivery": delivery,
+            "delivery_cost": delivery_cost, "delivery_legacy": delivery_legacy,
             "by_product": by_product}
 
 

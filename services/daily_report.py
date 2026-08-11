@@ -19,11 +19,12 @@ MSK = timezone(timedelta(hours=3))
 _SHARES = [("Миша", 0.80), ("Даня", 0.20)]
 
 
-NPD_RATE = 0.04
+NPD_RATE = config.NPD_PERCENT / 100
 
 
 def _money(gross: float, delivery: float, fee_pct: float,
-           expenses: float = 0.0) -> dict:
+           expenses: float = 0.0, delivery_cost: float = 0.0,
+           delivery_legacy: float | None = None) -> dict:
     """Раскладка денег по одному заказу или периоду.
 
     Комиссия Prodamus и НПД считаются от ВСЕЙ принятой суммы: агрегатор берёт
@@ -31,22 +32,28 @@ def _money(gross: float, delivery: float, fee_pct: float,
     вычесть комиссию из налоговой базы нельзя, на НПД расходов не бывает.
     Именно так считает «Мой налог», поэтому цифры сходятся с приложением.
 
-    Доставка — транзит: клиент оплатил её с наценкой на комиссию, а в СДЭК
-    уходит исходный тариф. Вычитаем её последней.
+    Доставка — транзит: клиент оплатил её с наценкой на удержания, а в СДЭК
+    уходит счёт (тариф + страховка + НДС). Вычитаем её последней.
 
     Расходы (пластик, упаковка) на налог не влияют — на НПД их не вычесть,
     но из общей прибыли они уходят до дележа: материалы покупаются на двоих.
     """
+    from services.payout import delivery_out as _delivery_out
+
     fee = gross * fee_pct / 100
     npd = gross * NPD_RATE
-    delivery_out = delivery * (1 - fee_pct / 100)
+    out = _delivery_out(
+        delivery_cost,
+        delivery if delivery_legacy is None else delivery_legacy,
+        fee_pct,
+    )
     return {
         "gross": gross,
         "fee": fee,
         "npd": npd,
-        "delivery_out": delivery_out,
+        "delivery_out": out,
         "expenses": expenses,
-        "net": gross - fee - npd - delivery_out - expenses,
+        "net": gross - fee - npd - out - expenses,
     }
 
 
@@ -76,8 +83,9 @@ async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
     """
     async with aiosqlite.connect(db.DB_PATH) as conn:
         async with conn.execute(
-            """SELECT COUNT(*), COALESCE(SUM(amount), 0),
-                      COALESCE(SUM(delivery_amount), 0)
+            f"""SELECT COUNT(*), COALESCE(SUM(amount), 0),
+                      COALESCE(SUM(delivery_amount), 0),
+                      {db._DELIVERY_COST_SQL}
                FROM purchases
                WHERE datetime(created_at) >= datetime(?)
                  AND datetime(created_at) <= datetime(?)""",
@@ -87,13 +95,18 @@ async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
             count = int(row[0] or 0)
             gross = float(row[1] or 0)
             delivery = float(row[2] or 0)
+            delivery_cost = float(row[3] or 0)
+            delivery_legacy = float(row[4] or 0)
 
     fee_pct = config.PRODAMUS_FEE_PERCENT
-    m = _money(gross, delivery, fee_pct)
+    m = _money(gross, delivery, fee_pct,
+               delivery_cost=delivery_cost, delivery_legacy=delivery_legacy)
     return {
         "count": count,
         "gross": gross,
         "delivery": delivery,
+        "delivery_cost": delivery_cost,
+        "delivery_legacy": delivery_legacy,
         "net": m["net"],
         "fee": m["fee"],
         "npd": m["npd"],
@@ -116,7 +129,9 @@ def _build_report(date_str: str, data: dict) -> str:
     delivery = float(data.get("delivery") or 0)
     fee_pct = config.PRODAMUS_FEE_PERCENT
     expenses = data.get("expenses") or {"total": 0.0, "by_category": []}
-    money = _money(total_gross, delivery, fee_pct, float(expenses.get("total") or 0))
+    money = _money(total_gross, delivery, fee_pct, float(expenses.get("total") or 0),
+                   delivery_cost=float(data.get("delivery_cost") or 0),
+                   delivery_legacy=float(data.get("delivery_legacy") or delivery))
 
     from services import payout
     share = data.get("share")
@@ -136,7 +151,7 @@ def _build_report(date_str: str, data: dict) -> str:
         f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
         "",
         f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
-        f"📋 НПД 4% со всей суммы: −{money['npd']:,.2f} ₽",
+        f"📋 НПД {config.NPD_PERCENT:g}% со всей суммы: −{money['npd']:,.2f} ₽",
         *delivery_lines,
         "─" * 30,
         f"💵 Чистыми: <b>{money['net']:,.2f} ₽</b>",
@@ -215,7 +230,9 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
     delivery = float(data.get("delivery") or 0)
     fee_pct = config.PRODAMUS_FEE_PERCENT
     expenses = data.get("expenses") or {"total": 0.0, "by_category": []}
-    money = _money(total_gross, delivery, fee_pct, float(expenses.get("total") or 0))
+    money = _money(total_gross, delivery, fee_pct, float(expenses.get("total") or 0),
+                   delivery_cost=float(data.get("delivery_cost") or 0),
+                   delivery_legacy=float(data.get("delivery_legacy") or delivery))
     net_after_tax = money["net"]
 
     lines = [
@@ -236,7 +253,7 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
         "",
         f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
         f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
-        f"📋 НПД 4% со всей суммы: −{money['npd']:,.2f} ₽",
+        f"📋 НПД {config.NPD_PERCENT:g}% со всей суммы: −{money['npd']:,.2f} ₽",
     ]
     if delivery:
         lines.append(f"🚚 Доставка в СДЭК (транзит): −{money['delivery_out']:,.2f} ₽")

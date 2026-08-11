@@ -35,6 +35,17 @@ CDEK_AUTO_ORDER: bool = CDEK_ENABLED and bool(CDEK_SHIPMENT_POINT)
 # Формат наклейки ШК-места: A4, A5, A6 или A7. A6 (105×148 мм) — под рулон
 # термоэтикеток 100×150 мм. Если ваш принтер под 75×100 мм, ставьте A7.
 CDEK_BARCODE_FORMAT: str = os.getenv("CDEK_BARCODE_FORMAT", "A6").upper()
+# НДС в счёте СДЭК. Калькулятор тарифов отдаёт цену БЕЗ него, а в акт он
+# попадает — без этой поправки каждая посылка обходится нам на 7% дороже,
+# чем мы взяли с клиента.
+CDEK_VAT_PERCENT: float = float(os.getenv("CDEK_VAT_PERCENT", "7"))
+# «Дополнительный сбор за объявленную стоимость» — страховка, процент от
+# цены товара, которую мы объявляем в накладной. В калькулятор не входит.
+CDEK_INSURANCE_PERCENT: float = float(os.getenv("CDEK_INSURANCE_PERCENT", "0.75"))
+# НПД самозанятого. Платится со ВСЕЙ принятой суммы, включая доставку,
+# поэтому цену доставки для клиента поднимаем и на него тоже.
+NPD_PERCENT: float = float(os.getenv("NPD_PERCENT", "4"))
+
 WAITLIST_BOT_TOKEN: str = os.getenv("WAITLIST_BOT_TOKEN", "")
 WAITLIST_CHAT_ID: int = int(os.getenv("WAITLIST_CHAT_ID", "0") or "0") or (ADMIN_IDS[0] if ADMIN_IDS else 0)
 

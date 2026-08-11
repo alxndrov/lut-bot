@@ -17,7 +17,19 @@ import database as db
 
 logger = logging.getLogger(__name__)
 
-NPD_RATE = 0.04
+NPD_RATE = config.NPD_PERCENT / 100
+
+
+def delivery_out(delivery_cost: float, delivery_legacy: float,
+                 fee_pct: float) -> float:
+    """Сколько из принятой за доставку суммы реально ушло в СДЭК.
+
+    По новым заказам счёт СДЭК (тариф + страховка + НДС) сохранён в
+    purchases.delivery_cost — берём его как есть. У заказов до августа 2026
+    колонки нет: там наценка покрывала только комиссию Prodamus, значит в
+    СДЭК уходило ровно то, что осталось от delivery_amount после неё.
+    """
+    return delivery_cost + delivery_legacy * (1 - fee_pct / 100)
 
 
 async def _print_credits(orders: list[dict]) -> dict[int, int]:
@@ -90,8 +102,9 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
 
     fee = gross * fee_rate
     npd = gross * NPD_RATE
-    delivery_out = delivery * (1 - fee_rate)
-    net = gross - fee - npd - delivery_out - expenses
+    out = delivery_out(float(goods["delivery_cost"]),
+                       float(goods["delivery_legacy"]), fee_pct)
+    net = gross - fee - npd - out - expenses
 
     credits = await _print_credits(await _orders_in_period(dt_from, dt_to))
     printed = credits.get(config.PARTNER_ID, 0)
@@ -107,7 +120,7 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
         "gross": gross, "physical": physical, "digital": digital,
         "delivery": delivery, "count": int(goods["count"]),
         "fee": fee, "fee_pct": fee_pct, "npd": npd,
-        "delivery_out": delivery_out, "expenses": expenses,
+        "delivery_out": out, "expenses": expenses,
         "net": net,
         "printed": printed, "print_credits": credits,
         "partner": partner, "owner": net - partner,

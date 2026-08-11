@@ -1761,7 +1761,11 @@ async def cb_stats_monthly(callback: CallbackQuery):
         spent = (await _expenses_for(
             f"{y:04d}-{mth:02d}-01",
             f"{y:04d}-{mth:02d}-{_cal.monthrange(y, mth)[1]:02d}"))["total"]
-        net_after_tax = _money(gross, delivery, fee_pct, spent)["net"]
+        net_after_tax = _money(
+            gross, delivery, fee_pct, spent,
+            delivery_cost=float(r["delivery_cost"] or 0),
+            delivery_legacy=float(r["delivery_legacy"] or 0),
+        )["net"]
         misha = net_after_tax * 0.80
         danya = net_after_tax * 0.20
 
@@ -1786,7 +1790,7 @@ async def cb_stats_monthly(callback: CallbackQuery):
 # --- Финансы (Prodamus) ---
 
 _SHARES = [("Миша", 0.80), ("Даня", 0.20)]
-_NPD_RATE = 0.04
+_NPD_RATE = config.NPD_PERCENT / 100
 
 
 def _fmt_period_with_shares(label: str, s: dict) -> str:
@@ -1801,7 +1805,7 @@ def _fmt_period_with_shares(label: str, s: dict) -> str:
         f"{label}\n"
         f"  Продаж: <b>{s['count']}</b>  |  Брутто: <b>{s['gross']:,.2f} ₽</b>\n"
         f"  Комиссия ({s['fee_pct']}%): −{s['fee']:,.2f} ₽\n"
-        f"  НПД 4%: −{s['net'] * _NPD_RATE:,.2f} ₽\n"
+        f"  НПД {config.NPD_PERCENT:g}%: −{s['net'] * _NPD_RATE:,.2f} ₽\n"
         f"  Чистыми: <b>{net_after_tax:,.2f} ₽</b>\n"
         f"  {shares}\n"
     )
@@ -1830,7 +1834,7 @@ def _fmt_payout_block(s: dict, label: str) -> str:
     return (
         f"{'─' * 30}\n"
         f"💰 <b>К получению</b> ({label}): <b>{s['net']:,.2f} ₽</b>\n"
-        f"📋 НПД 4% (самозанятость): −{tax:,.2f} ₽\n"
+        f"📋 НПД {config.NPD_PERCENT:g}% (самозанятость): −{tax:,.2f} ₽\n"
         f"💵 После налога: <b>{net_after_tax:,.2f} ₽</b>\n"
         f"{shares}\n"
         f"{'─' * 30}"
@@ -1954,7 +1958,7 @@ async def cb_settle(callback: CallbackQuery):
         f"Брутто: <b>{s['gross']:,.2f} ₽</b>\n"
         f"Комиссия: −{s['fee']:,.2f} ₽\n"
         f"Получено: <b>{s['net']:,.2f} ₽</b>\n"
-        f"НПД 4%: −{tax:,.2f} ₽\n"
+        f"НПД {config.NPD_PERCENT:g}%: −{tax:,.2f} ₽\n"
         f"После налога: <b>{net_after_tax:,.2f} ₽</b>"
     )
     await callback.message.edit_text(
@@ -1990,7 +1994,7 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
     if s["delivery"]:
         lines.append(f"  доставка: {s['delivery']:,.2f} ₽")
     lines.append(f"Комиссия {s['fee_pct']}%: −{s['fee']:,.2f} ₽")
-    lines.append(f"НПД 4%: −{s['npd']:,.2f} ₽")
+    lines.append(f"НПД {config.NPD_PERCENT:g}%: −{s['npd']:,.2f} ₽")
     if s["delivery"]:
         lines.append(f"Доставка в СДЭК: −{s['delivery_out']:,.2f} ₽")
     if s["expenses"]:

@@ -91,17 +91,33 @@ def _yandex_maps_url(pvz: dict) -> str:
             f"&whatshere%5Bpoint%5D={point}&whatshere%5Bzoom%5D=18")
 
 
-def _with_fee(amount: int) -> int:
-    """Добавляет к стоимости доставки комиссию Prodamus, округляя вверх до рубля.
+def _cdek_cost(tariff: int, declared_value: int) -> float:
+    """Во сколько посылка обойдётся НАМ по счёту СДЭК.
 
-    Считаем «в обратную сторону»: чтобы после удержания комиссии на руках
-    осталась ровно стоимость СДЭК, клиент должен заплатить amount/(1-ставка).
-    Клиенту про комиссию не сообщаем — он видит просто цену доставки.
+    Калькулятор отдаёт голый тариф без НДС, а в акт попадают ещё две строки:
+    страховка («доп. сбор за объявленную стоимость» — процент от цены, которую
+    мы объявляем в накладной) и НДС сверху на всё вместе.
     """
-    fee = config.PRODAMUS_FEE_PERCENT
-    if amount <= 0 or fee <= 0 or fee >= 100:
-        return amount
-    return math.ceil(amount / (1 - fee / 100))
+    if tariff <= 0:
+        return 0.0
+    insurance = max(0, declared_value) * config.CDEK_INSURANCE_PERCENT / 100
+    return (tariff + insurance) * (1 + config.CDEK_VAT_PERCENT / 100)
+
+
+def _with_fee(amount: float) -> int:
+    """Поднимает цену так, чтобы удержания с платежа съели наценку, а не нас.
+
+    Считаем «в обратную сторону»: с каждого платежа уходят комиссия Prodamus
+    и НПД, оба — процентом от всей суммы. Чтобы после них на руках осталась
+    ровно стоимость СДЭК, клиент должен заплатить amount/(1-ставки).
+    Клиенту про эту кухню не рассказываем — он видит просто цену доставки.
+    """
+    keep = 1 - (config.PRODAMUS_FEE_PERCENT + config.NPD_PERCENT) / 100
+    if amount <= 0:
+        return 0
+    if keep <= 0:
+        return math.ceil(amount)
+    return math.ceil(amount / keep)
 
 
 def _fmt_distance(km: float | None) -> str:
@@ -476,6 +492,9 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
     product = await db.get_product(data["product_id"])
 
     delivery_cost = 0
+    # Сколько из этой суммы реально уйдёт в СДЭК — нужно отчётам, чтобы
+    # не выводить транзит формулой и не расходиться со счётом
+    delivery_real = 0.0
     delivery_info = ""
     calc_failed = False
     city = data.get("city", "")
@@ -494,10 +513,17 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
             places=max(1, data.get("quantity", 1)),
         )
         if result:
-            delivery_cost = _with_fee(result["cost"])
+            # Объявленная ценность — то же, что уходит в накладную: цена
+            # товара за все места. От неё СДЭК считает страховку.
+            declared = product["price"] * max(1, data.get("quantity", 1))
+            delivery_real = _cdek_cost(result["cost"], declared)
+            delivery_cost = _with_fee(delivery_real)
             logger.info(
-                f"CDEK: тариф {result['cost']} ₽ -> к оплате {delivery_cost} ₽ "
-                f"(комиссия Prodamus {config.PRODAMUS_FEE_PERCENT}%)"
+                f"CDEK: тариф {result['cost']} ₽ + страховка "
+                f"{config.CDEK_INSURANCE_PERCENT}% от {declared} ₽ + НДС "
+                f"{config.CDEK_VAT_PERCENT}% = {delivery_real:.2f} ₽ по счёту -> "
+                f"к оплате {delivery_cost} ₽ (Prodamus {config.PRODAMUS_FEE_PERCENT}% "
+                f"+ НПД {config.NPD_PERCENT}%)"
             )
             days_min, days_max = result.get("days_min"), result.get("days_max")
             if days_min and days_max:
@@ -557,6 +583,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
         recipient_phone=phone or None,
         pvz_code=pvz_code or None,
         delivery_amount=delivery_cost,
+        delivery_cost=round(delivery_real, 2),
     )
 
     if not config.PRODAMUS_SHOP_URL_PHYSICAL:
