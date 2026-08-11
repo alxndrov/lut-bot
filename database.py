@@ -320,21 +320,28 @@ async def init_db():
                 "INSERT OR IGNORE INTO expense_categories (name, position) VALUES (?, ?)",
                 (name, pos),
             )
-        # Счёт СДЭК: ручные движения по договору. Плюс — занесли денег,
-        # минус — списание, которого бот не видит (накладная из личного
-        # кабинета, возврат, доплата). Списания по нашим накладным сюда
-        # НЕ пишутся: они считаются из заказов, иначе посылка ушла бы
-        # со счёта дважды.
+        # Оплаченные счета СДЭК. СДЭК работает постоплатой: сначала возит,
+        # потом выставляет счёт — его и записываем. Стоимость самих
+        # накладных сюда НЕ пишется, она считается из заказов.
         await db.execute("""
-            CREATE TABLE IF NOT EXISTS cdek_account (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                amount     REAL NOT NULL,
-                comment    TEXT,
-                user_id    INTEGER,
-                user_name  TEXT
+            CREATE TABLE IF NOT EXISTS cdek_payments (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                paid_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                amount    REAL NOT NULL,
+                comment   TEXT,
+                user_id   INTEGER,
+                user_name TEXT
             )
         """)
+        # Таблица первой версии счёта — она была под предоплату, а СДЭК
+        # так не работает. Пустую убираем, чтобы не путалась; если в ней
+        # что-то есть, оставляем как есть и разбираемся руками.
+        try:
+            async with db.execute("SELECT COUNT(*) FROM cdek_account") as cur:
+                if (await cur.fetchone())[0] == 0:
+                    await db.execute("DROP TABLE cdek_account")
+        except Exception:
+            pass
         # Отметки печати по каждому исполнителю: в разделённом заказе каждый
         # отмечает свою часть, и заказ считается распечатанным, когда отметились все
         await db.execute("""
@@ -1886,32 +1893,35 @@ async def get_expenses_summary(date_from: str, date_to: str) -> dict:
 
 # ── Счёт СДЭК ──────────────────────────────────────────────────────────
 #
-# Деньги на договоре СДЭК живут отдельно от прибыли: доставку оплачивает
-# клиент, и в дележ она уже входит транзитом (services.payout.delivery_out).
-# Здесь считается только сам счёт — сколько на него занесли, сколько с него
-# списалось по накладным и что осталось.
+# СДЭК работает постоплатой: мы отправляем посылки, а счёт за них приходит
+# потом. Деньги на него клиент уже отдал вместе с заказом — доставка идёт
+# транзитом и в дележ прибыли входит отдельно (services.payout.delivery_out).
+#
+# Отсюда две величины: сколько набежало по накладным и сколько мы уже
+# отдали СДЭК по счетам. Разница — отложенные деньги, на которые придёт
+# следующий счёт.
 
-# Накладная снимает деньги со счёта, когда заказ заведён в СДЭК (cdek_uuid)
-# либо отмечен отправленным — накладную могли создать руками в кабинете.
+# Накладная набегает на счёт, когда заказ заведён в СДЭК (cdek_uuid) либо
+# отмечен отправленным — накладную могли создать руками в кабинете.
 # Сумма — счёт СДЭК по заказу (тариф + страховка + НДС) из purchases.
-_CDEK_SPENT_FROM = """
+_CDEK_ACCRUED_FROM = """
                FROM orders o
                LEFT JOIN purchases pu
                       ON pu.telegram_payment_id = o.prodamus_order_id
                WHERE (o.cdek_uuid IS NOT NULL OR o.shipped_at IS NOT NULL)
                  AND COALESCE(pu.delivery_cost, 0) > 0"""
 
-# Дата списания: отправка, а пока её нет — дата заказа. Накладная заводится
-# сразу после оплаты, деньги за неё уходят тогда же.
-_CDEK_SPENT_DATE = "COALESCE(o.shipped_at, o.created_at)"
+# Дата, на которую набежала накладная: отправка, а пока её нет — дата
+# заказа. Накладная заводится сразу после оплаты, счёт идёт с того же дня.
+_CDEK_ACCRUED_DATE = "COALESCE(o.shipped_at, o.created_at)"
 
 
-async def add_cdek_entry(amount: float, comment: str = "",
-                         user_id: int = 0, user_name: str = "") -> int:
-    """Движение по счёту СДЭК: плюс — пополнение, минус — списание."""
+async def add_cdek_payment(amount: float, comment: str = "",
+                           user_id: int = 0, user_name: str = "") -> int:
+    """Оплаченный счёт СДЭК: сколько денег мы им отдали."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO cdek_account (amount, comment, user_id, user_name) "
+            "INSERT INTO cdek_payments (amount, comment, user_id, user_name) "
             "VALUES (?, ?, ?, ?)",
             (float(amount), (comment or "").strip() or None, user_id, user_name),
         )
@@ -1919,34 +1929,33 @@ async def add_cdek_entry(amount: float, comment: str = "",
         return cur.lastrowid
 
 
-async def delete_cdek_entry(entry_id: int) -> bool:
+async def delete_cdek_payment(payment_id: int) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("DELETE FROM cdek_account WHERE id = ?", (entry_id,))
+        cur = await db.execute("DELETE FROM cdek_payments WHERE id = ?", (payment_id,))
         await db.commit()
         return cur.rowcount > 0
 
 
-async def get_cdek_entries(limit: int = 20) -> list[dict]:
-    """Ручные движения по счёту, свежие сверху."""
+async def get_cdek_payments(limit: int = 20) -> list[dict]:
+    """Оплаченные счета, свежие сверху."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM cdek_account ORDER BY created_at DESC, id DESC LIMIT ?",
+            "SELECT * FROM cdek_payments ORDER BY paid_at DESC, id DESC LIMIT ?",
             (int(limit),),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def get_cdek_entries_summary(date_from: str | None = None,
-                                   date_to: str | None = None) -> dict:
-    """Ручные движения: {'topups': внесено, 'writeoffs': списано, 'count'}."""
-    sql = ("SELECT COALESCE(SUM(CASE WHEN amount > 0 THEN amount END), 0) AS topups, "
-           "COALESCE(SUM(CASE WHEN amount < 0 THEN -amount END), 0) AS writeoffs, "
-           "COUNT(*) AS count FROM cdek_account")
+async def get_cdek_payments_summary(date_from: str | None = None,
+                                    date_to: str | None = None) -> dict:
+    """Оплаченные счета: {'total': сумма, 'count': сколько счетов}."""
+    sql = ("SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count "
+           "FROM cdek_payments")
     params: tuple = ()
     if date_from and date_to:
         date_from, date_to = period_bounds(date_from, date_to)
-        sql += " WHERE datetime(created_at) BETWEEN datetime(?) AND datetime(?)"
+        sql += " WHERE datetime(paid_at) BETWEEN datetime(?) AND datetime(?)"
         params = (date_from, date_to)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -1954,15 +1963,15 @@ async def get_cdek_entries_summary(date_from: str | None = None,
             return dict(await cur.fetchone())
 
 
-async def get_cdek_spent_by_orders(date_from: str | None = None,
-                                   date_to: str | None = None) -> dict:
-    """Списания по накладным: {'total': сумма, 'count': отправок}."""
+async def get_cdek_accrued(date_from: str | None = None,
+                           date_to: str | None = None) -> dict:
+    """Набежало по накладным: {'total': сумма, 'count': отправок}."""
     sql = (f"SELECT COUNT(*) AS count, COALESCE(SUM(pu.delivery_cost), 0) AS total"
-           f"{_CDEK_SPENT_FROM}")
+           f"{_CDEK_ACCRUED_FROM}")
     params: tuple = ()
     if date_from and date_to:
         date_from, date_to = period_bounds(date_from, date_to)
-        sql += (f" AND datetime({_CDEK_SPENT_DATE}) "
+        sql += (f" AND datetime({_CDEK_ACCRUED_DATE}) "
                 f"BETWEEN datetime(?) AND datetime(?)")
         params = (date_from, date_to)
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1971,14 +1980,14 @@ async def get_cdek_spent_by_orders(date_from: str | None = None,
             return dict(await cur.fetchone())
 
 
-async def get_cdek_spent_by_month(limit: int = 6) -> list[dict]:
-    """Траты на СДЭК по месяцам: [{'month': 'ГГГГ-ММ', 'total', 'count'}]."""
+async def get_cdek_accrued_by_month(limit: int = 6) -> list[dict]:
+    """Накладные по месяцам: [{'month': 'ГГГГ-ММ', 'total', 'count'}]."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            f"SELECT strftime('%Y-%m', {_CDEK_SPENT_DATE}) AS month, "
+            f"SELECT strftime('%Y-%m', {_CDEK_ACCRUED_DATE}) AS month, "
             f"COUNT(*) AS count, COALESCE(SUM(pu.delivery_cost), 0) AS total"
-            f"{_CDEK_SPENT_FROM}"
+            f"{_CDEK_ACCRUED_FROM}"
             f" GROUP BY month ORDER BY month DESC LIMIT ?",
             (int(limit),),
         ) as cur:
@@ -1987,33 +1996,29 @@ async def get_cdek_spent_by_month(limit: int = 6) -> list[dict]:
 
 async def get_cdek_account(date_from: str | None = None,
                            date_to: str | None = None) -> dict:
-    """Состояние счёта СДЭК.
+    """Состояние по СДЭК.
 
-    Остаток = внесено − (списано по накладным + списано вручную). Если
-    переданы границы периода, те же суммы за него добавляются с префиксом
-    period_ — для строки «в этом месяце ушло столько-то».
+    due = набежало по накладным − оплачено счетов. Это отложенные деньги:
+    столько мы должны СДЭК и столько придёт в следующем счёте. Минус
+    означает переплату — оплатили вперёд.
+
+    С границами периода те же суммы за него добавляются с префиксом period_.
     """
-    manual = await get_cdek_entries_summary()
-    orders = await get_cdek_spent_by_orders()
-    topups = float(manual["topups"])
-    manual_spent = float(manual["writeoffs"])
-    orders_spent = float(orders["total"])
-    spent = orders_spent + manual_spent
+    accrued = await get_cdek_accrued()
+    paid = await get_cdek_payments_summary()
     account = {
-        "topups": topups,
-        "manual_spent": manual_spent,
-        "orders_spent": orders_spent,
-        "orders_count": int(orders["count"]),
-        "spent": spent,
-        "balance": topups - spent,
-        "entries": int(manual["count"]),
+        "accrued": float(accrued["total"]),
+        "accrued_count": int(accrued["count"]),
+        "paid": float(paid["total"]),
+        "paid_count": int(paid["count"]),
+        "due": float(accrued["total"]) - float(paid["total"]),
     }
     if date_from and date_to:
-        p_manual = await get_cdek_entries_summary(date_from, date_to)
-        p_orders = await get_cdek_spent_by_orders(date_from, date_to)
-        account["period_topups"] = float(p_manual["topups"])
-        account["period_spent"] = float(p_orders["total"]) + float(p_manual["writeoffs"])
-        account["period_orders_count"] = int(p_orders["count"])
+        p_accrued = await get_cdek_accrued(date_from, date_to)
+        p_paid = await get_cdek_payments_summary(date_from, date_to)
+        account["period_accrued"] = float(p_accrued["total"])
+        account["period_accrued_count"] = int(p_accrued["count"])
+        account["period_paid"] = float(p_paid["total"])
     return account
 
 

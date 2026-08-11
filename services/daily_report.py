@@ -67,24 +67,23 @@ async def _expenses_for(date_from: str, date_to: str) -> dict:
 
 
 async def _cdek_balance_line() -> str:
-    """Остаток на счёте СДЭК. Пока счётом не пользуются — строки нет.
+    """Сколько отложено на СДЭК — счёт за эти накладные ещё придёт.
 
     Это не расход отчёта: доставка уже вычтена транзитом. Строка нужна,
-    чтобы не проспать пополнение — на пустом счёте накладные не создаются.
+    чтобы деньги на счёт СДЭК не разошлись на что-то другое.
     """
     try:
         a = await db.get_cdek_account()
     except Exception as e:
         logger.error(f"счёт СДЭК: {e}")
         return ""
-    if not a["entries"]:
+    if not a["accrued_count"] and not a["paid_count"]:
         return ""
-    line = f"🚚 На счету СДЭК: <b>{a['balance']:,.2f} ₽</b>".replace("-", "−")
-    if a["balance"] < 0:
-        return line + "  ⚠️ минус"
-    if a["balance"] < config.CDEK_LOW_BALANCE:
-        return line + "  ⚠️ пора пополнить"
-    return line
+    if a["due"] > 0:
+        return f"🚚 Отложено на СДЭК: <b>{a['due']:,.2f} ₽</b> (счёт ещё придёт)"
+    if a["due"] < 0:
+        return f"🚚 СДЭК оплачен вперёд: <b>{-a['due']:,.2f} ₽</b>"
+    return "🚚 Со СДЭК в расчёте"
 
 
 def _expense_lines(summary: dict) -> list[str]:

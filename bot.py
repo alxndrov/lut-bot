@@ -84,7 +84,7 @@ async def main():
                 BotCommand(command="refresh", description="Обновить карточки заказов"),
                 BotCommand(command="expense", description="Внести расход"),
                 BotCommand(command="expenses", description="Расходы за месяц"),
-                BotCommand(command="cdek", description="Счёт СДЭК: остаток и траты"),
+                BotCommand(command="cdek", description="СДЭК: сколько отложено на счёт"),
             ])
         except Exception as e:
             logging.warning(f"Не удалось задать команды админского бота: {e}")
