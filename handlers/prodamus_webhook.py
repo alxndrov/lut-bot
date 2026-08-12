@@ -494,7 +494,7 @@ def _format_order(first_name: str, username_str: str, product_name: str, amount:
     head = "🧾 <b>Новый заказ</b>"
     if order_number:
         head += f" <code>{order_number}</code>"
-    lines = [head]
+    lines = ["<b>ТАЦ!</b> 🪿", head]
     if routing_line:
         lines.append(routing_line)
     lines += ["", f"👤 {first_name} {username_str}"]
