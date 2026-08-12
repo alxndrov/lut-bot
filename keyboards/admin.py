@@ -167,9 +167,11 @@ def admin_product_keyboard(product: dict, purchase_count: int = 0) -> InlineKeyb
     pid = product["id"]
     category = product.get("category", "digital")
 
-    # Статусы для превью на кнопках
-    file_ok = "✅" if product.get("file_id") else "⚠️"
+    # Статусы для превью на кнопках. У физтовара нет цифрового файла —
+    # он едет посылкой, а не отправляется документом — в превью не упоминаем
     photo_ok = "✅" if product.get("photo_id") else "—"
+    media_preview = (f"{photo_ok} фото" if category == "physical" else
+                     f"{'✅' if product.get('file_id') else '⚠️'} файл · {photo_ok} фото")
     if product["active"]:
         toggle_icon = "👁"
         toggle_text = "Виден в каталоге"
@@ -181,7 +183,7 @@ def admin_product_keyboard(product: dict, purchase_count: int = 0) -> InlineKeyb
 
     buttons = [
         [InlineKeyboardButton(text="✏️ Контент", callback_data=f"admin:psub:content:{pid}")],
-        [InlineKeyboardButton(text=f"📎 Медиафайлы  {file_ok} файл · {photo_ok} фото",
+        [InlineKeyboardButton(text=f"📎 Медиафайлы  {media_preview}",
                               callback_data=f"admin:psub:media:{pid}")],
         *([[InlineKeyboardButton(text="📚 Инфобиз", callback_data=f"admin:psub:infobiz:{pid}")]]
           if category == "infobiz" else []),
@@ -266,18 +268,25 @@ def product_submenu_content(product: dict) -> InlineKeyboardMarkup:
 def product_submenu_media(product: dict) -> InlineKeyboardMarkup:
     pid = product["id"]
     cat = product.get("category", "digital")
-    file_label = f"📎 {product['file_name']}" if product.get("file_name") else "📎 Файл не загружен ⚠️"
     photo_label = "🖼 Фото ✅" if product.get("photo_id") else "🖼 Фото: нет"
-    instr_label = f"📄 {product['instruction_file_name']}" if product.get("instruction_file_name") \
-        else "📄 Инструкция не загружена"
-    video = product.get("video_url")
-    video_label = f"🎬 {video[:25]}…" if video and len(video) > 25 else f"🎬 {video}" if video \
-        else "🎬 Видео не указано"
-    rows = [
-        [InlineKeyboardButton(text=file_label, callback_data=f"admin:upload_file:{pid}"),
-         InlineKeyboardButton(text=photo_label, callback_data=f"admin:upload_photo:{pid}")],
-    ]
+
+    if cat == "physical":
+        # Физтовар едет клиенту посылкой — цифровой файл ему не отправляется,
+        # кнопка «Файл» тут ни на что не влияет
+        rows = [[InlineKeyboardButton(text=photo_label, callback_data=f"admin:upload_photo:{pid}")]]
+    else:
+        file_label = f"📎 {product['file_name']}" if product.get("file_name") else "📎 Файл не загружен ⚠️"
+        rows = [[
+            InlineKeyboardButton(text=file_label, callback_data=f"admin:upload_file:{pid}"),
+            InlineKeyboardButton(text=photo_label, callback_data=f"admin:upload_photo:{pid}"),
+        ]]
+
     if cat in ("digital", "infobiz"):
+        instr_label = f"📄 {product['instruction_file_name']}" if product.get("instruction_file_name") \
+            else "📄 Инструкция не загружена"
+        video = product.get("video_url")
+        video_label = f"🎬 {video[:25]}…" if video and len(video) > 25 else f"🎬 {video}" if video \
+            else "🎬 Видео не указано"
         rows.append([
             InlineKeyboardButton(text=instr_label, callback_data=f"admin:upload_instruction:{pid}"),
             InlineKeyboardButton(text=video_label, callback_data=f"admin:set_video:{pid}"),
