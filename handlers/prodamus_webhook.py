@@ -179,27 +179,59 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
                 rounds = json.loads(pending["survey_json"])
             except Exception as e:
                 logger.error(f"prodamus webhook: не разобрать survey_json: {e}")
+        # Товар каждого раунда — если через «Добавить другой товар» в заказ
+        # попали разные физтовары. Без этого поля (заказ одного товара) —
+        # все раунды считаются product_id
+        round_products = db.unpack_round_products(
+            pending.get("round_products_json"), rounds, product_id)
+        if not round_products:
+            # Товар без настроенного опроса (свободное ТЗ) — pending_deliveries
+            # не заполнялась, rounds пуст; заказ всё равно на одну позицию
+            round_products = [product_id]
+        products_by_id = {product_id: product}
+        for pid in set(round_products):
+            if pid not in products_by_id:
+                products_by_id[pid] = await db.get_product(pid) or product
         await db.delete_pending_delivery(user_id, product_id)
 
-        # Доставка внутри суммы — транзит, в выручку не идёт
-        await db.add_purchase(
-            user_id=user_id, username=username, product_id=product_id,
-            telegram_payment_id=prodamus_order_id, amount=amount,
-            delivery_amount=int(pending.get("delivery_amount") or 0),
-            delivery_cost=float(pending.get("delivery_cost") or 0),
-            quantity=len([r for r in rounds if r]) or 1,
-        )
+        # Доставка внутри суммы — транзит, в выручку не идёт. Разные товары
+        # заказа — отдельной строкой purchases на каждый (для отчёта «по
+        # товарам» и доли партнёра); доставка целиком уходит в первую
+        # строку, чтобы не задвоить её в общем СДЭК-балансе.
+        delivery_amt = int(pending.get("delivery_amount") or 0)
+        delivery_cost_val = float(pending.get("delivery_cost") or 0)
+        goods_amount_total = max(0, amount - delivery_amt)
+        order_ids = list(dict.fromkeys(round_products))
+        counts = {pid: round_products.count(pid) for pid in order_ids}
+        weights = {pid: products_by_id[pid]["price"] * counts[pid] for pid in order_ids}
+        weight_total = sum(weights.values()) or 1
+        remaining_goods = goods_amount_total
+        for i, pid in enumerate(order_ids):
+            if i == len(order_ids) - 1:
+                row_goods = remaining_goods
+            else:
+                row_goods = round(goods_amount_total * weights[pid] / weight_total)
+                remaining_goods -= row_goods
+            await db.add_purchase(
+                user_id=user_id, username=username, product_id=pid,
+                telegram_payment_id=prodamus_order_id,
+                amount=row_goods + (delivery_amt if i == 0 else 0),
+                delivery_amount=delivery_amt if i == 0 else 0,
+                delivery_cost=delivery_cost_val if i == 0 else 0.0,
+                quantity=counts[pid],
+            )
 
         # Свой сквозной номер заказа: malimabi-store-001, -002, ...
         order_code = await db.next_order_code()
 
         # Полное уведомление о заказе — только сейчас, после успешной оплаты.
         # Идёт в админский бот (malimadmins) с кнопкой «Взял заказ».
-        whos = await _routing_whos(product_id, product, rounds)
+        whos = await _routing_whos(round_products, products_by_id, rounds)
         summary = _format_order(
             first_name, username_str, product["name"], amount,
             delivery_info, rounds, now, order_number=order_code,
             routing_line=_routing_line(whos),
+            round_products=round_products, products_by_id=products_by_id,
         )
         order_row_id = await db.create_order(
             user_id, product_id, prodamus_order_id, summary,
@@ -208,6 +240,7 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             recipient_name=pending.get("recipient_name"),
             recipient_phone=pending.get("recipient_phone"),
             pvz_code=pending.get("pvz_code"),
+            round_products_json=json.dumps(round_products, ensure_ascii=False),
         )
 
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
@@ -231,7 +264,7 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         # внутри вебхука нельзя, Prodamus ждёт быстрый ответ 200.
         if config.CDEK_AUTO_ORDER:
             asyncio.create_task(_create_cdek_order(
-                order_row_id, pending, product, amount, len(rounds) or 1,
+                order_row_id, pending, round_products, products_by_id,
                 order_code, bot, user_id,
             ))
 
@@ -266,11 +299,14 @@ def _parse_routing(text: str) -> dict:
     return result
 
 
-async def _create_cdek_order(order_row_id: int, pending: dict, product: dict,
-                             amount: int, quantity: int, order_number: str,
+async def _create_cdek_order(order_row_id: int, pending: dict, round_products: list[int],
+                             products_by_id: dict, order_number: str,
                              bot: Bot = None, client_id: int = 0):
     """Заводит накладную в СДЭК после оплаты и сообщает результат админам.
 
+    round_products — товар каждой позиции заказа (может быть смешанным).
+    Каждая позиция едет в своей коробке — у каждой свои вес/габариты и
+    свой товар в накладной.
     Ошибка здесь не ломает заказ — деньги уже получены, заявка админам ушла.
     Админ просто заведёт отправление в кабинете СДЭК руками.
     """
@@ -290,7 +326,21 @@ async def _create_cdek_order(order_row_id: int, pending: dict, product: dict,
         ))
         return
 
-    pkg = db.product_package(product)
+    items, packages = [], []
+    for pid in round_products:
+        p = products_by_id.get(pid) or {}
+        pkg = db.product_package(p)
+        items.append({
+            "name": p.get("name", "?"),
+            "ware_key": str(p.get("id", pid)),
+            "cost": p.get("price", 0),
+            "amount": 1,
+            "weight": pkg["weight"],
+        })
+        packages.append(pkg)
+    # Каждая позиция едет в своей коробке — столько же мест в накладной.
+    # На цену это не влияет (СДЭК считает по суммарному весу), зато
+    # наклейка печатается на каждую коробку, и у каждого товара свой вес
     uuid = await CDEK_CLIENT.create_order(
         number=order_number,
         shipment_point=config.CDEK_SHIPMENT_POINT,
@@ -298,21 +348,8 @@ async def _create_cdek_order(order_row_id: int, pending: dict, product: dict,
         recipient_name=name,
         recipient_phone=phone,
         tariff_code=config.CDEK_TARIFF_PVZ,
-        items=[{
-            "name": product["name"],
-            "ware_key": str(product["id"]),
-            "cost": product["price"],
-            "amount": quantity,
-            "weight": pkg["weight"],
-        }],
-        # Каждая ручка едет в своей коробке — столько же мест в накладной.
-        # На цену это не влияет (СДЭК считает по суммарному весу), зато
-        # наклейка печатается на каждую коробку
-        weight=pkg["weight"],
-        length=pkg["length"],
-        width=pkg["width"],
-        height=pkg["height"],
-        places=quantity,
+        items=items,
+        packages=packages,
     )
     if not uuid:
         await _send_notify(None, (
@@ -389,24 +426,36 @@ async def _send_track_to_client(bot: Bot, client_id: int, order_number: str,
         logger.error(f"CDEK: не отправить трек клиенту {client_id}: {e}")
 
 
-async def _routing_whos(product_id: int, product: dict, rounds: list) -> list:
-    """Кто печатает каждую позицию — по номеру цвета из вопроса-распределителя."""
+async def _routing_whos(round_products: list[int], products_by_id: dict, rounds: list) -> list:
+    """Кто печатает каждую позицию — по номеру цвета из вопроса-распределителя
+    ЕЁ СОБСТВЕННОГО товара (в смешанном заказе у разных товаров могут быть
+    разные распределители и разные списки печатающих)."""
     import re
-    routing = product.get("order_routing_text") if product else None
-    if not routing:
+    # Ни у одного товара заказа не настроена печать по разметке — не
+    # показываем строку «Печатает» вовсе (как раньше для обычного товара)
+    if not any((products_by_id.get(pid) or {}).get("order_routing_text")
+              for pid in set(round_products)):
         return []
-    questions = await db.get_product_questions(product_id)
-    router_q = next((q for q in questions if q.get("is_router")), None)
-    if not router_q:
-        return []
-    rmap = _parse_routing(routing)
+    questions_cache: dict[int, list] = {}
+    rmap_cache: dict[int, dict] = {}
 
-    def who(answers):
+    async def who(pid: int, answers: list):
+        product = products_by_id.get(pid)
+        routing = product.get("order_routing_text") if product else None
+        if not routing:
+            return None
+        if pid not in questions_cache:
+            questions_cache[pid] = await db.get_product_questions(pid)
+        router_q = next((q for q in questions_cache[pid] if q.get("is_router")), None)
+        if not router_q:
+            return None
+        if pid not in rmap_cache:
+            rmap_cache[pid] = _parse_routing(routing)
         val = next((a.get("text") for a in answers if a.get("q") == router_q["text"]), "") or ""
         nums = re.findall(r"\d+", val)
-        return rmap.get(nums[0]) if nums else None
+        return rmap_cache[pid].get(nums[0]) if nums else None
 
-    return [who(answers) for answers in rounds]
+    return [await who(pid, answers) for pid, answers in zip(round_products, rounds)]
 
 
 def _routing_line(whos: list) -> str:
@@ -437,25 +486,38 @@ async def _printer_admins(whos: list) -> list[dict]:
 
 def _format_order(first_name: str, username_str: str, product_name: str, amount: int,
                   delivery_info: str, rounds: list, now: str, order_number: str = "",
-                  routing_line: str = "") -> str:
+                  routing_line: str = "", round_products: list[int] | None = None,
+                  products_by_id: dict | None = None) -> str:
     """Уведомление о заказе: номер, кто печатает, покупатель, товар, ответы, доставка."""
     multi = len(rounds) > 1
+    mixed = bool(round_products) and len(set(round_products)) > 1
     head = "🧾 <b>Новый заказ</b>"
     if order_number:
         head += f" <code>{order_number}</code>"
     lines = [head]
     if routing_line:
         lines.append(routing_line)
-    lines += [
-        "",
-        f"👤 {first_name} {username_str}",
-        f"🛍 {product_name}" + (f"  ×{len(rounds)}" if multi else ""),
-        f"💵 {amount} ₽",
-        f"🕐 {now}",
-    ]
+    lines += ["", f"👤 {first_name} {username_str}"]
+    if mixed and products_by_id:
+        order_ids = list(dict.fromkeys(round_products))
+        counts = {pid: round_products.count(pid) for pid in order_ids}
+        goods_line = ", ".join(
+            (products_by_id[pid]["name"] if products_by_id.get(pid) else f"id:{pid}")
+            + (f" ×{counts[pid]}" if counts[pid] > 1 else "")
+            for pid in order_ids
+        )
+        lines.append(f"🛍 {goods_line}")
+    else:
+        lines.append(f"🛍 {product_name}" + (f"  ×{len(rounds)}" if multi else ""))
+    lines += [f"💵 {amount} ₽", f"🕐 {now}"]
     for ri, answers in enumerate(rounds, 1):
         if multi:
-            lines.append(f"\n— <b>Позиция {ri}</b> —")
+            pos_title = f"Позиция {ri}"
+            if mixed and round_products and products_by_id and ri - 1 < len(round_products):
+                p = products_by_id.get(round_products[ri - 1])
+                if p:
+                    pos_title += f" ({p['name']})"
+            lines.append(f"\n— <b>{pos_title}</b> —")
         elif answers:
             lines.append("")
         for i, a in enumerate(answers, 1):

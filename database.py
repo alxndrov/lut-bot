@@ -500,6 +500,15 @@ async def init_db():
             await db.execute("ALTER TABLE review_push_queue ADD COLUMN order_id INTEGER DEFAULT NULL")
         except Exception:
             pass
+        # Migration: разные товары в одном заказе («добавить другой товар» в
+        # опросе) — JSON-список product_id по каждому раунду, параллельный
+        # rounds_json/survey_json. Пусто — считаем, что все раунды одного
+        # товара (orders.product_id / pending_deliveries.product_id).
+        for table in ("pending_deliveries", "orders"):
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN round_products_json TEXT DEFAULT NULL")
+            except Exception:
+                pass
         await db.commit()
 
 
@@ -776,6 +785,24 @@ def product_package(product: dict | None) -> dict:
     }
 
 
+def unpack_round_products(raw: str | None, rounds: list, fallback_product_id: int) -> list[int]:
+    """Товар каждого раунда: parallel-массив к rounds из round_products_json.
+
+    Пусто/битый JSON/не совпадает длиной с rounds — считаем все раунды
+    товаром fallback_product_id (так лежат заказы до этой миграции и
+    обычные заказы одного товара, где колонку вообще не пишем).
+    """
+    n = len(rounds)
+    if raw:
+        try:
+            ids = json.loads(raw)
+            if isinstance(ids, list) and len(ids) == n:
+                return [int(x) for x in ids]
+        except Exception:
+            pass
+    return [fallback_product_id] * n
+
+
 async def update_product_category(product_id: int, category: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE products SET category = ? WHERE id = ?", (category, product_id))
@@ -865,9 +892,11 @@ async def enqueue_review_push(user_id: int, product_id: int, delay_seconds: int,
 
     order_id — для физтоваров: отсчёт у них идёт от отметки «отправлено»,
     а не от оплаты (см. cb_order_shipped), и заказ могли отметить
-    отправленным, откатить и отметить снова. Если пуш для этого заказа
-    уже стоит в очереди, второй раз не ставим — иначе клиент получит два
-    одинаковых сообщения.
+    отправленным, откатить и отметить снова. Если пуш для этого заказа И
+    этого товара уже стоит в очереди, второй раз не ставим — иначе клиент
+    получит два одинаковых сообщения. Дедуп по паре (order_id, product_id),
+    а не по одному order_id — в заказе может быть несколько разных товаров,
+    каждому свой пуш.
     """
     from datetime import datetime, timezone, timedelta
     send_at = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).strftime(
@@ -876,7 +905,8 @@ async def enqueue_review_push(user_id: int, product_id: int, delay_seconds: int,
     async with aiosqlite.connect(DB_PATH) as db:
         if order_id is not None:
             async with db.execute(
-                "SELECT 1 FROM review_push_queue WHERE order_id = ?", (order_id,)
+                "SELECT 1 FROM review_push_queue WHERE order_id = ? AND product_id = ?",
+                (order_id, product_id),
             ) as cur:
                 if await cur.fetchone():
                     return
@@ -1381,20 +1411,23 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                                 recipient_phone: str | None = None,
                                 pvz_code: str | None = None,
                                 delivery_amount: int = 0,
-                                delivery_cost: float = 0.0):
+                                delivery_cost: float = 0.0,
+                                round_products_json: str | None = None):
     """Сохраняет детали будущего заказа (адрес + ответы опроса + сумму) до оплаты.
 
     ФИО, телефон и код ПВЗ нужны, чтобы после оплаты завести заказ в СДЭК.
     delivery_amount — сколько взяли с клиента, delivery_cost — сколько из
     этого уйдёт в СДЭК по счёту (тариф + страховка + НДС).
+    round_products_json — товар каждого раунда, если в заказе смешаны
+    разные товары (см. handlers/brief_handler.py:_other_physical_products).
     """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """INSERT INTO pending_deliveries
                    (user_id, product_id, delivery_str, survey_json, amount,
                     recipient_name, recipient_phone, pvz_code, delivery_amount,
-                    delivery_cost)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    delivery_cost, round_products_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, product_id) DO UPDATE SET
                    delivery_str = excluded.delivery_str,
                    survey_json = excluded.survey_json,
@@ -1404,10 +1437,11 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                    pvz_code = excluded.pvz_code,
                    delivery_amount = excluded.delivery_amount,
                    delivery_cost = excluded.delivery_cost,
+                   round_products_json = excluded.round_products_json,
                    created_at = CURRENT_TIMESTAMP""",
             (user_id, product_id, delivery_str, survey_json, amount,
              recipient_name, recipient_phone, pvz_code, delivery_amount,
-             delivery_cost),
+             delivery_cost, round_products_json),
         )
         await db.commit()
 
@@ -1464,15 +1498,18 @@ async def create_order(user_id: int, product_id: int, prodamus_order_id: str,
                        order_code: str | None = None,
                        recipient_name: str | None = None,
                        recipient_phone: str | None = None,
-                       pvz_code: str | None = None) -> int:
+                       pvz_code: str | None = None,
+                       round_products_json: str | None = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO orders
                    (user_id, product_id, prodamus_order_id, summary, rounds_json,
-                    order_code, recipient_name, recipient_phone, pvz_code)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    order_code, recipient_name, recipient_phone, pvz_code,
+                    round_products_json)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, product_id, prodamus_order_id, summary, rounds_json,
-             order_code, recipient_name, recipient_phone, pvz_code),
+             order_code, recipient_name, recipient_phone, pvz_code,
+             round_products_json),
         )
         await db.commit()
         return cur.lastrowid
