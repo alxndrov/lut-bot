@@ -183,10 +183,9 @@ async def _finance_pulse_text() -> str:
     return "\n".join(lines).rstrip()
 
 
-async def _finance_full() -> tuple[str, bool]:
-    """Весь экран «Финансы»: пульс продаж + взаиморасчёт + касса одним текстом."""
-    pulse = await _finance_pulse_text()
-
+async def _settle_split() -> tuple[dict | None, dict | None, str, str, datetime]:
+    """Раскладка payout.split за период с прошлого расчёта + сами границы —
+    общая для главного экрана «Финансы» и подменю «Взаиморасчёт»."""
     last_settlement = await db.get_last_settlement()
     dt_from_iso = last_settlement["settled_at"] if last_settlement else "2020-01-01T00:00:00.000Z"
     now_utc = datetime.now(timezone.utc)
@@ -197,8 +196,16 @@ async def _finance_full() -> tuple[str, bool]:
         from services import payout as payout_svc
         s = await payout_svc.split(dt_from, dt_to)
     except Exception as e:
-        logger.error(f"finance full fetch error: {e}")
+        logger.error(f"settle split fetch error: {e}")
         s = None
+
+    return s, last_settlement, dt_from, dt_to, now_utc
+
+
+async def _finance_full() -> tuple[str, bool]:
+    """Весь экран «Финансы»: пульс продаж + взаиморасчёт + касса одним текстом."""
+    pulse = await _finance_pulse_text()
+    s, last_settlement, dt_from, dt_to, now_utc = await _settle_split()
 
     debt_text = _fmt_debt_screen(s, last_settlement)
     has_debt = bool(s and s["count"] > 0)
@@ -270,8 +277,9 @@ async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.answer()
+    s, last_settlement, *_ = await _settle_split()
     await callback.message.answer(
-        "🤝 <b>Взаиморасчёт</b>\n\nЗафиксировать расчёт, отметить выплату или посмотреть историю.",
+        _fmt_debt_screen(s, last_settlement),
         parse_mode="HTML",
         reply_markup=_settle_menu_keyboard(),
     )
