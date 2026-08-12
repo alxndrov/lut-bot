@@ -161,9 +161,13 @@ async def _apply_point(state: FSMContext, lat: float, lon: float) -> int:
 
 
 async def start_delivery_flow(target: Message, state: FSMContext, product_id: int,
-                              quantity: int = 1, rounds: list | None = None) -> bool:
+                              quantity: int = 1, rounds: list | None = None,
+                              round_products: list[int] | None = None) -> bool:
     """Запускает расчёт доставки СДЭК после заполнения опроса.
 
+    round_products — товар каждого раунда (если в заказе смешаны разные
+    товары через «Добавить другой товар» в опросе); по умолчанию все
+    раунды считаются товаром product_id.
     Возвращает False, если СДЭК не настроен — тогда вызывающий код
     продолжает по старому сценарию (адрес свободным текстом).
     """
@@ -175,6 +179,7 @@ async def start_delivery_flow(target: Message, state: FSMContext, product_id: in
         product_id=product_id,
         quantity=max(1, quantity),
         rounds=rounds or [],
+        round_products=round_products or [product_id] * max(1, quantity),
     )
     await target.answer(
         "🚚 Осталось оформить доставку СДЭК.\n\n"
@@ -482,6 +487,47 @@ async def fsm_pvz_choice(message: Message, state: FSMContext):
     await _show_pvz_page(message, state, page=data.get("pvz_page", 0))
 
 
+def _goods_breakdown(round_products: list[int], products_by_id: dict[int, dict]) -> list[tuple[dict, int]]:
+    """Группирует раунды по товару, сохраняя порядок первого появления:
+    [(товар, количество), ...]. Для заказа из одного товара — один элемент."""
+    order, counts = [], {}
+    for pid in round_products:
+        if pid not in counts:
+            order.append(pid)
+        counts[pid] = counts.get(pid, 0) + 1
+    return [(products_by_id[pid], counts[pid]) for pid in order]
+
+
+def _goods_line(items: list[tuple[dict, int]]) -> str:
+    """Строка «Товар: …» для подтверждения заказа — одна строка на товар."""
+    if len(items) == 1:
+        p, qty = items[0]
+        qty_str = f" ×{qty}" if qty > 1 else ""
+        return f"Товар: {p['name']}{qty_str} — {p['price'] * qty} ₽"
+    lines = [f"• {p['name']}" + (f" ×{qty}" if qty > 1 else "") + f" — {p['price'] * qty} ₽"
+             for p, qty in items]
+    return "Товары:\n" + "\n".join(lines)
+
+
+def _goods_payment_name(items: list[tuple[dict, int]]) -> str:
+    """Название позиции для ссылки Prodamus."""
+    if len(items) == 1:
+        p, qty = items[0]
+        return p["name"] if qty == 1 else f"{p['name']} ×{qty}"
+    name = ", ".join(f"{p['name']}" + (f" ×{qty}" if qty > 1 else "") for p, qty in items)
+    return name if len(name) <= 250 else name[:249] + "…"
+
+
+async def _round_products_info(data: dict) -> tuple[list[int], dict[int, dict]]:
+    """round_products (товар каждого раунда) + словарь товаров по id."""
+    quantity = max(1, data.get("quantity", 1))
+    round_products = data.get("round_products") or [data["product_id"]] * quantity
+    products_by_id: dict[int, dict] = {}
+    for pid in set(round_products):
+        products_by_id[pid] = await db.get_product(pid)
+    return round_products, products_by_id
+
+
 async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: int):
     """Считает доставку и показывает итог сразу с кнопкой оплаты.
 
@@ -490,6 +536,10 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
     """
     data = await state.get_data()
     product = await db.get_product(data["product_id"])
+    round_products, products_by_id = await _round_products_info(data)
+    products_by_id.setdefault(product["id"], product)
+    goods_items = _goods_breakdown(round_products, products_by_id)
+    goods_sum = sum(p["price"] * qty for p, qty in goods_items)
 
     delivery_cost = 0
     # Сколько из этой суммы реально уйдёт в СДЭК — нужно отчётам, чтобы
@@ -504,18 +554,17 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
 
     if CDEK_CLIENT and data.get("cdek_city_code"):
         tariff_code = config.CDEK_TARIFF_PVZ
-        pkg = db.product_package(product)
+        # У каждого раунда — своя коробка, у каждого товара свой вес/габариты
+        packages = [db.product_package(products_by_id[pid]) for pid in round_products]
         result = await CDEK_CLIENT.calculate_tariff(
             to_city_code=data["cdek_city_code"],
             tariff_code=tariff_code,
-            weight=pkg["weight"],
-            length=pkg["length"], width=pkg["width"], height=pkg["height"],
-            places=max(1, data.get("quantity", 1)),
+            packages=packages,
         )
         if result:
             # Объявленная ценность — то же, что уходит в накладную: цена
-            # товара за все места. От неё СДЭК считает страховку.
-            declared = product["price"] * max(1, data.get("quantity", 1))
+            # товаров за все места. От неё СДЭК считает страховку.
+            declared = goods_sum
             delivery_real = _cdek_cost(result["cost"], declared)
             delivery_cost = _with_fee(delivery_real)
             logger.info(
@@ -541,11 +590,8 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
 
     delivery_type_str = "СДЭК, пункт выдачи" if CDEK_CLIENT else "Пункт выдачи"
 
-    quantity = max(1, data.get("quantity", 1))
-    goods_sum = product["price"] * quantity
     total = goods_sum + delivery_cost
 
-    qty_str = f" ×{quantity}" if quantity > 1 else ""
     if calc_failed:
         delivery_line = (
             f"Доставка ({delivery_type_str}): рассчитаю отдельно и напишу — "
@@ -559,7 +605,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
 
     text = (
         f"📋 <b>Подтверждение заказа</b>\n\n"
-        f"Товар: {product['name']}{qty_str} — {goods_sum} ₽\n"
+        f"{_goods_line(goods_items)}\n"
         f"{delivery_line}\n"
         f"Адрес: {full_address}\n"
         f"{recipient_line}\n"
@@ -584,6 +630,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
         pvz_code=pvz_code or None,
         delivery_amount=delivery_cost,
         delivery_cost=round(delivery_real, 2),
+        round_products_json=json.dumps(round_products, ensure_ascii=False),
     )
 
     if not config.PRODAMUS_SHOP_URL_PHYSICAL:
@@ -596,7 +643,9 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
 
     # Физические товары — отдельный магазин Prodamus. Ссылка сразу в кнопке
     # подтверждения, чтобы не заставлять клиента жать «Оплатить» дважды.
-    product_name = product["name"] if quantity == 1 else f"{product['name']} ×{quantity}"
+    # order_id в ссылке кодирует один product_id — берём анкорный (первый
+    # выбранный) товар, остальные товары заказа лежат в round_products_json.
+    product_name = _goods_payment_name(goods_items)
     url = build_payment_url(
         shop_url=config.PRODAMUS_SHOP_URL_PHYSICAL,
         product_name=product_name,

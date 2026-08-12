@@ -105,6 +105,7 @@ class CDEKClient:
         to_city_code: int,
         tariff_code: int,
         from_city_code: Optional[int] = None,
+        packages: list[dict] | None = None,
         weight: int = 500,
         length: int = 20,
         width: int = 15,
@@ -113,9 +114,12 @@ class CDEKClient:
     ) -> Optional[dict]:
         """Считает доставку. Возвращает {'cost': int, 'days_min': int, 'days_max': int}.
 
-        weight — вес ОДНОГО места. places — сколько таких коробок едет.
-        На цену число мест не влияет (считается по суммарному весу), но
-        расчёт должен совпадать с тем, что уйдёт в накладную.
+        packages — габариты КАЖДОГО места по отдельности (в заказе может
+        быть несколько разных товаров, у каждого свой вес/размер короба).
+        Если не передан, собирается из weight/length/width/height × places —
+        для заказа с одинаковыми местами. На цену число мест не влияет
+        (считается по суммарному весу), но расчёт должен совпадать с тем,
+        что уйдёт в накладную.
         """
         token = await self.get_token()
         if not token:
@@ -125,6 +129,10 @@ class CDEKClient:
         if from_city_code is None:
             logger.error("CDEK calculate_tariff: не определён город отправления")
             return None
+        if not packages:
+            packages = [{"weight": weight, "length": length,
+                        "width": width, "height": height}
+                       for _ in range(max(1, places))]
         try:
             async with aiohttp.ClientSession() as session:
                 resp = await session.post(
@@ -133,9 +141,7 @@ class CDEKClient:
                         "tariff_code": tariff_code,
                         "from_location": {"code": from_city_code},
                         "to_location": {"code": to_city_code},
-                        "packages": [{"weight": weight, "length": length,
-                                      "width": width, "height": height}
-                                     for _ in range(max(1, places))],
+                        "packages": packages,
                     },
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=aiohttp.ClientTimeout(total=10)
@@ -162,6 +168,7 @@ class CDEKClient:
         recipient_phone: str,
         items: list[dict],
         tariff_code: int,
+        packages: list[dict] | None = None,
         weight: int = 500,
         length: int = 20,
         width: int = 15,
@@ -173,12 +180,19 @@ class CDEKClient:
         Заказ создаётся асинхронно: СДЭК отвечает 202 и uuid, а результат
         (успех и трек-номер) забирается отдельно через get_order_info.
         items: [{'name','ware_key','cost','amount','weight'}]
-        weight/length/width/height — габариты ОДНОГО места, places — сколько
-        коробок реально сдаём: на каждую СДЭК печатает свою наклейку.
+        packages — габариты КАЖДОГО места по отдельности, по одному на
+        коробку (в заказе могут быть разные товары — у каждого свой короб).
+        Без packages берутся уникальные weight/length/width/height на все
+        places коробок. На каждую СДЭК печатает свою наклейку.
         """
         token = await self.get_token()
         if not token:
             return None
+        if not packages:
+            packages = [{"weight": weight, "length": length,
+                        "width": width, "height": height}
+                       for _ in range(max(1, places))]
+        chunks = _split_items(items, len(packages))
         body = {
             "type": 1,                      # заказ интернет-магазина
             "number": number,
@@ -191,10 +205,10 @@ class CDEKClient:
             },
             "packages": [{
                 "number": str(i + 1),
-                "weight": weight,
-                "length": length,
-                "width": width,
-                "height": height,
+                "weight": pkg["weight"],
+                "length": pkg["length"],
+                "width": pkg["width"],
+                "height": pkg["height"],
                 "items": [{
                     "name": it["name"][:255],
                     "ware_key": str(it["ware_key"])[:20],
@@ -202,9 +216,9 @@ class CDEKClient:
                     "payment": {"value": 0},
                     "cost": it["cost"],
                     "amount": it["amount"],
-                    "weight": it.get("weight", weight),
+                    "weight": it.get("weight", pkg["weight"]),
                 } for it in chunk],
-            } for i, chunk in enumerate(_split_items(items, max(1, places)))],
+            } for i, (pkg, chunk) in enumerate(zip(packages, chunks))],
         }
         try:
             async with aiohttp.ClientSession() as session:

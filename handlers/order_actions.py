@@ -882,12 +882,23 @@ async def cb_order_shipped(callback: CallbackQuery):
 
     # Пуш с просьбой оставить отзыв — отсчёт от отправки, не от оплаты:
     # заказ может ждать печати неделями, и «через 5 дней» должно значить
-    # 5 дней после того, как товар реально уехал к клиенту.
-    product = await db.get_product(order["product_id"])
-    if product and product.get("review_push_delay"):
-        await db.enqueue_review_push(order["user_id"], order["product_id"],
-                                     product["review_push_delay"],
-                                     order_id=order["id"])
+    # 5 дней после того, как товар реально уехал к клиенту. В заказе может
+    # быть несколько разных товаров («Добавить другой товар» в опросе) —
+    # ставим свой пуш на каждый (дедуп по паре заказ+товар — см. database.py)
+    try:
+        rounds = json.loads(order.get("rounds_json") or "[]")
+    except Exception:
+        rounds = []
+    round_products = db.unpack_round_products(
+        order.get("round_products_json"), rounds, order["product_id"])
+    if not round_products:
+        round_products = [order["product_id"]]
+    for pid in dict.fromkeys(round_products):
+        product = await db.get_product(pid)
+        if product and product.get("review_push_delay"):
+            await db.enqueue_review_push(order["user_id"], pid,
+                                         product["review_push_delay"],
+                                         order_id=order["id"])
 
     order = await db.get_order(order["id"])
     await _sync_order_messages(callback, order)
