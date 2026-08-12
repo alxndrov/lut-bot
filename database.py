@@ -492,6 +492,14 @@ async def init_db():
             await db.execute("ALTER TABLE products ADD COLUMN post_payment_text TEXT DEFAULT NULL")
         except Exception:
             pass
+        # Migration: заказ, для которого поставлен пуш отзыва. У физтоваров
+        # отсчёт идёт не от оплаты, а от отметки «отправлено» — без order_id
+        # нечем было бы отличить повторную постановку (переотправка после
+        # отмены) от первой и пуш ушёл бы клиенту дважды.
+        try:
+            await db.execute("ALTER TABLE review_push_queue ADD COLUMN order_id INTEGER DEFAULT NULL")
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -851,18 +859,31 @@ async def set_review_push(product_id: int, delay: int | None, text: str | None):
         await db.commit()
 
 
-async def enqueue_review_push(user_id: int, product_id: int, delay_seconds: int):
-    """Ставит в очередь отправку пуша через delay_seconds секунд."""
+async def enqueue_review_push(user_id: int, product_id: int, delay_seconds: int,
+                              order_id: int | None = None):
+    """Ставит в очередь отправку пуша через delay_seconds секунд.
+
+    order_id — для физтоваров: отсчёт у них идёт от отметки «отправлено»,
+    а не от оплаты (см. cb_order_shipped), и заказ могли отметить
+    отправленным, откатить и отметить снова. Если пуш для этого заказа
+    уже стоит в очереди, второй раз не ставим — иначе клиент получит два
+    одинаковых сообщения.
+    """
     from datetime import datetime, timezone, timedelta
     send_at = (datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
     async with aiosqlite.connect(DB_PATH) as db:
-        # Один пуш на пару user+product — не дублируем
+        if order_id is not None:
+            async with db.execute(
+                "SELECT 1 FROM review_push_queue WHERE order_id = ?", (order_id,)
+            ) as cur:
+                if await cur.fetchone():
+                    return
         await db.execute(
-            """INSERT INTO review_push_queue (user_id, product_id, send_at)
-               VALUES (?, ?, ?)""",
-            (user_id, product_id, send_at),
+            """INSERT INTO review_push_queue (user_id, product_id, send_at, order_id)
+               VALUES (?, ?, ?, ?)""",
+            (user_id, product_id, send_at, order_id),
         )
         await db.commit()
 
@@ -1752,11 +1773,20 @@ async def set_order_shipped(order_id: int, user_id: int, user_name: str) -> bool
 
 
 async def clear_order_shipped(order_id: int):
-    """Снимает отметку об отправке."""
+    """Снимает отметку об отправке.
+
+    Заодно снимает ещё не отправленный пуш отзыва, поставленный по этой
+    отметке — иначе при повторной отправке заказа пуш не переставится
+    (order_id уже занят) и уйдёт по старому, ошибочному времени.
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             """UPDATE orders SET shipped_at = NULL, shipped_by_id = NULL,
                                  shipped_by_name = NULL WHERE id = ?""",
+            (order_id,),
+        )
+        await db.execute(
+            "DELETE FROM review_push_queue WHERE order_id = ? AND sent = 0",
             (order_id,),
         )
         await db.commit()

@@ -879,6 +879,16 @@ async def cb_order_shipped(callback: CallbackQuery):
     await db.set_order_shipped(order["id"], callback.from_user.id, _actor_name(callback))
     request_sync()
     await callback.answer("Отмечено: заказ отправлен 📦")
+
+    # Пуш с просьбой оставить отзыв — отсчёт от отправки, не от оплаты:
+    # заказ может ждать печати неделями, и «через 5 дней» должно значить
+    # 5 дней после того, как товар реально уехал к клиенту.
+    product = await db.get_product(order["product_id"])
+    if product and product.get("review_push_delay"):
+        await db.enqueue_review_push(order["user_id"], order["product_id"],
+                                     product["review_push_delay"],
+                                     order_id=order["id"])
+
     order = await db.get_order(order["id"])
     await _sync_order_messages(callback, order)
 

@@ -243,9 +243,9 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         paid_text = paid_text.replace("{order}", order_code)
         await bot.send_message(user_id, paid_text)
 
-        # Ставим пуш отзыва в очередь (если настроен)
-        if product.get("review_push_delay"):
-            await db.enqueue_review_push(user_id, product_id, product["review_push_delay"])
+        # Пуш отзыва ставится не здесь: для физтовара отсчёт должен идти
+        # от отправки, а не от оплаты — заказ может ждать печати неделями.
+        # Ставится при отметке «отправлено» — см. cb_order_shipped.
     else:
         logger.error(f"prodamus: неизвестный order_type={order_type!r}")
 
