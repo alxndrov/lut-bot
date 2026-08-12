@@ -24,7 +24,7 @@ from aiogram.types import (
 
 import config
 import database as db
-from handlers.expenses import MSK, _month_bounds, _msk, _parse_amount
+from handlers.expenses import MSK, _month_bounds, _msk, _parse_amount, _nav_row
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -61,6 +61,7 @@ def _account_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💸 Внёс оплату", callback_data="cdek_pay")],
         [InlineKeyboardButton(text="📋 История", callback_data="cdek_log")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="cdek_show")],
+        _nav_row("cdek"),
     ])
 
 

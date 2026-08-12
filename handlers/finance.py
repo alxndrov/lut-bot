@@ -22,7 +22,7 @@ from aiogram.types import (
 
 import config
 import database as db
-from handlers.expenses import MSK
+from handlers.expenses import MSK, _nav_row
 from services.daily_report import fetch_payments_summary
 
 router = Router()
@@ -129,7 +129,7 @@ def _finance_keyboard(has_unsettled: bool) -> InlineKeyboardMarkup:
     if has_unsettled:
         rows.append([InlineKeyboardButton(text="✅ Мы в расчёте", callback_data="fin_settle")])
     rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="fin_show")])
-    rows.append([InlineKeyboardButton(text="🤝 Взаиморасчёт", callback_data="fin_debt")])
+    rows.append(_nav_row("show"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -138,7 +138,7 @@ def _debt_keyboard(has_debt: bool) -> InlineKeyboardMarkup:
     if has_debt:
         rows.append([InlineKeyboardButton(text="✅ Расчёт произведён", callback_data="fin_settle_debt")])
     rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="fin_debt")])
-    rows.append([InlineKeyboardButton(text="💳 Финансы", callback_data="fin_show")])
+    rows.append(_nav_row("debt"))
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
