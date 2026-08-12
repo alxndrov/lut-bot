@@ -23,27 +23,24 @@ logger = logging.getLogger(__name__)
 
 MSK = timezone(timedelta(hours=3))
 
-# Единая навигация между разделами «Финансов» — одни и те же кнопки внизу
-# каждого экрана (выручка/расчёт/расходы/СДЭК/касса), чтобы всё было
-# доступно из одной команды /finance, а не из пяти разных. Два ряда —
-# пять кнопок в одну строку на телефоне превращаются в нечитаемую кашу.
+# Единая навигация между разделами — одни и те же кнопки внизу каждого
+# экрана, чтобы из /finance (выручка + взаиморасчёт + касса одним текстом)
+# можно было в один тап уйти в «Расходы» или «СДЭК» и вернуться обратно.
 _NAV_SECTIONS = [
-    ("show", "💳 Выручка", "fin_show"),
-    ("debt", "🤝 Расчёт", "fin_debt"),
+    ("show", "💳 Финансы", "fin_show"),
     ("exp", "🧾 Расходы", "exp_show"),
     ("cdek", "🚚 СДЭК", "cdek_show"),
-    ("cash", "💰 Касса", "fin_cash"),
 ]
 
 
 def _nav_row(current: str) -> list[list[InlineKeyboardButton]]:
-    """Две строки кнопок навигации — добавлять через rows += _nav_row(...)."""
+    """Строка кнопок навигации — добавлять через rows += _nav_row(...)."""
     buttons = [
         InlineKeyboardButton(text=label if key != current else f"· {label} ·",
                              callback_data=cb)
         for key, label, cb in _NAV_SECTIONS
     ]
-    return [buttons[:3], buttons[3:]]
+    return [buttons]
 
 
 class ExpenseStates(StatesGroup):
