@@ -1914,11 +1914,16 @@ async def get_revenue_by_month(limit: int = 6) -> list[dict]:
 
     НПД считается со всей принятой суммы (см. config.NPD_PERCENT) — отсюда
     берётся начисление налога по месяцам, см. get_npd_payments_by_month.
+
+    created_at хранится в UTC (SQLite CURRENT_TIMESTAMP), а чек в «Мой
+    налог» пробивается по МСК — без поправки покупки с 00:00 до 02:59 МСК
+    (21:00-23:59 UTC предыдущих суток) попадали бы в предыдущий месяц,
+    хотя по факту относятся уже к новому.
     """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT strftime('%Y-%m', created_at) AS month,
+            """SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) AS month,
                       COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS count
                FROM purchases GROUP BY month ORDER BY month DESC LIMIT ?""",
             (int(limit),),
@@ -1927,7 +1932,7 @@ async def get_revenue_by_month(limit: int = 6) -> list[dict]:
 
 
 async def get_purchases_by_month(month: str) -> list[dict]:
-    """Отдельные покупки за месяц ('ГГГГ-ММ') — сверить с приложением «Мой налог»."""
+    """Отдельные покупки за месяц ('ГГГГ-ММ', по МСК) — сверить с «Мой налог»."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -1936,7 +1941,7 @@ async def get_purchases_by_month(month: str) -> list[dict]:
                FROM purchases pu
                LEFT JOIN products pr ON pr.id = pu.product_id
                LEFT JOIN users u ON u.user_id = pu.user_id
-               WHERE strftime('%Y-%m', pu.created_at) = ?
+               WHERE strftime('%Y-%m', datetime(pu.created_at, '+3 hours')) = ?
                ORDER BY pu.created_at""",
             (month,),
         ) as cur:
@@ -1944,11 +1949,11 @@ async def get_purchases_by_month(month: str) -> list[dict]:
 
 
 async def get_npd_payments_by_month(limit: int = 6) -> list[dict]:
-    """Фактически оплаченный НПД по месяцам: [{'month', 'total', 'count'}]."""
+    """Фактически оплаченный НПД по месяцам (по МСК): [{'month', 'total', 'count'}]."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT strftime('%Y-%m', paid_at) AS month,
+            """SELECT strftime('%Y-%m', datetime(paid_at, '+3 hours')) AS month,
                       COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
                FROM npd_payments GROUP BY month ORDER BY month DESC LIMIT ?""",
             (int(limit),),
@@ -2149,11 +2154,11 @@ async def get_cdek_accrued(date_from: str | None = None,
 
 
 async def get_cdek_accrued_by_month(limit: int = 6) -> list[dict]:
-    """Накладные по месяцам: [{'month': 'ГГГГ-ММ', 'total', 'count', …}]."""
+    """Накладные по месяцам (по МСК): [{'month': 'ГГГГ-ММ', 'total', 'count', …}]."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            f"SELECT strftime('%Y-%m', {_CDEK_ACCRUED_DATE}) AS month, "
+            f"SELECT strftime('%Y-%m', datetime({_CDEK_ACCRUED_DATE}, '+3 hours')) AS month, "
             f"COUNT(*) AS count,{_CDEK_ACCRUED_SUMS}{_CDEK_ACCRUED_FROM}"
             f" GROUP BY month ORDER BY month DESC LIMIT ?",
             (int(limit),),
