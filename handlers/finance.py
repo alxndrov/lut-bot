@@ -578,27 +578,28 @@ async def cb_payout_delete(callback: CallbackQuery):
         pass
 
 
-@router.callback_query(F.data == "cash_log")
-async def cb_cash_log(callback: CallbackQuery):
-    if not await _admin_only(callback):
-        return
+async def _cash_log_render() -> tuple[str, InlineKeyboardMarkup]:
     npd = await db.get_npd_payments(limit=10)
     payouts = await db.get_payouts(limit=10)
     revenue_by_month = await db.get_revenue_by_month(limit=6)
     npd_paid_by_month = {r["month"]: r for r in await db.get_npd_payments_by_month(limit=12)}
 
     lines = ["📋 <b>История кассы</b>"]
+    unpaid_months = []  # (month_key, mm.yyyy) — для кнопок «Детали»/«Оплачен» ниже
 
     if revenue_by_month:
         lines.append("\n<b>НПД по месяцам:</b>")
         for row in revenue_by_month:
-            year, month = (row["month"] or "____-__").split("-")
+            month_key = row["month"] or "____-__"
+            year, month = month_key.split("-")
             accrued = float(row["gross"]) * _NPD_RATE
-            paid_row = npd_paid_by_month.get(row["month"])
+            paid_row = npd_paid_by_month.get(month_key)
             paid = float(paid_row["total"]) if paid_row else 0.0
             mark = "✅" if paid >= accrued - 0.5 else ("◻️" if paid == 0 else "⏳")
             lines.append(f"  {mark} {month}.{year}: начислено <b>{accrued:,.2f} ₽</b>, "
                          f"оплачено {paid:,.2f} ₽")
+            if mark != "✅":
+                unpaid_months.append((month_key, f"{month}.{year}"))
 
     if npd:
         lines.append("\n<b>НПД:</b>")
@@ -615,7 +616,10 @@ async def cb_cash_log(callback: CallbackQuery):
     if not npd and not payouts:
         lines.append("\nПока пусто.")
 
-    rows = [[InlineKeyboardButton(
+    rows = [[InlineKeyboardButton(text=f"🔍 Детали {label}", callback_data=f"npd_detail:{key}"),
+             InlineKeyboardButton(text=f"✅ {label} оплачен", callback_data=f"npd_markpaid:{key}")]
+            for key, label in unpaid_months]
+    rows += [[InlineKeyboardButton(
         text=f"🗑 НПД {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
         callback_data=f"npd_del:{p['id']}")] for p in npd[:5]]
     rows += [[InlineKeyboardButton(
@@ -623,6 +627,85 @@ async def cb_cash_log(callback: CallbackQuery):
         callback_data=f"payout_del:{p['id']}")] for p in payouts[:5]]
     rows.append([InlineKeyboardButton(text="◀️ К кассе", callback_data="fin_cash")])
 
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "cash_log")
+async def cb_cash_log(callback: CallbackQuery):
+    if not await _admin_only(callback):
+        return
     await callback.answer()
-    await callback.message.answer("\n".join(lines), parse_mode="HTML",
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    text, markup = await _cash_log_render()
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+def _msk_dt(ts: str | None) -> str:
+    if not ts:
+        return ""
+    try:
+        return (datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
+                + timedelta(hours=3)).strftime("%d.%m %H:%M")
+    except Exception:
+        return ""
+
+
+@router.callback_query(F.data.startswith("npd_detail:"))
+async def cb_npd_detail(callback: CallbackQuery):
+    """Покупки за месяц по отдельности — сверить с чеками в «Мой налог»,
+    когда начисленное в боте не сходится с приложением."""
+    if not await _admin_only(callback):
+        return
+    month = callback.data.split(":", 1)[1]
+    purchases = await db.get_purchases_by_month(month)
+    year, mm = month.split("-", 1) if "-" in month else ("", month)
+    total = sum(float(p["amount"]) for p in purchases)
+    accrued = total * _NPD_RATE
+
+    lines = [
+        f"🔍 <b>Покупки за {mm}.{year}</b> — {len(purchases)} шт. на <b>{total:,.2f} ₽</b>",
+        f"НПД с них (оценка бота): <b>{accrued:,.2f} ₽</b>",
+        "<i>время в МСК — сверяйте с датой чека в «Мой налог», не с датой в интерфейсе Prodamus</i>",
+        "",
+    ]
+    for p in purchases:
+        buyer = (f"@{p['username']}" if p.get("username")
+                else (p.get("first_name") or f"id:{p.get('user_id')}"))
+        name = p.get("product_name") or "—"
+        lines.append(f"  {_msk_dt(p['created_at'])} · {float(p['amount']):,.2f} ₽ · {name} · {buyer}")
+    if not purchases:
+        lines.append("  Пусто.")
+
+    await callback.answer()
+    await callback.message.answer(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="◀️ К истории", callback_data="cash_log")
+        ]]),
+    )
+
+
+@router.callback_query(F.data.startswith("npd_markpaid:"))
+async def cb_npd_markpaid(callback: CallbackQuery):
+    """Одной кнопкой: записать оплату НПД за месяц на всю начисленную сумму —
+    когда налог за этот месяц точно уже закрыт и сверять по копейке не нужно."""
+    if not await _admin_only(callback):
+        return
+    month = callback.data.split(":", 1)[1]
+    revenue = await db.get_revenue_by_month(limit=24)
+    row = next((r for r in revenue if r["month"] == month), None)
+    if not row:
+        await callback.answer("За этот месяц продаж не найдено.", show_alert=True)
+        return
+    accrued = float(row["gross"]) * _NPD_RATE
+    if accrued <= 0:
+        await callback.answer("Начислять нечего.", show_alert=True)
+        return
+
+    u = callback.from_user
+    name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
+    year, mm = month.split("-", 1) if "-" in month else ("", month)
+    await db.add_npd_payment(accrued, f"начислено за {mm}.{year}, отмечено оплаченным",
+                             u.id, name, paid_at=f"{month}-28 12:00:00")
+    await callback.answer(f"Отмечено: {mm}.{year} оплачен ✅")
+    text, markup = await _cash_log_render()
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)

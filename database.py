@@ -1926,6 +1926,23 @@ async def get_revenue_by_month(limit: int = 6) -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_purchases_by_month(month: str) -> list[dict]:
+    """Отдельные покупки за месяц ('ГГГГ-ММ') — сверить с приложением «Мой налог»."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT pu.id, pu.user_id, pu.created_at, pu.amount, pu.delivery_amount,
+                      pr.name AS product_name, u.username, u.first_name
+               FROM purchases pu
+               LEFT JOIN products pr ON pr.id = pu.product_id
+               LEFT JOIN users u ON u.user_id = pu.user_id
+               WHERE strftime('%Y-%m', pu.created_at) = ?
+               ORDER BY pu.created_at""",
+            (month,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_npd_payments_by_month(limit: int = 6) -> list[dict]:
     """Фактически оплаченный НПД по месяцам: [{'month', 'total', 'count'}]."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -2179,13 +2196,23 @@ async def get_cdek_account(date_from: str | None = None,
 # здесь — сколько РЕАЛЬНО уже ушло, для сверки с банком.)
 
 async def add_npd_payment(amount: float, comment: str = "",
-                          user_id: int = 0, user_name: str = "") -> int:
+                          user_id: int = 0, user_name: str = "",
+                          paid_at: str | None = None) -> int:
+    """paid_at — если платёж закрывает конкретный прошлый месяц (кнопка
+    «месяц оплачен»), иначе пишется CURRENT_TIMESTAMP (реально сегодня)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute(
-            "INSERT INTO npd_payments (amount, comment, user_id, user_name) "
-            "VALUES (?, ?, ?, ?)",
-            (float(amount), (comment or "").strip() or None, user_id, user_name),
-        )
+        if paid_at:
+            cur = await db.execute(
+                "INSERT INTO npd_payments (amount, comment, user_id, user_name, paid_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (float(amount), (comment or "").strip() or None, user_id, user_name, paid_at),
+            )
+        else:
+            cur = await db.execute(
+                "INSERT INTO npd_payments (amount, comment, user_id, user_name) "
+                "VALUES (?, ?, ?, ?)",
+                (float(amount), (comment or "").strip() or None, user_id, user_name),
+            )
         await db.commit()
         return cur.lastrowid
 
