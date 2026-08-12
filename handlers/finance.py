@@ -210,16 +210,24 @@ async def _finance_full() -> tuple[str, bool]:
     return "\n\n".join(parts), has_debt
 
 
-def _finance_keyboard(has_debt: bool) -> InlineKeyboardMarkup:
-    rows = []
-    if has_debt:
-        rows.append([InlineKeyboardButton(text="✅ Мы в расчёте", callback_data="fin_settle")])
-    rows.append([InlineKeyboardButton(text=f"👤 Выплатил {config.OWNER_NAME}", callback_data="payout:owner"),
-                 InlineKeyboardButton(text=f"👤 Выплатил {config.PARTNER_NAME}", callback_data="payout:partner")])
-    rows.append([InlineKeyboardButton(text="🧾 НПД", callback_data="cash_log"),
-                 InlineKeyboardButton(text="🔄 Обновить", callback_data="fin_show")])
+def _finance_keyboard() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text="🤝 Взаиморасчёт", callback_data="fin_settle_menu")],
+        [InlineKeyboardButton(text="🧾 НПД", callback_data="cash_log"),
+         InlineKeyboardButton(text="🔄 Обновить", callback_data="fin_show")],
+    ]
     rows += _nav_row("show")
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _settle_menu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Мы в расчёте", callback_data="fin_settle")],
+        [InlineKeyboardButton(text=f"👤 Выплата {config.OWNER_NAME}", callback_data="payout:owner")],
+        [InlineKeyboardButton(text=f"👤 Выплата {config.PARTNER_NAME}", callback_data="payout:partner")],
+        [InlineKeyboardButton(text="📋 История взаиморасчётов", callback_data="settle_log")],
+        [InlineKeyboardButton(text="◀️ К финансам", callback_data="fin_show")],
+    ])
 
 
 async def _admin_only(callback: CallbackQuery) -> bool:
@@ -230,8 +238,8 @@ async def _admin_only(callback: CallbackQuery) -> bool:
 
 
 async def _show_finance(message: Message):
-    text, has_debt = await _finance_full()
-    markup = _finance_keyboard(has_debt)
+    text, _ = await _finance_full()
+    markup = _finance_keyboard()
     try:
         await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
     except Exception:
@@ -256,6 +264,19 @@ async def cb_fin_show(callback: CallbackQuery, state: FSMContext):
     await _show_finance(callback.message)
 
 
+@router.callback_query(F.data == "fin_settle_menu")
+async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
+    if not await _admin_only(callback):
+        return
+    await state.clear()
+    await callback.answer()
+    await callback.message.answer(
+        "🤝 <b>Взаиморасчёт</b>\n\nЗафиксировать расчёт, отметить выплату или посмотреть историю.",
+        parse_mode="HTML",
+        reply_markup=_settle_menu_keyboard(),
+    )
+
+
 @router.callback_query(F.data == "fin_settle")
 async def cb_fin_settle(callback: CallbackQuery):
     if not await _admin_only(callback):
@@ -274,7 +295,7 @@ async def cb_fin_settle(callback: CallbackQuery):
     except Exception as e:
         logger.error(f"settle error: {e}")
         await callback.message.edit_text(
-            "❌ Не удалось получить данные.", reply_markup=_finance_keyboard(False)
+            "❌ Не удалось получить данные.", reply_markup=_settle_menu_keyboard()
         )
         return
 
@@ -290,7 +311,7 @@ async def cb_fin_settle(callback: CallbackQuery):
         f"(печать {s['printed']} шт.)"
     )
     await callback.message.edit_text(text, parse_mode="HTML",
-                                     reply_markup=_finance_keyboard(False))
+                                     reply_markup=_settle_menu_keyboard())
 
 
 @router.callback_query(F.data.startswith("npd_del:"))
@@ -347,7 +368,7 @@ async def on_payout_amount(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"payout_del:{payout_id}")],
-            [InlineKeyboardButton(text="💳 Финансы", callback_data="fin_show")],
+            [InlineKeyboardButton(text="◀️ К взаиморасчёту", callback_data="fin_settle_menu")],
         ]),
     )
 
@@ -363,7 +384,7 @@ async def cb_payout_delete(callback: CallbackQuery):
         await callback.message.edit_text(
             "🗑 <s>Выплата удалена</s>", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="💳 Финансы", callback_data="fin_show")
+                InlineKeyboardButton(text="◀️ К взаиморасчёту", callback_data="fin_settle_menu")
             ]]),
         )
     except Exception:
@@ -502,4 +523,40 @@ async def cb_npd_markpaid(callback: CallbackQuery):
                              u.id, name, paid_at=f"{month}-28 12:00:00")
     await callback.answer(f"Отмечено: {mm}.{year} оплачен ✅")
     text, markup = await _cash_log_render()
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def _settle_log_render() -> tuple[str, InlineKeyboardMarkup]:
+    settlements = await db.get_settlements(limit=10)
+    payouts = await db.get_payouts(limit=10)
+
+    lines = ["📋 <b>История взаиморасчётов</b>"]
+    if settlements:
+        lines.append("\n<b>Расчёты («Мы в расчёте»):</b>")
+        for s in settlements:
+            lines.append(f"  {_msk(s['settled_at'])} — {int(s['count'])} продаж, "
+                         f"принято {float(s['gross']):,.2f} ₽, чисто {float(s['net']):,.2f} ₽")
+    if payouts:
+        lines.append("\n<b>Выплаты:</b>")
+        for p in payouts:
+            comment = f" — {p['comment']}" if p.get("comment") else ""
+            lines.append(f"  {_msk(p['paid_at'])} 👤 {p['recipient']}: "
+                         f"{float(p['amount']):,.2f} ₽{comment}")
+    if not settlements and not payouts:
+        lines.append("\nПока пусто.")
+
+    rows = [[InlineKeyboardButton(
+        text=f"🗑 {p['recipient']} {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
+        callback_data=f"payout_del:{p['id']}")] for p in payouts[:5]]
+    rows.append([InlineKeyboardButton(text="◀️ К взаиморасчёту", callback_data="fin_settle_menu")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "settle_log")
+async def cb_settle_log(callback: CallbackQuery):
+    if not await _admin_only(callback):
+        return
+    await callback.answer()
+    text, markup = await _settle_log_render()
     await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
