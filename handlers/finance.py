@@ -233,19 +233,26 @@ async def _settle_split() -> tuple[dict | None, dict | None, str, str, datetime]
     return s, last_settlement, dt_from, dt_to, now_utc
 
 
-async def _finance_full() -> tuple[str, bool]:
-    """Весь экран «Финансы»: пульс продаж + взаиморасчёт + касса одним текстом."""
-    pulse = await _finance_pulse_text()
+async def _debt_and_cash_text() -> tuple[str, bool]:
+    """«Взаиморасчёт» + касса одним текстом — везде, где показывается
+    взаиморасчёт (главный экран «Финансы» и подменю «🤝 Взаиморасчёт»),
+    чтобы не приходилось скакать между экранами за половиной цифр."""
     s, last_settlement, dt_from, dt_to, now_utc = await _settle_split()
-
     debt_text, cdek_paid, npd_paid = await _debt_block(s, last_settlement, dt_from, dt_to, now_utc)
     has_debt = bool(s and s["count"] > 0)
 
-    parts = [pulse, debt_text]
+    parts = [debt_text]
     if has_debt:
         parts.append(await _cash_block_text(s, dt_from, dt_to, cdek_paid, npd_paid))
 
     return "\n\n".join(parts), has_debt
+
+
+async def _finance_full() -> tuple[str, bool]:
+    """Весь экран «Финансы»: пульс продаж + взаиморасчёт + касса одним текстом."""
+    pulse = await _finance_pulse_text()
+    debt_and_cash, has_debt = await _debt_and_cash_text()
+    return f"{pulse}\n\n{debt_and_cash}", has_debt
 
 
 def _finance_keyboard() -> InlineKeyboardMarkup:
@@ -308,8 +315,7 @@ async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.answer()
-    s, last_settlement, dt_from, dt_to, now_utc = await _settle_split()
-    text, _, _ = await _debt_block(s, last_settlement, dt_from, dt_to, now_utc)
+    text, _ = await _debt_and_cash_text()
     await callback.message.answer(
         text,
         parse_mode="HTML",
