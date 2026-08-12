@@ -2431,6 +2431,17 @@ async def get_last_settlement() -> Optional[dict]:
             return dict(row) if row else None
 
 
+async def get_settlements(limit: int = 10) -> list[dict]:
+    """Прошлые расчёты, свежие сверху — для «Истории взаиморасчётов»."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM settlements ORDER BY settled_at DESC LIMIT ?",
+            (int(limit),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_sales_by_product() -> list[dict]:
     """Разбивка продаж по товарам: name, count, revenue (по убыванию выручки)."""
     async with aiosqlite.connect(DB_PATH) as db:
