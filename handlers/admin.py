@@ -2347,8 +2347,7 @@ async def fsm_survey_routing(message: Message, state: FSMContext):
         note = "✅ Распределение сохранено."
     await state.clear()
     product = await db.get_product(pid)
-    questions = await db.get_product_questions(pid)
-    await message.answer(note, reply_markup=product_submenu_survey(product, questions))
+    await message.answer(note, reply_markup=admin_product_keyboard(product))
 
 
 @router.callback_query(F.data.startswith("admin:survey_paid:"))
@@ -2392,8 +2391,7 @@ async def fsm_survey_paid(message: Message, state: FSMContext):
         note = "✅ Сообщение после оплаты сохранено."
     await state.clear()
     product = await db.get_product(pid)
-    questions = await db.get_product_questions(pid)
-    await message.answer(note, reply_markup=product_submenu_survey(product, questions))
+    await message.answer(note, reply_markup=admin_product_keyboard(product))
 
 
 @router.callback_query(F.data.startswith("admin:survey_del:"))
@@ -2539,8 +2537,7 @@ async def fsm_survey_delivery(message: Message, state: FSMContext):
         note = "✅ Сохранено."
     await state.clear()
     product = await db.get_product(pid)
-    questions = await db.get_product_questions(pid)
-    await message.answer(note, reply_markup=product_submenu_survey(product, questions))
+    await message.answer(note, reply_markup=admin_product_keyboard(product))
 
 
 # --- Пуш отзыва ---

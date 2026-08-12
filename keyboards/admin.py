@@ -190,6 +190,7 @@ def admin_product_keyboard(product: dict, purchase_count: int = 0) -> InlineKeyb
         *([[InlineKeyboardButton(text=_package_label(product),
                                  callback_data=f"admin:pkg:{pid}")]]
           if category == "physical" else []),
+        *(_physical_settings_rows(product) if category == "physical" else []),
         [InlineKeyboardButton(text=f"💌 Маркетинг  {rp} пуш отзыва",
                               callback_data=f"admin:psub:marketing:{pid}")],
         [InlineKeyboardButton(text=f"{toggle_icon} {toggle_text}",
@@ -209,6 +210,29 @@ def _package_label(product: dict) -> str:
                         for k in ("pkg_length", "pkg_width", "pkg_height"))
         return f"📐 Габариты: {w_str}, {dims} см"
     return "📐 Габариты: по умолчанию"
+
+
+def _physical_settings_rows(product: dict) -> list[list[InlineKeyboardButton]]:
+    """Доставка, распределение по печати и текст после оплаты — только физтовары."""
+    pid = product["id"]
+    delivery_on = bool(product.get("survey_delivery_text"))
+    if config.CDEK_ENABLED:
+        # Расчёт СДЭК подменяет текстовый блок — показываем, что работает на самом деле
+        delivery_label = "🚚 Доставка: СДЭК до ПВЗ, расчёт автоматом"
+    else:
+        delivery_label = "🚚 Доставка: ✅ вкл" if delivery_on else "🚚 Доставка: не задана"
+
+    routing_on = bool(product.get("order_routing_text"))
+    routing_label = "🖨 Кто печатает: ✅ задано" if routing_on else "🖨 Кто печатает: не задано"
+
+    paid_on = bool(product.get("post_payment_text"))
+    paid_label = "💬 После оплаты: ✅ своё" if paid_on else "💬 После оплаты: по умолчанию"
+
+    return [
+        [InlineKeyboardButton(text=delivery_label, callback_data=f"admin:survey_delivery:{pid}")],
+        [InlineKeyboardButton(text=routing_label, callback_data=f"admin:survey_routing:{pid}")],
+        [InlineKeyboardButton(text=paid_label, callback_data=f"admin:survey_paid:{pid}")],
+    ]
 
 
 def package_keyboard(product_id: int, has_own: bool) -> InlineKeyboardMarkup:
@@ -337,19 +361,6 @@ def product_submenu_survey(product: dict, questions: list[dict]) -> InlineKeyboa
     repeat_on = bool(product.get("survey_repeat_text"))
     repeat_label = "🔁 Доп. позиция: ✅ вкл" if repeat_on else "🔁 Доп. позиция: не задана"
     rows.append([InlineKeyboardButton(text=repeat_label, callback_data=f"admin:survey_repeat:{pid}")])
-    delivery_on = bool(product.get("survey_delivery_text"))
-    if config.CDEK_ENABLED:
-        # Расчёт СДЭК подменяет текстовый блок — показываем, что работает на самом деле
-        delivery_label = "🚚 Доставка: СДЭК до ПВЗ, расчёт автоматом"
-    else:
-        delivery_label = "🚚 Доставка: ✅ вкл" if delivery_on else "🚚 Доставка: не задана"
-    rows.append([InlineKeyboardButton(text=delivery_label, callback_data=f"admin:survey_delivery:{pid}")])
-    routing_on = bool(product.get("order_routing_text"))
-    routing_label = "🖨 Кто печатает: ✅ задано" if routing_on else "🖨 Кто печатает: не задано"
-    rows.append([InlineKeyboardButton(text=routing_label, callback_data=f"admin:survey_routing:{pid}")])
-    paid_on = bool(product.get("post_payment_text"))
-    paid_label = "💬 После оплаты: ✅ своё" if paid_on else "💬 После оплаты: по умолчанию"
-    rows.append([InlineKeyboardButton(text=paid_label, callback_data=f"admin:survey_paid:{pid}")])
     rows.append([_back_to_product(pid)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
