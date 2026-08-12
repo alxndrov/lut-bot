@@ -584,8 +584,22 @@ async def cb_cash_log(callback: CallbackQuery):
         return
     npd = await db.get_npd_payments(limit=10)
     payouts = await db.get_payouts(limit=10)
+    revenue_by_month = await db.get_revenue_by_month(limit=6)
+    npd_paid_by_month = {r["month"]: r for r in await db.get_npd_payments_by_month(limit=12)}
 
     lines = ["📋 <b>История кассы</b>"]
+
+    if revenue_by_month:
+        lines.append("\n<b>НПД по месяцам:</b>")
+        for row in revenue_by_month:
+            year, month = (row["month"] or "____-__").split("-")
+            accrued = float(row["gross"]) * _NPD_RATE
+            paid_row = npd_paid_by_month.get(row["month"])
+            paid = float(paid_row["total"]) if paid_row else 0.0
+            mark = "✅" if paid >= accrued - 0.5 else ("◻️" if paid == 0 else "⏳")
+            lines.append(f"  {mark} {month}.{year}: начислено <b>{accrued:,.2f} ₽</b>, "
+                         f"оплачено {paid:,.2f} ₽")
+
     if npd:
         lines.append("\n<b>НПД:</b>")
         for p in npd:

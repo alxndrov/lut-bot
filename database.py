@@ -1909,6 +1909,36 @@ async def get_period_revenue(dt_from: str, dt_to: str) -> dict:
     return row
 
 
+async def get_revenue_by_month(limit: int = 6) -> list[dict]:
+    """Принято по месяцам: [{'month': 'ГГГГ-ММ', 'gross', 'count'}], свежие сверху.
+
+    НПД считается со всей принятой суммы (см. config.NPD_PERCENT) — отсюда
+    берётся начисление налога по месяцам, см. get_npd_payments_by_month.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT strftime('%Y-%m', created_at) AS month,
+                      COALESCE(SUM(amount), 0) AS gross, COUNT(*) AS count
+               FROM purchases GROUP BY month ORDER BY month DESC LIMIT ?""",
+            (int(limit),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_npd_payments_by_month(limit: int = 6) -> list[dict]:
+    """Фактически оплаченный НПД по месяцам: [{'month', 'total', 'count'}]."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT strftime('%Y-%m', paid_at) AS month,
+                      COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+               FROM npd_payments GROUP BY month ORDER BY month DESC LIMIT ?""",
+            (int(limit),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 # ── Расходы ────────────────────────────────────────────────────────────
 
 async def get_expense_categories() -> list[str]:
