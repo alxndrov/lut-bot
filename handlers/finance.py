@@ -39,6 +39,16 @@ class CashStates(StatesGroup):
     waiting_payout = State()
 
 
+def _dative(name: str) -> str:
+    """Грубое склонение в дательный падеж для обычных русских имён вида
+    Миша/Даня/Саша (то, что реально бывает в OWNER_NAME/PARTNER_NAME):
+    конечную «а»/«я» меняем на «е». Имя другой формы возвращаем как есть —
+    лучше без падежа, чем с неправильным."""
+    if name and name[-1] in "ая":
+        return name[:-1] + "е"
+    return name
+
+
 def _fmt_period(label: str, s: dict) -> str:
     if s["count"] == 0:
         return f"{label}\n  Продаж не было\n"
@@ -94,24 +104,56 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
     return "\n".join(lines)
 
 
-async def _cash_block_text(s: dict, dt_from: str, dt_to: str, now_utc: datetime) -> str:
-    """«Взаиморасчёт» выше — начисление: сколько ДОЛЖНО уйти на налог, СДЭК
-    и доли партнёров. Здесь — сколько реально ушло (по вашим отметкам) и
-    сколько поэтому реально должно быть на счету прямо сейчас."""
-    cdek_paid = await db.get_cdek_payments_summary(dt_from, dt_to)
-    npd_paid = await db.get_npd_payments_summary(dt_from, dt_to)
-    payouts = await db.get_payouts_summary(dt_from, dt_to)
+async def _debt_caveats(s: dict, dt_from: str, dt_to: str, now_utc: datetime,
+                        cdek_paid: dict, npd_paid: dict) -> str:
+    """Оговорки к цифрам «Взаиморасчёта»: часть «Принято» может быть ещё не
+    на счету (Prodamus не переводит деньги мгновенно), а часть начисленного
+    СДЭК/НПД — ещё не оплачена по факту. Не ошибка, а просто разное время."""
+    lines = []
 
-    cash = (s["gross"] - s["fee"] - s["expenses"]
-            - float(cdek_paid["total"]) - float(npd_paid["total"]) - payouts["total"])
-
-    # Эвристика, не факт: Prodamus переводит деньги на счёт не мгновенно,
-    # а с задержкой в 1-2 дня — заказы за это время бот уже посчитал
-    # в «Принято» выше, а по факту они могут быть ещё не на счету.
     recent_from_dt = max(datetime.strptime(dt_from, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc),
                          now_utc - timedelta(days=2))
     recent = await db.get_period_revenue(recent_from_dt.strftime("%Y-%m-%d %H:%M:%S"), dt_to)
     recent_gross = float(recent["physical"]) + float(recent["digital"]) + float(recent["delivery"])
+    if recent_gross:
+        lines.append(f"<i>⏳ ≈{recent_gross:,.2f} ₽ из «Принято» выше — заказы последних 2 суток, "
+                     f"Prodamus мог их ещё не перевести на счёт</i>")
+
+    not_paid_cdek = s["delivery_out"] - float(cdek_paid["total"])
+    not_paid_npd = s["npd"] - float(npd_paid["total"])
+    if not_paid_cdek > 0.5 or not_paid_npd > 0.5:
+        lines.append(
+            f"<i>Начислено выше, но не оплачено по факту: СДЭК {max(not_paid_cdek, 0):,.2f} ₽"
+            f" · НПД {max(not_paid_npd, 0):,.2f} ₽ — резерв на счету, пока не пришёл "
+            f"счёт СДЭК и не наступил срок уплаты налога.</i>"
+        )
+    return "\n".join(lines)
+
+
+async def _debt_block(s: dict | None, last_settlement: dict | None,
+                      dt_from: str, dt_to: str, now_utc: datetime) -> tuple[str, dict, dict]:
+    """«Взаиморасчёт» + оговорки к его цифрам одним текстом. Заодно
+    отдаёт cdek_paid/npd_paid, чтобы «Касса» не считала их повторно."""
+    text = _fmt_debt_screen(s, last_settlement)
+    cdek_paid = npd_paid = {"total": 0, "count": 0}
+    if s and s["count"] > 0:
+        cdek_paid = await db.get_cdek_payments_summary(dt_from, dt_to)
+        npd_paid = await db.get_npd_payments_summary(dt_from, dt_to)
+        caveats = await _debt_caveats(s, dt_from, dt_to, now_utc, cdek_paid, npd_paid)
+        if caveats:
+            text += "\n" + caveats
+    return text, cdek_paid, npd_paid
+
+
+async def _cash_block_text(s: dict, dt_from: str, dt_to: str,
+                           cdek_paid: dict, npd_paid: dict) -> str:
+    """«Взаиморасчёт» выше — начисление: сколько ДОЛЖНО уйти на налог, СДЭК
+    и доли партнёров. Здесь — сколько реально ушло (по вашим отметкам) и
+    сколько поэтому реально должно быть на счету прямо сейчас."""
+    payouts = await db.get_payouts_summary(dt_from, dt_to)
+
+    cash = (s["gross"] - s["fee"] - s["expenses"]
+            - float(cdek_paid["total"]) - float(npd_paid["total"]) - payouts["total"])
 
     lines = [
         "💰 <b>Касса</b> — реальные деньги на счету, не доля прибыли выше",
@@ -129,17 +171,6 @@ async def _cash_block_text(s: dict, dt_from: str, dt_to: str, now_utc: datetime)
         f"💰 <b>Ожидаемый остаток на счету: {cash:,.2f} ₽</b>",
         "<i>сверьте с выпиской банка</i>",
     ]
-    if recent_gross:
-        lines.append(f"<i>⏳ ≈{recent_gross:,.2f} ₽ из «Принято» выше — заказы последних 2 суток, "
-                     f"Prodamus мог их ещё не перевести на счёт</i>")
-    not_paid_cdek = s["delivery_out"] - float(cdek_paid["total"])
-    not_paid_npd = s["npd"] - float(npd_paid["total"])
-    if not_paid_cdek > 0.5 or not_paid_npd > 0.5:
-        lines.append(
-            f"<i>Начислено выше, но не оплачено по факту: СДЭК {max(not_paid_cdek, 0):,.2f} ₽"
-            f" · НПД {max(not_paid_npd, 0):,.2f} ₽ — резерв на счету, пока не пришёл "
-            f"счёт СДЭК и не наступил срок уплаты налога.</i>"
-        )
     return "\n".join(lines)
 
 
@@ -207,12 +238,12 @@ async def _finance_full() -> tuple[str, bool]:
     pulse = await _finance_pulse_text()
     s, last_settlement, dt_from, dt_to, now_utc = await _settle_split()
 
-    debt_text = _fmt_debt_screen(s, last_settlement)
+    debt_text, cdek_paid, npd_paid = await _debt_block(s, last_settlement, dt_from, dt_to, now_utc)
     has_debt = bool(s and s["count"] > 0)
 
     parts = [pulse, debt_text]
     if has_debt:
-        parts.append(await _cash_block_text(s, dt_from, dt_to, now_utc))
+        parts.append(await _cash_block_text(s, dt_from, dt_to, cdek_paid, npd_paid))
 
     return "\n\n".join(parts), has_debt
 
@@ -230,8 +261,8 @@ def _finance_keyboard() -> InlineKeyboardMarkup:
 def _settle_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Мы в расчёте", callback_data="fin_settle")],
-        [InlineKeyboardButton(text=f"👤 Выплата {config.OWNER_NAME}", callback_data="payout:owner")],
-        [InlineKeyboardButton(text=f"👤 Выплата {config.PARTNER_NAME}", callback_data="payout:partner")],
+        [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.OWNER_NAME)}", callback_data="payout:owner")],
+        [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.PARTNER_NAME)}", callback_data="payout:partner")],
         [InlineKeyboardButton(text="📋 История взаиморасчётов", callback_data="settle_log")],
         [InlineKeyboardButton(text="◀️ К финансам", callback_data="fin_show")],
     ])
@@ -277,9 +308,10 @@ async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.answer()
-    s, last_settlement, *_ = await _settle_split()
+    s, last_settlement, dt_from, dt_to, now_utc = await _settle_split()
+    text, _, _ = await _debt_block(s, last_settlement, dt_from, dt_to, now_utc)
     await callback.message.answer(
-        _fmt_debt_screen(s, last_settlement),
+        text,
         parse_mode="HTML",
         reply_markup=_settle_menu_keyboard(),
     )
@@ -350,7 +382,7 @@ async def cb_payout_start(callback: CallbackQuery, state: FSMContext):
     await state.update_data(recipient=recipient)
     await callback.answer()
     await callback.message.answer(
-        f"👤 <b>Сколько выплатили {recipient}?</b>\n\nНапишите сумму, можно с комментарием:\n"
+        f"👤 <b>Сколько выплатили {_dative(recipient)}?</b>\n\nНапишите сумму, можно с комментарием:\n"
         "<code>15000 за июль</code>",
         parse_mode="HTML",
     )
