@@ -90,13 +90,6 @@ GOOGLE_SHEET_TAB: str = os.getenv("GOOGLE_SHEET_TAB", "Заказы")
 GSHEETS_ENABLED: bool = bool(GOOGLE_SHEET_ID)
 DAILY_REPORT_HOUR_MSK: int = int(os.getenv("DAILY_REPORT_HOUR_MSK", "9"))
 
-# Read-only HTTPS-эндпоинт для отладки заказов (см. handlers/debug_api.py).
-# Без токена сервер не поднимается вообще — по умолчанию выключен.
-# Токен сравнивается constant-time, самоподписанный TLS-сертификат
-# генерируется автоматически при первом запуске.
-DEBUG_API_TOKEN: str = os.getenv("DEBUG_API_TOKEN", "")
-DEBUG_API_PORT: int = int(os.getenv("DEBUG_API_PORT", "8443"))
-
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env")
 if not ADMIN_IDS:

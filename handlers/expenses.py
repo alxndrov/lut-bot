@@ -23,6 +23,24 @@ logger = logging.getLogger(__name__)
 
 MSK = timezone(timedelta(hours=3))
 
+# Единая навигация между разделами «Финансов» — одна и та же строка кнопок
+# внизу каждого экрана (выручка/расчёт/расходы/СДЭК), чтобы всё было
+# доступно из одной команды /finance, а не из четырёх разных.
+_NAV_SECTIONS = [
+    ("show", "💳 Выручка", "fin_show"),
+    ("debt", "🤝 Расчёт", "fin_debt"),
+    ("exp", "🧾 Расходы", "exp_show"),
+    ("cdek", "🚚 СДЭК", "cdek_show"),
+]
+
+
+def _nav_row(current: str) -> list[InlineKeyboardButton]:
+    return [
+        InlineKeyboardButton(text=label if key != current else f"· {label} ·",
+                             callback_data=cb)
+        for key, label, cb in _NAV_SECTIONS
+    ]
+
 
 class ExpenseStates(StatesGroup):
     waiting_amount = State()
@@ -175,19 +193,13 @@ async def cb_expense_delete(callback: CallbackQuery):
         pass
 
 
-@router.message(Command("expenses"))
-async def cmd_expenses(message: Message):
-    """Расходы за текущий месяц: сумма, по статьям и последние записи."""
-    if message.from_user.id not in config.ADMIN_IDS:
-        return
+async def _expenses_text() -> str:
     date_from, date_to = _month_bounds()
     summary = await db.get_expenses_summary(date_from, date_to)
     items = await db.get_expenses(date_from, date_to)
 
     if not items:
-        await message.answer("🧾 В этом месяце расходов ещё не было.\n"
-                             "Внести — /expense")
-        return
+        return "🧾 <b>Расходы</b>\n\nВ этом месяце расходов ещё не было."
 
     month = datetime.now(MSK).strftime("%m.%Y")
     lines = [f"🧾 <b>Расходы за {month}: {summary['total']:,.2f} ₽</b>", ""]
@@ -201,16 +213,56 @@ async def cmd_expenses(message: Message):
         who = f" · {e['user_name']}" if e.get("user_name") else ""
         lines.append(f"  {_msk(e['spent_at'])} {e['category']} "
                      f"{e['amount']:,.2f} ₽{tail}{who}")
+    return "\n".join(lines)
 
-    await message.answer("\n".join(lines), parse_mode="HTML",
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                             [InlineKeyboardButton(text="🗑 Удалить расход",
-                                                   callback_data="exp_dellist")],
-                             # Счёт СДЭК живёт отдельно: доставку оплачивает
-                             # клиент, в расходы на двоих она не попадает
-                             [InlineKeyboardButton(text="🚚 Счёт СДЭК",
-                                                   callback_data="cdek_show")],
-                         ]))
+
+def _expenses_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Внести расход", callback_data="exp_add")],
+        [InlineKeyboardButton(text="🗑 Удалить расход", callback_data="exp_dellist")],
+        _nav_row("exp"),
+    ])
+
+
+async def _show_expenses(message: Message, edit: bool = False):
+    text = await _expenses_text()
+    markup = _expenses_keyboard()
+    if edit:
+        try:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+            return
+        except Exception:
+            pass
+    await message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.message(Command("expenses"))
+async def cmd_expenses(message: Message):
+    """Расходы за текущий месяц: сумма, по статьям и последние записи."""
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    await _show_expenses(message)
+
+
+@router.callback_query(F.data == "exp_show")
+async def cb_expenses_show(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    await state.clear()
+    await callback.answer()
+    await _show_expenses(callback.message, edit=True)
+
+
+@router.callback_query(F.data == "exp_add")
+async def cb_expense_add(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    await state.clear()
+    await callback.answer()
+    await callback.message.answer("🧾 <b>Куда потратили?</b>", parse_mode="HTML",
+                                  reply_markup=await _categories_keyboard())
 
 
 @router.callback_query(F.data == "exp_dellist")
