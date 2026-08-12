@@ -333,6 +333,33 @@ async def init_db():
                 user_name TEXT
             )
         """)
+        # Фактически заплаченный НПД (налог самозанятого) — в отличие от
+        # accrued-оценки в «Взаиморасчёте», это реальные платежи в «Мой
+        # налог», нужны для кассового остатка (см. handlers/finance.py).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS npd_payments (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                paid_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                amount    REAL NOT NULL,
+                comment   TEXT,
+                user_id   INTEGER,
+                user_name TEXT
+            )
+        """)
+        # Фактические выплаты Мише/Дане с общего счёта — без этого «Кассовый
+        # остаток» не знает, что часть уже посчитанной прибыли реально
+        # забрали, и посчитает остаток завышенным.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS payouts (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                paid_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                recipient TEXT NOT NULL,
+                amount    REAL NOT NULL,
+                comment   TEXT,
+                user_id   INTEGER,
+                user_name TEXT
+            )
+        """)
         # Таблица первой версии счёта — она была под предоплату, а СДЭК
         # так не работает. Пустую убираем, чтобы не путалась; если в ней
         # что-то есть, оставляем как есть и разбираемся руками.
@@ -2115,6 +2142,104 @@ async def get_cdek_account(date_from: str | None = None,
         account["period_accrued_count"] = int(p_accrued["count"])
         account["period_paid"] = float(p_paid["total"])
     return account
+
+
+# ── Кассовый остаток: фактический НПД и выплаты партнёрам ────────────────
+# (Взаиморасчёт считает НПД и доли начислением — сколько ДОЛЖНО уйти;
+# здесь — сколько РЕАЛЬНО уже ушло, для сверки с банком.)
+
+async def add_npd_payment(amount: float, comment: str = "",
+                          user_id: int = 0, user_name: str = "") -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO npd_payments (amount, comment, user_id, user_name) "
+            "VALUES (?, ?, ?, ?)",
+            (float(amount), (comment or "").strip() or None, user_id, user_name),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_npd_payment(payment_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM npd_payments WHERE id = ?", (payment_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_npd_payments(limit: int = 20) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM npd_payments ORDER BY paid_at DESC, id DESC LIMIT ?",
+            (int(limit),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_npd_payments_summary(date_from: str | None = None,
+                                   date_to: str | None = None) -> dict:
+    sql = "SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count FROM npd_payments"
+    params: tuple = ()
+    if date_from and date_to:
+        date_from, date_to = period_bounds(date_from, date_to)
+        sql += " WHERE datetime(paid_at) BETWEEN datetime(?) AND datetime(?)"
+        params = (date_from, date_to)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            return dict(await cur.fetchone())
+
+
+async def add_payout(recipient: str, amount: float, comment: str = "",
+                     user_id: int = 0, user_name: str = "") -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO payouts (recipient, amount, comment, user_id, user_name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (recipient, float(amount), (comment or "").strip() or None, user_id, user_name),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def delete_payout(payout_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM payouts WHERE id = ?", (payout_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_payouts(limit: int = 20) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM payouts ORDER BY paid_at DESC, id DESC LIMIT ?",
+            (int(limit),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_payouts_summary(date_from: str | None = None,
+                              date_to: str | None = None) -> dict:
+    """{'total', 'count', 'by_recipient': {имя: сумма}}."""
+    sql = "SELECT recipient, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count FROM payouts"
+    params: tuple = ()
+    if date_from and date_to:
+        date_from, date_to = period_bounds(date_from, date_to)
+        sql += " WHERE datetime(paid_at) BETWEEN datetime(?) AND datetime(?)"
+        params = (date_from, date_to)
+    sql += " GROUP BY recipient"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, params) as cur:
+            rows = [dict(r) for r in await cur.fetchall()]
+    by_recipient = {r["recipient"]: float(r["total"]) for r in rows}
+    return {
+        "total": sum(by_recipient.values()),
+        "count": sum(int(r["count"]) for r in rows),
+        "by_recipient": by_recipient,
+    }
 
 
 async def get_orders_export() -> list[dict]:

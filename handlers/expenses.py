@@ -23,23 +23,27 @@ logger = logging.getLogger(__name__)
 
 MSK = timezone(timedelta(hours=3))
 
-# Единая навигация между разделами «Финансов» — одна и та же строка кнопок
-# внизу каждого экрана (выручка/расчёт/расходы/СДЭК), чтобы всё было
-# доступно из одной команды /finance, а не из четырёх разных.
+# Единая навигация между разделами «Финансов» — одни и те же кнопки внизу
+# каждого экрана (выручка/расчёт/расходы/СДЭК/касса), чтобы всё было
+# доступно из одной команды /finance, а не из пяти разных. Два ряда —
+# пять кнопок в одну строку на телефоне превращаются в нечитаемую кашу.
 _NAV_SECTIONS = [
     ("show", "💳 Выручка", "fin_show"),
     ("debt", "🤝 Расчёт", "fin_debt"),
     ("exp", "🧾 Расходы", "exp_show"),
     ("cdek", "🚚 СДЭК", "cdek_show"),
+    ("cash", "💰 Касса", "fin_cash"),
 ]
 
 
-def _nav_row(current: str) -> list[InlineKeyboardButton]:
-    return [
+def _nav_row(current: str) -> list[list[InlineKeyboardButton]]:
+    """Две строки кнопок навигации — добавлять через rows += _nav_row(...)."""
+    buttons = [
         InlineKeyboardButton(text=label if key != current else f"· {label} ·",
                              callback_data=cb)
         for key, label, cb in _NAV_SECTIONS
     ]
+    return [buttons[:3], buttons[3:]]
 
 
 class ExpenseStates(StatesGroup):
@@ -217,11 +221,12 @@ async def _expenses_text() -> str:
 
 
 def _expenses_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [InlineKeyboardButton(text="➕ Внести расход", callback_data="exp_add")],
         [InlineKeyboardButton(text="🗑 Удалить расход", callback_data="exp_dellist")],
-        _nav_row("exp"),
-    ])
+    ]
+    rows += _nav_row("exp")
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _show_expenses(message: Message, edit: bool = False):

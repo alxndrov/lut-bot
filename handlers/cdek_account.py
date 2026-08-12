@@ -57,12 +57,13 @@ def _rub(value: float) -> str:
 
 def _account_keyboard() -> InlineKeyboardMarkup:
     """Счёт от СДЭК приходит частями, поэтому сумму всегда спрашиваем."""
-    return InlineKeyboardMarkup(inline_keyboard=[
+    rows = [
         [InlineKeyboardButton(text="💸 Внёс оплату", callback_data="cdek_pay")],
         [InlineKeyboardButton(text="📋 История", callback_data="cdek_log")],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data="cdek_show")],
-        _nav_row("cdek"),
-    ])
+    ]
+    rows += _nav_row("cdek")
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def _account() -> dict:
