@@ -84,7 +84,7 @@ async def main():
                 BotCommand(command="allorders", description="Все заказы и статусы"),
                 BotCommand(command="sentorders", description="Отправленные заказы"),
                 BotCommand(command="refresh", description="Обновить карточки заказов"),
-                BotCommand(command="finance", description="Финансы: выручка, расчёт, расходы, СДЭК, касса"),
+                BotCommand(command="finance", description="Финансы: выручка, расчёт, касса"),
                 BotCommand(command="debug", description="Отладка заказа (код или id)"),
             ])
         except Exception as e:
