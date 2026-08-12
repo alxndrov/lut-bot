@@ -36,7 +36,6 @@ _NPD_RATE = config.NPD_PERCENT / 100
 
 
 class CashStates(StatesGroup):
-    waiting_npd = State()
     waiting_payout = State()
 
 
@@ -215,10 +214,9 @@ def _finance_keyboard(has_debt: bool) -> InlineKeyboardMarkup:
     rows = []
     if has_debt:
         rows.append([InlineKeyboardButton(text="✅ Мы в расчёте", callback_data="fin_settle")])
-    rows.append([InlineKeyboardButton(text="💸 Заплатил НПД", callback_data="npd_pay")])
     rows.append([InlineKeyboardButton(text=f"👤 Выплатил {config.OWNER_NAME}", callback_data="payout:owner"),
                  InlineKeyboardButton(text=f"👤 Выплатил {config.PARTNER_NAME}", callback_data="payout:partner")])
-    rows.append([InlineKeyboardButton(text="📋 История", callback_data="cash_log"),
+    rows.append([InlineKeyboardButton(text="🧾 НПД", callback_data="cash_log"),
                  InlineKeyboardButton(text="🔄 Обновить", callback_data="fin_show")])
     rows += _nav_row("show")
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -293,42 +291,6 @@ async def cb_fin_settle(callback: CallbackQuery):
     )
     await callback.message.edit_text(text, parse_mode="HTML",
                                      reply_markup=_finance_keyboard(False))
-
-
-@router.callback_query(F.data == "npd_pay")
-async def cb_npd_pay(callback: CallbackQuery, state: FSMContext):
-    if not await _admin_only(callback):
-        return
-    await state.set_state(CashStates.waiting_npd)
-    await callback.answer()
-    await callback.message.answer(
-        "💸 <b>Сколько заплатили НПД?</b>\n\nНапишите сумму, можно с комментарием:\n"
-        "<code>1500 за июль</code>",
-        parse_mode="HTML",
-    )
-
-
-@router.message(CashStates.waiting_npd)
-async def on_npd_amount(message: Message, state: FSMContext):
-    amount, comment = _parse_amount(message.text or "")
-    if amount is None:
-        await message.answer("Не понял сумму. Напишите числом, например <code>1500</code>.",
-                             parse_mode="HTML")
-        return
-    u = message.from_user
-    name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
-    payment_id = await db.add_npd_payment(amount, comment, u.id, name)
-    await state.clear()
-
-    tail = f"\n💬 {comment}" if comment else ""
-    await message.answer(
-        f"✅ Записал оплату НПД\n\n💸 <b>{amount:,.2f} ₽</b>{tail}",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"npd_del:{payment_id}")],
-            [InlineKeyboardButton(text="💳 Финансы", callback_data="fin_show")],
-        ]),
-    )
 
 
 @router.callback_query(F.data.startswith("npd_del:"))
@@ -414,11 +376,11 @@ async def _cash_log_render() -> tuple[str, InlineKeyboardMarkup]:
     revenue_by_month = await db.get_revenue_by_month(limit=6)
     npd_paid_by_month = {r["month"]: r for r in await db.get_npd_payments_by_month(limit=12)}
 
-    lines = ["📋 <b>История кассы</b>"]
-    unpaid_months = []  # (month_key, mm.yyyy) — для кнопок «Детали»/«Оплачен» ниже
+    lines = ["🧾 <b>НПД</b>"]
+    months = []  # (month_key, mm.yyyy, оплачен_ли) — для кнопок ниже
 
     if revenue_by_month:
-        lines.append("\n<b>НПД по месяцам:</b>")
+        lines.append("\n<b>По месяцам:</b>")
         for row in revenue_by_month:
             month_key = row["month"] or "____-__"
             year, month = month_key.split("-")
@@ -428,11 +390,10 @@ async def _cash_log_render() -> tuple[str, InlineKeyboardMarkup]:
             mark = "✅" if paid >= accrued - 0.5 else ("◻️" if paid == 0 else "⏳")
             lines.append(f"  {mark} {month}.{year}: начислено <b>{accrued:,.2f} ₽</b>, "
                          f"оплачено {paid:,.2f} ₽")
-            if mark != "✅":
-                unpaid_months.append((month_key, f"{month}.{year}"))
+            months.append((month_key, f"{month}.{year}", mark == "✅"))
 
     if npd:
-        lines.append("\n<b>НПД:</b>")
+        lines.append("\n<b>Отдельные платежи:</b>")
         for p in npd:
             comment = f" — {p['comment']}" if p.get("comment") else ""
             who = f" · {p['user_name']}" if p.get("user_name") else ""
@@ -446,9 +407,12 @@ async def _cash_log_render() -> tuple[str, InlineKeyboardMarkup]:
     if not npd and not payouts:
         lines.append("\nПока пусто.")
 
-    rows = [[InlineKeyboardButton(text=f"🔍 Детали {label}", callback_data=f"npd_detail:{key}"),
-             InlineKeyboardButton(text=f"✅ {label} оплачен", callback_data=f"npd_markpaid:{key}")]
-            for key, label in unpaid_months]
+    rows = []
+    for key, label, is_paid in months:
+        row = [InlineKeyboardButton(text=f"🔍 Детали {label}", callback_data=f"npd_detail:{key}")]
+        if not is_paid:
+            row.append(InlineKeyboardButton(text=f"✅ {label} оплачен", callback_data=f"npd_markpaid:{key}"))
+        rows.append(row)
     rows += [[InlineKeyboardButton(
         text=f"🗑 НПД {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
         callback_data=f"npd_del:{p['id']}")] for p in npd[:5]]
