@@ -11,6 +11,7 @@ import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance
 from handlers.prodamus_webhook import create_app as create_webhook_app
+from handlers.debug_api import create_debug_app, build_ssl_context
 from services.daily_report import daily_report_loop, monthly_report_loop
 from services.funnel import funnel_worker
 from services.review_push import review_push_worker
@@ -61,6 +62,18 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", config.PRODAMUS_WEBHOOK_PORT)
     await site.start()
     logging.info(f"Webhook-сервер запущен на порту {config.PRODAMUS_WEBHOOK_PORT}")
+
+    # Read-only HTTPS для отладки заказов — только если задан токен.
+    # Без DEBUG_API_TOKEN сервер не поднимается: по умолчанию наружу ничего
+    # лишнего не торчит.
+    if config.DEBUG_API_TOKEN:
+        debug_app = create_debug_app()
+        debug_runner = web.AppRunner(debug_app)
+        await debug_runner.setup()
+        debug_site = web.TCPSite(debug_runner, "0.0.0.0", config.DEBUG_API_PORT,
+                                 ssl_context=build_ssl_context())
+        await debug_site.start()
+        logging.info(f"Debug-API запущен на порту {config.DEBUG_API_PORT} (HTTPS).")
 
     # Отдельный поллинг админского бота (malimadmins) — для кнопки «Взял заказ»
     if config.WAITLIST_BOT_TOKEN:
