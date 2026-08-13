@@ -8,7 +8,7 @@ import json
 import logging
 from functools import partial
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from aiohttp import web
 from aiogram import Bot
@@ -242,6 +242,14 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             pvz_code=pending.get("pvz_code"),
             round_products_json=json.dumps(round_products, ensure_ascii=False),
         )
+
+        # Строка в финансовый лист Google Таблицы — по заказу целиком, не
+        # по позициям (доставка/комиссия/налог считаются от полной суммы).
+        # Комиссия/Налог/К выплате там — формулами, дописываются вместе со
+        # строкой (см. services/gsheets.py)
+        from services.gsheets import request_finance_append
+        order_date_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+        request_finance_append(order_code, order_date_msk, amount, delivery_cost_val)
 
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
         # Печатающих может быть несколько: заказ покажется каждому из них.
