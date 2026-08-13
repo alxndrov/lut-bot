@@ -322,9 +322,7 @@ async def init_db():
             )
         # Расходники под физические товары (см. handlers/consumables.py):
         # коробка — общая на микрофоны и кейсы, поп-фильтр — только на микрофоны.
-        # Стартовые остатки посчитаны вручную 2026-08-13 по факту на складе
-        # (списание привязано к отправке, поэтому остаток учитывает ВСЕ ещё
-        # не отправленные заказы, а не только ещё не напечатанные).
+        # Стартовые остатки — по факту на складе, названы пользователем 2026-08-13.
         await db.execute("""
             CREATE TABLE IF NOT EXISTS consumables (
                 key  TEXT PRIMARY KEY,
@@ -332,7 +330,7 @@ async def init_db():
                 qty  INTEGER NOT NULL DEFAULT 0
             )
         """)
-        for key, name, qty in (("box", "Коробка", 10), ("pop_filter", "Поп-фильтр", 14)):
+        for key, name, qty in (("box", "Коробка", 6), ("pop_filter", "Поп-фильтр", 10)):
             await db.execute(
                 "INSERT OR IGNORE INTO consumables (key, name, qty) VALUES (?, ?, ?)",
                 (key, name, qty),
