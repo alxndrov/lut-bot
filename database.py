@@ -2420,9 +2420,34 @@ async def get_payouts_for_finance_export() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_cdek_payments_for_finance_export() -> list[dict]:
+    """Все оплаченные счета СДЭК (см. /cdek) — расходные строки финансового
+    листа. В отличие от «Отложено на СДЭК» в строке прихода (это оценка
+    с каждого заказа) — здесь факт: сколько реально ушло по счёту."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, paid_at, amount, comment FROM cdek_payments ORDER BY paid_at"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_npd_payments_for_finance_export() -> list[dict]:
+    """Все оплаты налога НПД (см. «Кассовый остаток») — расходные строки
+    финансового листа. В отличие от «Налог» в строке прихода (начисление
+    с каждого заказа) — здесь факт: сколько реально уплачено."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, paid_at, amount, comment FROM npd_payments ORDER BY paid_at"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_cashflow_export_rows() -> list[dict]:
     """Все операции для финансового листа — приходы (физ- и цифровые
-    товары) и расходы (траты + выплаты партнёрам) одним списком, по дате.
+    товары) и расходы (траты, выплаты партнёрам, оплаты СДЭК и налога
+    НПД) одним списком, по дате.
 
     Общая форма строки: {code, created_at, amount, kind, comment,
     delivery_cost, delivery_legacy}. delivery_cost/delivery_legacy —
@@ -2457,6 +2482,22 @@ async def get_cashflow_export_rows() -> list[dict]:
         comment = f"Выплата {r['recipient']}" + (f": {r['comment']}" if r["comment"] else "")
         rows.append({
             "code": f"payout-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
+            "kind": "Расход", "comment": comment,
+            "delivery_cost": None, "delivery_legacy": None,
+        })
+
+    for r in await get_cdek_payments_for_finance_export():
+        comment = "Оплата СДЭК" + (f": {r['comment']}" if r["comment"] else "")
+        rows.append({
+            "code": f"cdek-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
+            "kind": "Расход", "comment": comment,
+            "delivery_cost": None, "delivery_legacy": None,
+        })
+
+    for r in await get_npd_payments_for_finance_export():
+        comment = "Налог НПД" + (f": {r['comment']}" if r["comment"] else "")
+        rows.append({
+            "code": f"npd-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
             "kind": "Расход", "comment": comment,
             "delivery_cost": None, "delivery_legacy": None,
         })

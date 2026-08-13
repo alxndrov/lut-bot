@@ -615,8 +615,13 @@ async def cb_npd_markpaid(callback: CallbackQuery):
     u = callback.from_user
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
     year, mm = month.split("-", 1) if "-" in month else ("", month)
-    await db.add_npd_payment(accrued, f"начислено за {mm}.{year}, отмечено оплаченным",
-                             u.id, name, paid_at=f"{month}-28 12:00:00")
+    payment_id = await db.add_npd_payment(
+        accrued, f"начислено за {mm}.{year}, отмечено оплаченным",
+        u.id, name, paid_at=f"{month}-28 12:00:00")
+
+    from services.gsheets import request_expense_append
+    request_expense_append(f"npd-{payment_id}", datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
+                           accrued, f"Налог НПД за {mm}.{year}")
     await callback.answer(f"Отмечено: {mm}.{year} оплачен ✅")
     text, markup = await _cash_log_render()
     await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
