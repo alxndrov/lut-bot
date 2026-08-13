@@ -2337,6 +2337,26 @@ async def get_orders_export() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_orders_for_finance_export() -> list[dict]:
+    """Заказы для (пере)выгрузки в финансовый лист: order_code, дата, и
+    сумма/отложено на СДЭК — суммой по всем purchases заказа (смешанный
+    заказ из разных товаров хранится несколькими строками purchases с
+    одним и тем же telegram_payment_id — здесь схлопываем их в одну)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT o.order_code, o.created_at,
+                      COALESCE(SUM(pu.amount), 0) AS amount,
+                      COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost
+               FROM orders o
+               LEFT JOIN purchases pu ON pu.telegram_payment_id = o.prodamus_order_id
+               WHERE o.order_code IS NOT NULL
+               GROUP BY o.id
+               ORDER BY o.created_at"""
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_orders(only_unshipped: bool = False) -> list[dict]:
     """Оплаченные заказы (для аналитики отправок), свежие сверху."""
     where = "WHERE o.shipped_at IS NULL" if only_unshipped else ""

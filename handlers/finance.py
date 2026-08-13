@@ -651,3 +651,38 @@ async def cb_settle_log(callback: CallbackQuery):
     await callback.answer()
     text, markup = await _settle_log_render()
     await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.message(Command("gsheets_backfill"))
+async def cmd_gsheets_backfill(message: Message):
+    """Разовая команда: переносит уже созданные заказы в финансовый лист
+    Google Таблицы (новые заказы туда и так пишутся сами, см.
+    prodamus_webhook.py). Идемпотентна — можно жать сколько угодно раз,
+    уже перенесённые заказы не задвоятся."""
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    if not config.GSHEETS_ENABLED:
+        await message.answer("Google Таблица не настроена — нет GOOGLE_SHEET_ID в .env.")
+        return
+
+    rows = await db.get_orders_for_finance_export()
+    if not rows:
+        await message.answer("Заказов с номером (физтовары) в базе не нашлось — переносить нечего.")
+        return
+
+    m = await message.answer(f"⏳ Переношу заказы в лист «{config.GOOGLE_SHEET_FINANCE_TAB}»…")
+    try:
+        from services.gsheets import backfill_finance_rows, SheetsError
+        added, skipped = await asyncio.to_thread(backfill_finance_rows, rows)
+    except SheetsError as e:
+        await m.edit_text(f"❌ Не удалось выгрузить: {e}")
+        return
+    except Exception as e:
+        logger.exception("gsheets_backfill: неожиданная ошибка")
+        await m.edit_text(f"❌ Неожиданная ошибка: {type(e).__name__}: {e}")
+        return
+
+    text = f"✅ Готово. Добавлено новых строк: <b>{added}</b>"
+    if skipped:
+        text += f"\nУже было в листе (пропущено): {skipped}"
+    await m.edit_text(text, parse_mode="HTML")
