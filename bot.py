@@ -9,7 +9,7 @@ from aiogram.types import BotCommand
 import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
-from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd
+from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop, monthly_report_loop
 from services.funnel import funnel_worker
@@ -71,6 +71,7 @@ async def main():
         admin_dp.include_router(cdek_account.router)
         admin_dp.include_router(finance.router)
         admin_dp.include_router(debug_cmd.router)
+        admin_dp.include_router(consumables.router)
         asyncio.create_task(
             admin_dp.start_polling(admin_bot,
                                    allowed_updates=["callback_query", "message"])
@@ -85,6 +86,7 @@ async def main():
                 BotCommand(command="sentorders", description="Отправленные заказы"),
                 BotCommand(command="refresh", description="Обновить карточки заказов"),
                 BotCommand(command="finance", description="Финансы: выручка, расчёт, касса"),
+                BotCommand(command="stock", description="📦 Расходники"),
                 BotCommand(command="debug", description="Отладка заказа (код или id)"),
             ])
         except Exception as e:

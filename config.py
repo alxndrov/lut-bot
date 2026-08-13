@@ -25,6 +25,10 @@ CDEK_ENABLED: bool = bool(CDEK_ACCOUNT and CDEK_SECURE_PASSWORD)
 # Код ПВЗ СДЭК, куда вы сдаёте посылки (например, MSK123). Без него заказы
 # в СДЭК не создаются — бот только считает доставку, а заказ заводится вручную.
 CDEK_SHIPMENT_POINT: str = os.getenv("CDEK_SHIPMENT_POINT", "")
+
+# Товары, на которые считаются расходники (см. handlers/consumables.py)
+MIC_PRODUCT_ID: int = int(os.getenv("MIC_PRODUCT_ID", "10"))
+CASE_PRODUCT_ID: int = int(os.getenv("CASE_PRODUCT_ID", "11"))
 # Габариты и вес посылки по умолчанию (вес в граммах, размеры в см)
 CDEK_PACKAGE_WEIGHT: int = int(os.getenv("CDEK_PACKAGE_WEIGHT", "500"))
 CDEK_PACKAGE_LENGTH: int = int(os.getenv("CDEK_PACKAGE_LENGTH", "20"))

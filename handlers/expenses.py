@@ -30,6 +30,7 @@ _NAV_SECTIONS = [
     ("show", "💳 Финансы", "fin_show"),
     ("exp", "🧾 Расходы", "exp_show"),
     ("cdek", "🚚 СДЭК", "cdek_show"),
+    ("stk", "📦 Расходники", "stk_show"),
 ]
 
 

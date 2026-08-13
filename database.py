@@ -320,6 +320,21 @@ async def init_db():
                 "INSERT OR IGNORE INTO expense_categories (name, position) VALUES (?, ?)",
                 (name, pos),
             )
+        # Расходники под физические товары (см. handlers/consumables.py):
+        # коробка — общая на микрофоны и кейсы, поп-фильтр — только на микрофоны.
+        # Стартовые остатки посчитаны вручную 2026-08-13 по факту на складе.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS consumables (
+                key  TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                qty  INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        for key, name, qty in (("box", "Коробка", 6), ("pop_filter", "Поп-фильтр", 10)):
+            await db.execute(
+                "INSERT OR IGNORE INTO consumables (key, name, qty) VALUES (?, ?, ?)",
+                (key, name, qty),
+            )
         # Оплаченные счета СДЭК. СДЭК работает постоплатой: сначала возит,
         # потом выставляет счёт — его и записываем. Стоимость самих
         # накладных сюда НЕ пишется, она считается из заказов.
@@ -824,6 +839,38 @@ def combine_packages(packages: list[dict]) -> dict:
     mid = max(d[1] for d in sorted_dims)
     wide = max(d[2] for d in sorted_dims)
     return {"weight": weight, "length": wide, "width": mid, "height": narrow}
+
+
+async def get_consumables() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cur = await db.execute("SELECT * FROM consumables ORDER BY key")
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def adjust_consumable(key: str, delta: int) -> int | None:
+    """Меняет остаток расходника на delta (может быть отрицательным).
+
+    Не уходит ниже нуля — недостачу показывает сравнение с очередью
+    печати (handlers/consumables.py), а не отрицательный остаток.
+    Возвращает новый остаток или None, если такого ключа нет.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT qty FROM consumables WHERE key = ?", (key,))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        new_qty = max(0, row[0] + delta)
+        await db.execute("UPDATE consumables SET qty = ? WHERE key = ?", (new_qty, key))
+        await db.commit()
+        return new_qty
+
+
+async def set_consumable_qty(key: str, qty: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE consumables SET qty = ? WHERE key = ?",
+                         (max(0, int(qty)), key))
+        await db.commit()
 
 
 def unpack_round_products(raw: str | None, rounds: list, fallback_product_id: int) -> list[int]:
