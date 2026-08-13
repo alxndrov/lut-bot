@@ -234,7 +234,7 @@ async def _delayed_sync(delay: float):
 FINANCE_HEADERS = [
     "Дата заказа", "Номер операции", "Сумма", "Комиссия Prodamus",
     "Налог", "Отложено на СДЭК", "К выплате", "Тип", "Товар", "Печатал",
-    "Комментарий",
+    "Позиций напечатал Даня", "Комментарий",
 ]
 
 # Старые названия столбцов -> новые. Переименовываем ячейку шапки на
@@ -328,7 +328,7 @@ def _header_columns(sheet, headers: list[str]) -> dict[str, int]:
 def _row_cells(header_cols: dict[str, int], row_num: int, *, date_msk: str, code: str,
                amount: float, kind: str, comment: str = "",
                delivery_cost: float | None = None, goods_type: str | None = None,
-               printer: str | None = None) -> list[dict]:
+               printer: str | None = None, printer_positions: int | None = None) -> list[dict]:
     """Ячейки одной строки кэшфлоу — привязаны к столбцу по названию из
     header_cols (см. _header_columns), не по букве A-G.
 
@@ -339,8 +339,11 @@ def _row_cells(header_cols: dict[str, int], row_num: int, *, date_msk: str, code
 
     goods_type — 'Физический'/'Цифровой' (только у приходов). printer —
     ники (@ник через запятую, если заказ печатали несколько человек) тех,
-    кто печатал физтовар; в момент оплаты ещё не известен — простановка
-    задним числом см. update_finance_printer."""
+    кто печатал физтовар; printer_positions — сколько ИМЕННО позиций
+    этого заказа напечатал Даня (для смешанных заказов точнее, чем просто
+    искать его ник в printer — см. db.order_print_credits). Оба в момент
+    оплаты ещё не известны — простановка задним числом см.
+    update_finance_printer."""
     def letter(name: str) -> str:
         return _col_letter(header_cols[name])
 
@@ -355,6 +358,8 @@ def _row_cells(header_cols: dict[str, int], row_num: int, *, date_msk: str, code
         values["Товар"] = goods_type
     if printer is not None:
         values["Печатал"] = printer
+    if printer_positions is not None:
+        values["Позиций напечатал Даня"] = printer_positions
     if delivery_cost is not None:
         pay_cell = f"{letter('Сумма')}{row_num}"
         fee_cell = f"{letter('Комиссия Prodamus')}{row_num}"
@@ -524,7 +529,8 @@ def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
         cells += _row_cells(header_cols, row_num, date_msk=_msk(r["created_at"]), code=code,
                             amount=float(r["amount"]), kind=r["kind"],
                             comment=r.get("comment", ""), delivery_cost=delivery_cost,
-                            goods_type=r.get("goods_type"), printer=r.get("printer"))
+                            goods_type=r.get("goods_type"), printer=r.get("printer"),
+                            printer_positions=r.get("partner_positions"))
         row_num += 1
         added += 1
 
@@ -544,14 +550,15 @@ def request_finance_backfill(rows: list[dict]) -> "asyncio.Task":
     return asyncio.create_task(asyncio.to_thread(backfill_finance_rows, rows))
 
 
-def update_finance_printer(order_code: str, printer: str) -> None:
-    """Проставляет «Печатал» в уже существующей строке заказа.
+def update_finance_printer(order_code: str, printer: str, positions: int) -> None:
+    """Проставляет «Печатал» и «Позиций напечатал Даня» в уже существующей
+    строке заказа.
 
     В момент оплаты (когда строка появляется в листе) печатающий ещё не
     известен — заказ может провисеть в очереди на печать сколько угодно,
-    а до этого его ещё и передать другому админу. Поэтому колонку
+    а до этого его ещё и передать другому админу. Поэтому колонки
     заполняем отдельно, когда заказ реально отмечен распечатанным (см.
-    request_sync в handlers/order_actions.py).
+    cb_order_printed в handlers/order_actions.py).
 
     Тихо ничего не делает, если строки заказа в листе ещё нет (например,
     если бэкафилл ещё не запускали) — это не ошибка, а несинхронизированное
@@ -568,23 +575,29 @@ def update_finance_printer(order_code: str, printer: str) -> None:
                        f"для отметки печати")
         return
     printer_col = _col_letter(header_cols["Печатал"])
-    sheet.update(values=[[printer]], range_name=f"{printer_col}{row_num}")
-    logger.info(f"gsheets: заказ {order_code!r} — печатал {printer!r}")
+    positions_col = _col_letter(header_cols["Позиций напечатал Даня"])
+    sheet.batch_update([
+        {"range": f"{printer_col}{row_num}", "values": [[printer]]},
+        {"range": f"{positions_col}{row_num}", "values": [[positions]]},
+    ], value_input_option="USER_ENTERED")
+    logger.info(f"gsheets: заказ {order_code!r} — печатал {printer!r}, "
+               f"Даня — {positions} поз.")
 
 
-def request_finance_printer_update(order_code: str, printer: str):
-    """Просит проставить «Печатал» в финансовом листе. Вызывать неблокирующе."""
+def request_finance_printer_update(order_code: str, printer: str, positions: int):
+    """Просит проставить «Печатал»/«Позиций напечатал Даня» в финансовом
+    листе. Вызывать неблокирующе."""
     if not config.GSHEETS_ENABLED:
         return
     try:
-        asyncio.create_task(_finance_printer_update(order_code, printer))
+        asyncio.create_task(_finance_printer_update(order_code, printer, positions))
     except RuntimeError:
         logger.warning("gsheets: request_finance_printer_update вне event loop, пропускаю")
 
 
-async def _finance_printer_update(order_code: str, printer: str):
+async def _finance_printer_update(order_code: str, printer: str, positions: int):
     try:
-        await asyncio.to_thread(update_finance_printer, order_code, printer)
+        await asyncio.to_thread(update_finance_printer, order_code, printer, positions)
     except SheetsError as e:
         logger.error(f"gsheets: не проставить печатал ({order_code}) — {e}")
     except Exception:

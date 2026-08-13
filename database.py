@@ -1800,6 +1800,48 @@ async def get_order_prints(order_id: int) -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def order_print_credits(order: dict, prints: list[dict],
+                              admin_ids: list[int]) -> dict[int, int]:
+    """{user_id: сколько позиций ЭТОГО заказа он напечатал}.
+
+    Кто печатал позицию: отметка о печати (order_prints), иначе разметка
+    «кто печатает» (routing), иначе тот, за кем заказ числится. Общий
+    строительный блок: используется и в services.payout._print_credits
+    (сумма по периоду — для «Взаиморасчёта»), и здесь же в боте — для
+    колонки «Позиций напечатал {имя}» в финансовом листе Google Таблицы
+    (см. get_orders_for_finance_export), чтобы смешанные заказы (несколько
+    позиций, напечатанных разными людьми) считались точно по позициям,
+    а не «весь заказ — тому, кто в нём вообще упомянут»."""
+    whos = order_routing(order) or parse_routing_line(order.get("summary") or "")
+    total = len(whos) or int(order.get("quantity") or 1)
+    by_position: dict[int, int] = {}
+    for p in prints:
+        positions = print_positions(p) or set(range(1, total + 1))
+        for pos in positions:
+            by_position.setdefault(pos, p["user_id"])
+
+    names: dict[str, int | None] = {}
+
+    async def resolve(name: str | None) -> int | None:
+        if not name:
+            return None
+        if name not in names:
+            admin = await get_admin_by_username(name, admin_ids)
+            names[name] = admin["user_id"] if admin else None
+        return names[name]
+
+    credits: dict[int, int] = {}
+    for pos in range(1, total + 1):
+        uid = by_position.get(pos)
+        if uid is None and pos <= len(whos):
+            uid = await resolve(whos[pos - 1])
+        if uid is None:
+            uid = order.get("printed_by_id") or order.get("assignee_id")
+        if uid:
+            credits[uid] = credits.get(uid, 0) + 1
+    return credits
+
+
 async def set_order_printed(order_id: int, user_id: int, user_name: str) -> bool:
     """Отмечает заказ распечатанным. False — если уже был отмечен."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -2337,7 +2379,8 @@ async def get_orders_export() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def get_orders_for_finance_export() -> list[dict]:
+async def get_orders_for_finance_export(admin_ids: list[int] | None = None,
+                                        partner_id: int | None = None) -> list[dict]:
     """Заказы для (пере)выгрузки в финансовый лист: order_code, дата, и
     сумма/отложено на СДЭК — суммой по всем purchases заказа (смешанный
     заказ из разных товаров хранится несколькими строками purchases с
@@ -2362,11 +2405,21 @@ async def get_orders_for_finance_export() -> list[dict]:
     передать другому админу до печати, а могли и разделить между
     несколькими — здесь все, кто фактически напечатал хоть позицию.
     Подзапрос, а не JOIN — иначе с JOIN purchases он размножил бы строки
-    заказа и испортил суммы."""
+    заказа и испортил суммы.
+
+    partner_positions — точное число позиций ЭТОГО заказа, напечатанных
+    partner_id (см. order_print_credits) — для смешанных заказов из
+    нескольких позиций, напечатанных разными людьми, точнее, чем строка
+    printer (которая просто перечисляет всех причастных). Считается
+    отдельным проходом в Python (не SQL) — order_print_credits разбирает
+    routing/order_prints, это не выразить одним запросом. admin_ids не
+    задан — колонки не будет (0 у всех), не задан только printer_id —
+    пропускаем расчёт целиком."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT COALESCE(o.order_code, o.prodamus_order_id) AS order_code, o.created_at,
+            """SELECT o.id, COALESCE(o.order_code, o.prodamus_order_id) AS order_code,
+                      o.created_at,
                       COALESCE(SUM(pu.amount), 0) AS amount,
                       COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost,
                       COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
@@ -2385,7 +2438,25 @@ async def get_orders_for_finance_export() -> list[dict]:
                GROUP BY o.id
                ORDER BY o.created_at"""
         ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
+            rows = [dict(r) for r in await cur.fetchall()]
+
+    for r in rows:
+        r["partner_positions"] = None
+    if admin_ids and partner_id:
+        for r in rows:
+            order = await get_order(r["id"])
+            # Только для уже полностью распечатанных — как и «Печатал»,
+            # до печати число не считаем: order_print_credits в отсутствие
+            # отметки печати достаёт позицию из текущего исполнителя
+            # (assignee), а он на заказ назначается сразу при оплате, ещё
+            # до какой-либо реальной печати — раньше времени записали бы
+            # заказ Дане, хотя он его ещё не касался.
+            if not order.get("printed_at"):
+                continue
+            prints = await get_order_prints(r["id"])
+            credits = await order_print_credits(order, prints, admin_ids)
+            r["partner_positions"] = credits.get(partner_id, 0)
+    return rows
 
 
 async def get_digital_purchases_for_finance_export() -> list[dict]:
@@ -2453,7 +2524,8 @@ async def get_npd_payments_for_finance_export() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def get_cashflow_export_rows() -> list[dict]:
+async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
+                                   partner_id: int | None = None) -> list[dict]:
     """Все операции для финансового листа — приходы (физ- и цифровые
     товары) и расходы (траты, выплаты партнёрам, оплаты СДЭК и налога
     НПД) одним списком, по дате.
@@ -2462,15 +2534,20 @@ async def get_cashflow_export_rows() -> list[dict]:
     delivery_cost, delivery_legacy}. delivery_cost/delivery_legacy —
     только у приходов физтоваров (см. get_orders_for_finance_export);
     у остальных строк — None, чтобы вызывающий код (backfill_finance_rows)
-    не считал для них формулу Комиссии/Налога/СДЭК/К выплате."""
+    не считал для них формулу Комиссии/Налога/СДЭК/К выплате.
+
+    admin_ids/partner_id — прокидываются в get_orders_for_finance_export
+    для колонки «сколько позиций напечатал партнёр» (см. её докстринг);
+    не заданы — колонка будет нулевой."""
     rows = []
 
-    for r in await get_orders_for_finance_export():
+    for r in await get_orders_for_finance_export(admin_ids, partner_id):
         rows.append({
             "code": r["order_code"], "created_at": r["created_at"], "amount": r["amount"],
             "kind": "Приход", "comment": r["comment"] or "",
             "delivery_cost": r["delivery_cost"], "delivery_legacy": r["delivery_legacy"],
             "goods_type": "Физический", "printer": r["printer"] or "",
+            "partner_positions": r["partner_positions"],
         })
 
     for r in await get_digital_purchases_for_finance_export():

@@ -33,42 +33,14 @@ def delivery_out(delivery_cost: float, delivery_legacy: float,
 
 
 async def _print_credits(orders: list[dict]) -> dict[int, int]:
-    """{id админа: сколько позиций он напечатал} по списку заказов.
-
-    Кто печатал позицию: отметка о печати, иначе разметка «кто печатает»,
-    иначе тот, за кем заказ. Для заказов, где ничего не известно, позиции
-    не засчитываются никому — лучше пропустить, чем начислить не тому.
-    """
+    """{id админа: сколько позиций он напечатал} по списку заказов —
+    сумма db.order_print_credits (см. её докстринг) по каждому заказу."""
     credits: dict[int, int] = {}
-    names: dict[str, int | None] = {}
-
-    async def resolve(name: str | None) -> int | None:
-        if not name:
-            return None
-        if name not in names:
-            admin = await db.get_admin_by_username(name, config.ADMIN_IDS)
-            names[name] = admin["user_id"] if admin else None
-        return names[name]
-
     for order in orders:
-        # У отгруженных заказов разметки в JSON нет — читаем её из карточки
-        whos = db.order_routing(order) or db.parse_routing_line(order.get("summary") or "")
-        total = len(whos) or int(order.get("quantity") or 1)
         prints = await db.get_order_prints(order["id"])
-        by_position: dict[int, int] = {}
-        for p in prints:
-            positions = db.print_positions(p) or set(range(1, total + 1))
-            for pos in positions:
-                by_position.setdefault(pos, p["user_id"])
-
-        for pos in range(1, total + 1):
-            uid = by_position.get(pos)
-            if uid is None and pos <= len(whos):
-                uid = await resolve(whos[pos - 1])
-            if uid is None:
-                uid = order.get("printed_by_id") or order.get("assignee_id")
-            if uid:
-                credits[uid] = credits.get(uid, 0) + 1
+        per_order = await db.order_print_credits(order, prints, config.ADMIN_IDS)
+        for uid, n in per_order.items():
+            credits[uid] = credits.get(uid, 0) + n
     return credits
 
 

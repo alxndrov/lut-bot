@@ -677,7 +677,7 @@ async def cmd_gsheets_backfill(message: Message):
         await message.answer("Google Таблица не настроена — нет GOOGLE_SHEET_ID в .env.")
         return
 
-    rows = await db.get_cashflow_export_rows()
+    rows = await db.get_cashflow_export_rows(config.ADMIN_IDS, config.PARTNER_ID)
     if not rows:
         await message.answer("Операций в базе не нашлось — переносить нечего.")
         return

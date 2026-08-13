@@ -244,6 +244,8 @@ def _order_text(order: dict, prints: list | None = None) -> str:
         text += f"\n📦 <b>Отправлен:</b> {order.get('shipped_by_name') or ''}"
         if when:
             text += f" · {when}"
+    if order.get("cdek_number"):
+        text += f"\n📦 <b>Трек-номер СДЭК:</b> <code>{order['cdek_number']}</code>"
     return text
 
 
@@ -764,7 +766,9 @@ async def cb_order_printed(callback: CallbackQuery):
         # (order_prints), а не того, за кем заказ числится
         if order.get("order_code"):
             printers = ", ".join(sorted({p["user_name"] for p in prints if p["user_name"]}))
-            request_finance_printer_update(order["order_code"], printers)
+            credits = await db.order_print_credits(order, prints, config.ADMIN_IDS)
+            danya_positions = credits.get(config.PARTNER_ID, 0)
+            request_finance_printer_update(order["order_code"], printers, danya_positions)
     elif total > 1:
         note = (f"Отмечено: {_pos_list(sorted(targets))} 🖨 Осталось: {_pos_list(waiting)}"
                 if marked else "Эта позиция уже отмечена 🖨")

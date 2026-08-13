@@ -405,11 +405,14 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
             request_sync()
             await _send_track_to_client(bot, client_id, order_number, track,
                                         pending.get("delivery_str"))
-            await _send_notify(None, (
-                f"📦 Заказ <code>{order_number}</code>: накладная СДЭК создана.\n"
-                f"Трек-номер: <code>{track}</code>\n"
-                f"ПВЗ: {pvz_code} · {name}, {phone}"
-            ))
+            # Не отдельным сообщением — дописываем трек в саму карточку
+            # заказа (см. _order_text), она и так уже открыта у админов
+            from handlers.order_actions import _sync_order_messages
+            notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+            try:
+                await _sync_order_messages(notify_bot, await db.get_order(order_row_id))
+            finally:
+                await notify_bot.session.close()
             return
         if info["state"] == "INVALID":
             errs = "; ".join(e.get("message", "") for e in info.get("errors", []))
