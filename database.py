@@ -320,21 +320,32 @@ async def init_db():
                 "INSERT OR IGNORE INTO expense_categories (name, position) VALUES (?, ?)",
                 (name, pos),
             )
-        # Расходники под физические товары (см. handlers/consumables.py):
-        # коробка — общая на микрофоны и кейсы, поп-фильтр — только на микрофоны.
-        # Стартовые остатки — по факту на складе, названы пользователем 2026-08-13.
+        # Расходники под физические товары (см. handlers/consumables.py) —
+        # свои у каждого админа: коробка (общая на микрофоны+кейсы) и
+        # поп-фильтр (только на микрофоны). Раньше остаток был общим на
+        # ключ — пересоздаём под учёт по человеку (расход по новой логике
+        # ещё не успел пойти, терять нечего).
+        cur = await db.execute("PRAGMA table_info(consumables)")
+        cols = [r[1] for r in await cur.fetchall()]
+        if cols and "user_id" not in cols:
+            await db.execute("DROP TABLE consumables")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS consumables (
-                key  TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                qty  INTEGER NOT NULL DEFAULT 0
+                user_id INTEGER NOT NULL,
+                key     TEXT NOT NULL,
+                name    TEXT NOT NULL,
+                qty     INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, key)
             )
         """)
-        for key, name, qty in (("box", "Коробка", 6), ("pop_filter", "Поп-фильтр", 10)):
-            await db.execute(
-                "INSERT OR IGNORE INTO consumables (key, name, qty) VALUES (?, ?, ?)",
-                (key, name, qty),
-            )
+        import config as _config
+        for uid in _config.ADMIN_IDS:
+            for key, name in (("box", "Коробка"), ("pop_filter", "Поп-фильтр")):
+                await db.execute(
+                    "INSERT OR IGNORE INTO consumables (user_id, key, name, qty) "
+                    "VALUES (?, ?, ?, 0)",
+                    (uid, key, name),
+                )
         # Оплаченные счета СДЭК. СДЭК работает постоплатой: сначала возит,
         # потом выставляет счёт — его и записываем. Стоимость самих
         # накладных сюда НЕ пишется, она считается из заказов.
@@ -841,35 +852,43 @@ def combine_packages(packages: list[dict]) -> dict:
     return {"weight": weight, "length": wide, "width": mid, "height": narrow}
 
 
-async def get_consumables() -> list[dict]:
+async def get_consumables(user_id: int | None = None) -> list[dict]:
+    """Остатки расходников. Без user_id — по всем админам сразу."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT * FROM consumables ORDER BY key")
+        if user_id is None:
+            cur = await db.execute("SELECT * FROM consumables ORDER BY user_id, key")
+        else:
+            cur = await db.execute(
+                "SELECT * FROM consumables WHERE user_id = ? ORDER BY key", (user_id,))
         return [dict(r) for r in await cur.fetchall()]
 
 
-async def adjust_consumable(key: str, delta: int) -> int | None:
-    """Меняет остаток расходника на delta (может быть отрицательным).
+async def adjust_consumable(user_id: int, key: str, delta: int) -> int | None:
+    """Меняет остаток расходника этого админа на delta (может быть отрицательным).
 
     Не уходит ниже нуля — недостачу показывает сравнение с очередью
-    печати (handlers/consumables.py), а не отрицательный остаток.
+    отправки (handlers/consumables.py), а не отрицательный остаток.
     Возвращает новый остаток или None, если такого ключа нет.
     """
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT qty FROM consumables WHERE key = ?", (key,))
+        cur = await db.execute(
+            "SELECT qty FROM consumables WHERE user_id = ? AND key = ?", (user_id, key))
         row = await cur.fetchone()
         if row is None:
             return None
         new_qty = max(0, row[0] + delta)
-        await db.execute("UPDATE consumables SET qty = ? WHERE key = ?", (new_qty, key))
+        await db.execute("UPDATE consumables SET qty = ? WHERE user_id = ? AND key = ?",
+                         (new_qty, user_id, key))
         await db.commit()
         return new_qty
 
 
-async def set_consumable_qty(key: str, qty: int) -> None:
+async def set_consumable_qty(user_id: int, key: str, qty: int) -> None:
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE consumables SET qty = ? WHERE key = ?",
-                         (max(0, int(qty)), key))
+        await db.execute(
+            "UPDATE consumables SET qty = ? WHERE user_id = ? AND key = ?",
+            (max(0, int(qty)), user_id, key))
         await db.commit()
 
 
