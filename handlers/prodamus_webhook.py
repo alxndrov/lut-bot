@@ -150,6 +150,14 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         )
         await db.cancel_funnel_for_user(user_id, product_id)
 
+        # Строка в финансовый лист — приход без доставки/СДЭК (это цифровой
+        # товар); своего сквозного номера у таких заказов нет, берём id
+        # платежа Prodamus. Комиссия/Налог считаются формулой, как у физтоваров.
+        from services.gsheets import request_finance_append
+        order_date_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+        request_finance_append(prodamus_order_id, order_date_msk, amount, 0.0,
+                               comment=product["name"])
+
         await _send_notify(bot, (
             f"💰 <b>Новая покупка</b>\n\n"
             f"👤 {first_name} {username_str}\n"
