@@ -292,3 +292,59 @@ async def _finance_append(order_code: str, date_msk: str, amount: float, deliver
         logger.error(f"gsheets: запись в финансовый лист не удалась ({order_code}) — {e}")
     except Exception:
         logger.exception(f"gsheets: неожиданная ошибка записи в финансовый лист ({order_code})")
+
+
+def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
+    """Дописывает в финансовый лист заказы из rows (см.
+    db.get_orders_for_finance_export), которых там ещё нет.
+
+    Идемпотентно: сверяет по номеру заказа (колонка B) с уже вписанными
+    строками — повторный запуск (или заказы, попавшие туда «живой»
+    записью до бэкафилла) не задвоит их. Возвращает (добавлено, уже было).
+
+    Все строки пишутся ОДНИМ батч-запросом (append_rows), а не по одной —
+    иначе на полусотне заказов легко упереться в лимит запросов Google API.
+    Блокирующая функция (gspread синхронный) — вызывать через to_thread.
+    """
+    book = _open_book()
+    title = config.GOOGLE_SHEET_FINANCE_TAB
+    try:
+        sheet = book.worksheet(title)
+    except Exception:
+        sheet = book.add_worksheet(title=title, rows=max(200, len(rows) + 10),
+                                   cols=len(FINANCE_HEADERS))
+        sheet.update(values=[FINANCE_HEADERS], range_name="A1")
+        sheet.freeze(rows=1)
+
+    existing_codes = set(sheet.col_values(2)[1:])  # без шапки
+    row_num = len(sheet.get_all_values()) + 1
+
+    new_values = []
+    skipped = 0
+    for r in rows:
+        code = r["order_code"]
+        if not code or code in existing_codes:
+            skipped += 1
+            continue
+        fee_formula = f"=C{row_num}*{config.PRODAMUS_FEE_PERCENT:g}%"
+        npd_formula = f"=C{row_num}*{config.NPD_PERCENT:g}%"
+        payout_formula = f"=C{row_num}-D{row_num}-E{row_num}-F{row_num}"
+        new_values.append([
+            _msk(r["created_at"]), code, float(r["amount"]),
+            fee_formula, npd_formula, float(r["delivery_cost"]), payout_formula,
+        ])
+        row_num += 1
+
+    if new_values:
+        try:
+            sheet.append_rows(new_values, value_input_option="USER_ENTERED")
+        except Exception as e:
+            raise SheetsError(f"не удалось записать строки: {type(e).__name__}: {e}")
+
+    return len(new_values), skipped
+
+
+def request_finance_backfill(rows: list[dict]) -> "asyncio.Task":
+    """Как backfill_finance_rows, но асинхронно (для вызова из хендлера
+    команды бота — не блокируя обработку остальных апдейтов)."""
+    return asyncio.create_task(asyncio.to_thread(backfill_finance_rows, rows))
