@@ -109,10 +109,18 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     credits = await _print_credits(await _orders_in_period(dt_from, dt_to))
     printed = credits.get(config.PARTNER_ID, 0)
 
-    # Доля Дани: процент со стоимости товара (доставка — транзит, в неё
-    # не входит) плюс оплата печати, а с цифровых — прежние 20%
+    # Доля Дани — процент не с «грязной» стоимости товара, а с чистой,
+    # после вычета комиссии Prodamus и налога НПД (доставка — транзит, в
+    # неё не входит; она в этот же расчёт входит нулём — см. ниже). Для
+    # цифры так было и раньше (digital_net), для физтоваров — тоже самое,
+    # выведено из того, что реально остаётся «К выплате» по каждому
+    # заказу в финансовом листе: (goods+доставка) минус комиссия, налог
+    # и отложенное на СДЭК — доставка при этом гасит сама себя, кроме
+    # старых заказов (до точного счёта СДЭК), где наценка на доставку не
+    # покрывала налог — оттуда и поправка на delivery_legacy.
     digital_net = digital * (1 - fee_rate - NPD_RATE)
-    partner = (physical * config.PARTNER_GOODS_PERCENT / 100
+    physical_net = physical * (1 - fee_rate - NPD_RATE) - float(goods["delivery_legacy"]) * NPD_RATE
+    partner = (physical_net * config.PARTNER_GOODS_PERCENT / 100
                + printed * config.PARTNER_PRINT_FEE
                + digital_net * config.PARTNER_DIGITAL_PERCENT / 100)
 
@@ -124,7 +132,7 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
         "net": net,
         "printed": printed, "print_credits": credits,
         "partner": partner, "owner": net - partner,
-        "partner_goods": physical * config.PARTNER_GOODS_PERCENT / 100,
+        "partner_goods": physical_net * config.PARTNER_GOODS_PERCENT / 100,
         "partner_print": printed * config.PARTNER_PRINT_FEE,
         "partner_digital": digital_net * config.PARTNER_DIGITAL_PERCENT / 100,
     }
