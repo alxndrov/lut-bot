@@ -233,7 +233,8 @@ async def _delayed_sync(delay: float):
 
 FINANCE_HEADERS = [
     "Дата заказа", "Номер операции", "Сумма", "Комиссия Prodamus",
-    "Налог", "Отложено на СДЭК", "К выплате", "Тип", "Комментарий",
+    "Налог", "Отложено на СДЭК", "К выплате", "Тип", "Товар", "Печатал",
+    "Комментарий",
 ]
 
 # Старые названия столбцов -> новые. Переименовываем ячейку шапки на
@@ -326,14 +327,20 @@ def _header_columns(sheet, headers: list[str]) -> dict[str, int]:
 
 def _row_cells(header_cols: dict[str, int], row_num: int, *, date_msk: str, code: str,
                amount: float, kind: str, comment: str = "",
-               delivery_cost: float | None = None) -> list[dict]:
+               delivery_cost: float | None = None, goods_type: str | None = None,
+               printer: str | None = None) -> list[dict]:
     """Ячейки одной строки кэшфлоу — привязаны к столбцу по названию из
     header_cols (см. _header_columns), не по букве A-G.
 
     kind — 'Приход' (оплата физ- или цифрового товара) или 'Расход'
     (трата из /expenses, выплата партнёру). Комиссия/Налог/К выплате
     считаются формулой только для приходов (delivery_cost задан) — у
-    расходов эти столбцы просто не трогаем, их сумма никуда не идёт."""
+    расходов эти столбцы просто не трогаем, их сумма никуда не идёт.
+
+    goods_type — 'Физический'/'Цифровой' (только у приходов). printer —
+    ники (@ник через запятую, если заказ печатали несколько человек) тех,
+    кто печатал физтовар; в момент оплаты ещё не известен — простановка
+    задним числом см. update_finance_printer."""
     def letter(name: str) -> str:
         return _col_letter(header_cols[name])
 
@@ -344,6 +351,10 @@ def _row_cells(header_cols: dict[str, int], row_num: int, *, date_msk: str, code
         "Тип": kind,
         "Комментарий": comment,
     }
+    if goods_type is not None:
+        values["Товар"] = goods_type
+    if printer is not None:
+        values["Печатал"] = printer
     if delivery_cost is not None:
         pay_cell = f"{letter('Сумма')}{row_num}"
         fee_cell = f"{letter('Комиссия Prodamus')}{row_num}"
@@ -376,7 +387,8 @@ def _open_finance_sheet():
 
 
 def _append_cashflow_row(code: str, date_msk: str, amount: float, kind: str,
-                         comment: str = "", delivery_cost: float | None = None) -> None:
+                         comment: str = "", delivery_cost: float | None = None,
+                         goods_type: str | None = None, printer: str | None = None) -> None:
     """Дописывает одну строку (приход или расход) в первую свободную
     строку финансового листа. Общая часть append_payment_row/append_expense_row.
 
@@ -387,7 +399,8 @@ def _append_cashflow_row(code: str, date_msk: str, amount: float, kind: str,
         row = len(sheet.get_all_values()) + 1
         _ensure_rows(sheet, row)
         cells = _row_cells(header_cols, row, date_msk=date_msk, code=code, amount=amount,
-                           kind=kind, comment=comment, delivery_cost=delivery_cost)
+                           kind=kind, comment=comment, delivery_cost=delivery_cost,
+                           goods_type=goods_type, printer=printer)
         sheet.batch_update(cells, value_input_option="USER_ENTERED")
         logger.info(f"gsheets: записана строка {code!r} ({kind}) в финансовый лист (строка {row})")
     except SheetsError:
@@ -397,14 +410,16 @@ def _append_cashflow_row(code: str, date_msk: str, amount: float, kind: str,
 
 
 def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_cost: float,
-                       comment: str = "") -> None:
+                       comment: str = "", goods_type: str | None = None,
+                       printer: str | None = None) -> None:
     """Дописывает приход — оплату физ- или цифрового товара. Комиссия/
     Налог/К выплате — формулами, которые бот сам копирует в новую строку
     (по тем же ставкам, что в остальных расчётах бота).
 
     Блокирующая функция (gspread синхронный) — вызывать через to_thread.
     """
-    _append_cashflow_row(order_code, date_msk, amount, "Приход", comment, delivery_cost)
+    _append_cashflow_row(order_code, date_msk, amount, "Приход", comment, delivery_cost,
+                         goods_type, printer)
 
 
 def append_expense_row(code: str, date_msk: str, amount: float, comment: str,
@@ -419,7 +434,8 @@ def append_expense_row(code: str, date_msk: str, amount: float, comment: str,
 
 
 def request_finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float,
-                           comment: str = ""):
+                           comment: str = "", goods_type: str | None = None,
+                           printer: str | None = None):
     """Просит дописать приход в финансовый лист. Вызывать неблокирующе.
 
     В отличие от request_sync — без задержки: одна строка добавляется
@@ -428,16 +444,18 @@ def request_finance_append(order_code: str, date_msk: str, amount: float, delive
     if not config.GSHEETS_ENABLED:
         return
     try:
-        asyncio.create_task(_finance_append(order_code, date_msk, amount, delivery_cost, comment))
+        asyncio.create_task(_finance_append(order_code, date_msk, amount, delivery_cost,
+                                            comment, goods_type, printer))
     except RuntimeError:
         logger.warning("gsheets: request_finance_append вне event loop, пропускаю")
 
 
 async def _finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float,
-                          comment: str = ""):
+                          comment: str = "", goods_type: str | None = None,
+                          printer: str | None = None):
     try:
         await asyncio.to_thread(append_payment_row, order_code, date_msk, amount,
-                                delivery_cost, comment)
+                                delivery_cost, comment, goods_type, printer)
     except SheetsError as e:
         logger.error(f"gsheets: запись в финансовый лист не удалась ({order_code}) — {e}")
     except Exception:
@@ -505,7 +523,8 @@ def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
                                          config.PRODAMUS_FEE_PERCENT)
         cells += _row_cells(header_cols, row_num, date_msk=_msk(r["created_at"]), code=code,
                             amount=float(r["amount"]), kind=r["kind"],
-                            comment=r.get("comment", ""), delivery_cost=delivery_cost)
+                            comment=r.get("comment", ""), delivery_cost=delivery_cost,
+                            goods_type=r.get("goods_type"), printer=r.get("printer"))
         row_num += 1
         added += 1
 
@@ -523,3 +542,50 @@ def request_finance_backfill(rows: list[dict]) -> "asyncio.Task":
     """Как backfill_finance_rows, но асинхронно (для вызова из хендлера
     команды бота — не блокируя обработку остальных апдейтов)."""
     return asyncio.create_task(asyncio.to_thread(backfill_finance_rows, rows))
+
+
+def update_finance_printer(order_code: str, printer: str) -> None:
+    """Проставляет «Печатал» в уже существующей строке заказа.
+
+    В момент оплаты (когда строка появляется в листе) печатающий ещё не
+    известен — заказ может провисеть в очереди на печать сколько угодно,
+    а до этого его ещё и передать другому админу. Поэтому колонку
+    заполняем отдельно, когда заказ реально отмечен распечатанным (см.
+    request_sync в handlers/order_actions.py).
+
+    Тихо ничего не делает, если строки заказа в листе ещё нет (например,
+    если бэкафилл ещё не запускали) — это не ошибка, а несинхронизированное
+    состояние, разрешится следующим бэкафиллом.
+    Блокирующая функция (gspread синхронный) — вызывать через to_thread.
+    """
+    sheet, header_cols = _open_finance_sheet()
+    order_col = header_cols["Номер операции"]
+    codes = sheet.col_values(order_col)
+    try:
+        row_num = codes.index(order_code) + 1  # +1: col_values 0-based, строки — с 1
+    except ValueError:
+        logger.warning(f"gsheets: заказ {order_code!r} не найден в финансовом листе "
+                       f"для отметки печати")
+        return
+    printer_col = _col_letter(header_cols["Печатал"])
+    sheet.update(values=[[printer]], range_name=f"{printer_col}{row_num}")
+    logger.info(f"gsheets: заказ {order_code!r} — печатал {printer!r}")
+
+
+def request_finance_printer_update(order_code: str, printer: str):
+    """Просит проставить «Печатал» в финансовом листе. Вызывать неблокирующе."""
+    if not config.GSHEETS_ENABLED:
+        return
+    try:
+        asyncio.create_task(_finance_printer_update(order_code, printer))
+    except RuntimeError:
+        logger.warning("gsheets: request_finance_printer_update вне event loop, пропускаю")
+
+
+async def _finance_printer_update(order_code: str, printer: str):
+    try:
+        await asyncio.to_thread(update_finance_printer, order_code, printer)
+    except SheetsError as e:
+        logger.error(f"gsheets: не проставить печатал ({order_code}) — {e}")
+    except Exception:
+        logger.exception(f"gsheets: неожиданная ошибка отметки печати ({order_code})")

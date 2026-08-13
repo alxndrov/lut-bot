@@ -156,7 +156,7 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         from services.gsheets import request_finance_append
         order_date_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
         request_finance_append(prodamus_order_id, order_date_msk, amount, 0.0,
-                               comment=product["name"])
+                               comment=product["name"], goods_type="Цифровой")
 
         await _send_notify(bot, (
             f"💰 <b>Новая покупка</b>\n\n"
@@ -267,8 +267,11 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             products_by_id[pid]["name"] + (f" ×{counts[pid]}" if counts[pid] > 1 else "")
             for pid in order_ids
         )
+        # Кто печатал — ещё не известно (заказ только что оплачен, печать
+        # впереди, может пройти дни, заказ может и передаться другому
+        # админу) — колонку проставит cb_order_printed, когда допечатают
         request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost,
-                               comment=goods_comment)
+                               comment=goods_comment, goods_type="Физический")
 
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
         # Печатающих может быть несколько: заказ покажется каждому из них.

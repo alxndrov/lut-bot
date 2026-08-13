@@ -2355,7 +2355,14 @@ async def get_orders_for_finance_export() -> list[dict]:
     выпадает из выгрузки.
 
     comment — названия товаров заказа через запятую (с «×N» при
-    quantity > 1), для смешанного заказа — все позиции сразу."""
+    quantity > 1), для смешанного заказа — все позиции сразу.
+
+    printer — ники (через запятую) всех, кто реально отмечал печать
+    (order_prints), не тот, за кем заказ числится сейчас: заказ могли
+    передать другому админу до печати, а могли и разделить между
+    несколькими — здесь все, кто фактически напечатал хоть позицию.
+    Подзапрос, а не JOIN — иначе с JOIN purchases он размножил бы строки
+    заказа и испортил суммы."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -2369,7 +2376,9 @@ async def get_orders_for_finance_export() -> list[dict]:
                           p.name || CASE WHEN pu.quantity > 1
                                          THEN ' ×' || pu.quantity ELSE '' END,
                           ', '
-                      ) AS comment
+                      ) AS comment,
+                      (SELECT GROUP_CONCAT(DISTINCT op.user_name)
+                         FROM order_prints op WHERE op.order_id = o.id) AS printer
                FROM orders o
                LEFT JOIN purchases pu ON pu.telegram_payment_id = o.prodamus_order_id
                LEFT JOIN products p ON p.id = pu.product_id
@@ -2461,6 +2470,7 @@ async def get_cashflow_export_rows() -> list[dict]:
             "code": r["order_code"], "created_at": r["created_at"], "amount": r["amount"],
             "kind": "Приход", "comment": r["comment"] or "",
             "delivery_cost": r["delivery_cost"], "delivery_legacy": r["delivery_legacy"],
+            "goods_type": "Физический", "printer": r["printer"] or "",
         })
 
     for r in await get_digital_purchases_for_finance_export():
@@ -2468,6 +2478,7 @@ async def get_cashflow_export_rows() -> list[dict]:
             "code": r["order_code"], "created_at": r["created_at"], "amount": r["amount"],
             "kind": "Приход", "comment": r["product_name"] or "",
             "delivery_cost": 0.0, "delivery_legacy": 0.0,
+            "goods_type": "Цифровой", "printer": "",
         })
 
     for r in await get_expenses_for_finance_export():
