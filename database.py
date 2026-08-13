@@ -1931,6 +1931,21 @@ async def get_revenue_by_month(limit: int = 6) -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_purchases_in_range(dt_from: str, dt_to: str) -> list[dict]:
+    """Отдельные покупки (id, created_at, amount) за произвольный период —
+    для точного расчёта, сколько из «Принято» Prodamus ещё не перевёл на
+    счёт (см. handlers/finance.py, правило их поддержки — 2-й рабочий день)."""
+    dt_from, dt_to = period_bounds(dt_from, dt_to)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, created_at, amount FROM purchases "
+            "WHERE datetime(created_at) BETWEEN datetime(?) AND datetime(?)",
+            (dt_from, dt_to),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_purchases_by_month(month: str) -> list[dict]:
     """Отдельные покупки за месяц ('ГГГГ-ММ', по МСК) — сверить с «Мой налог»."""
     async with aiosqlite.connect(DB_PATH) as db:
