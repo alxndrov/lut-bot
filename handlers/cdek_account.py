@@ -212,6 +212,11 @@ async def _save_payment(message: Message, amount: float, comment: str,
     payment_id = await db.add_cdek_payment(amount, comment, user.id, name)
     await state.clear()
 
+    from services.gsheets import request_expense_append
+    sheet_comment = "Оплата СДЭК" + (f": {comment}" if comment else "")
+    request_expense_append(f"cdek-{payment_id}", datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
+                           amount, sheet_comment)
+
     a = await db.get_cdek_account()
     if a["due"] > 0:
         rest = f"💰 Осталось отложено: <b>{_rub(a['due'])} ₽</b>"
