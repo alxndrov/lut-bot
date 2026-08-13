@@ -2341,13 +2341,22 @@ async def get_orders_for_finance_export() -> list[dict]:
     """Заказы для (пере)выгрузки в финансовый лист: order_code, дата, и
     сумма/отложено на СДЭК — суммой по всем purchases заказа (смешанный
     заказ из разных товаров хранится несколькими строками purchases с
-    одним и тем же telegram_payment_id — здесь схлопываем их в одну)."""
+    одним и тем же telegram_payment_id — здесь схлопываем их в одну).
+
+    delivery_legacy — заказы до того, как в purchases стали сохранять
+    точный счёт СДЭК (delivery_cost): для них точной цифры нет, отдаём
+    сырую сумму доставки отдельно, чтобы вызывающий код прогнал её через
+    services.payout.delivery_out() — ту же оценочную формулу, что и везде
+    в боте для таких старых заказов."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT o.order_code, o.created_at,
                       COALESCE(SUM(pu.amount), 0) AS amount,
-                      COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost
+                      COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost,
+                      COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
+                                        THEN pu.delivery_amount ELSE 0 END), 0)
+                          AS delivery_legacy
                FROM orders o
                LEFT JOIN purchases pu ON pu.telegram_payment_id = o.prodamus_order_id
                WHERE o.order_code IS NOT NULL
