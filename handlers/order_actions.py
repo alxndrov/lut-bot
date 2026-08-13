@@ -892,12 +892,14 @@ async def cb_order_shipped(callback: CallbackQuery):
     await callback.answer("Отмечено: заказ отправлен 📦")
 
     # Расходники (коробка/поп-фильтр) списываем в момент отправки — именно
-    # тогда товар реально уходит в коробку, а не когда его напечатали
+    # тогда товар реально уходит в коробку, а не когда его напечатали.
+    # Со счёта того, кто нажал кнопку — он и паковал своими запасами
     from handlers import consumables
     total = _order_positions(order)
-    touched = await consumables.apply_stock_delta(order, set(range(1, total + 1)), -1)
+    touched = await consumables.apply_stock_delta(
+        callback.from_user.id, order, set(range(1, total + 1)), -1)
     for key in touched:
-        note = await consumables.stock_note(key)
+        note = await consumables.stock_note(callback.from_user.id, key)
         if note:
             await callback.message.answer(note, parse_mode="HTML")
 
@@ -944,9 +946,12 @@ async def cb_order_unship(callback: CallbackQuery):
         )
         return
 
+    # Возвращаем тому, кто изначально списал — тот, кто отправлял, а не
+    # обязательно тот, кто сейчас откатывает отметку
     from handlers import consumables
     total = _order_positions(order)
-    await consumables.apply_stock_delta(order, set(range(1, total + 1)), +1)
+    refund_to = order.get("shipped_by_id") or callback.from_user.id
+    await consumables.apply_stock_delta(refund_to, order, set(range(1, total + 1)), +1)
 
     await db.clear_order_shipped(order["id"])
     request_sync()
