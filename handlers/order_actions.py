@@ -752,17 +752,8 @@ async def cb_order_printed(callback: CallbackQuery):
     prints = await db.get_order_prints(order["id"])
     mine = next((p for p in prints if p["user_id"] == uid), None)
     have = _print_positions_of(order, mine) if mine else set()
-    newly = targets - have
-    marked = bool(newly)
+    marked = bool(targets - have)
     await db.set_order_print_positions(order["id"], uid, name, have | targets)
-
-    if newly:
-        from handlers import consumables
-        touched = await consumables.apply_print_delta(order, newly, -1)
-        for key in touched:
-            note = await consumables.stock_note(key)
-            if note:
-                await callback.message.answer(note, parse_mode="HTML")
 
     prints = await db.get_order_prints(order["id"])
     waiting = [p for p in range(1, total + 1) if p not in _print_map(order, prints)]
@@ -807,18 +798,12 @@ async def cb_order_unprint(callback: CallbackQuery):
     # распечатанным целиком
     targets = _target_positions(callback, order, uid)
     prints = await db.get_order_prints(order["id"])
-    removed: set[int] = set()
     for p in prints:
         # Позицию мог отметить и напарник: снимаем у того, чья отметка
-        mine = _print_positions_of(order, p)
-        kept = mine - targets
-        if kept != mine:
-            removed |= (mine & targets)
+        kept = _print_positions_of(order, p) - targets
+        if kept != _print_positions_of(order, p):
             await db.set_order_print_positions(order["id"], p["user_id"],
                                                p["user_name"], kept)
-    if removed:
-        from handlers import consumables
-        await consumables.apply_print_delta(order, removed, +1)
     await db.clear_order_printed(order["id"])
     request_sync()
     note = ("Отметка снята ↩️" if _order_positions(order) == 1
@@ -906,6 +891,16 @@ async def cb_order_shipped(callback: CallbackQuery):
     request_sync()
     await callback.answer("Отмечено: заказ отправлен 📦")
 
+    # Расходники (коробка/поп-фильтр) списываем в момент отправки — именно
+    # тогда товар реально уходит в коробку, а не когда его напечатали
+    from handlers import consumables
+    total = _order_positions(order)
+    touched = await consumables.apply_stock_delta(order, set(range(1, total + 1)), -1)
+    for key in touched:
+        note = await consumables.stock_note(key)
+        if note:
+            await callback.message.answer(note, parse_mode="HTML")
+
     # Пуш с просьбой оставить отзыв — отсчёт от отправки, не от оплаты:
     # заказ может ждать печати неделями, и «через 5 дней» должно значить
     # 5 дней после того, как товар реально уехал к клиенту. В заказе может
@@ -948,6 +943,10 @@ async def cb_order_unship(callback: CallbackQuery):
             show_alert=True,
         )
         return
+
+    from handlers import consumables
+    total = _order_positions(order)
+    await consumables.apply_stock_delta(order, set(range(1, total + 1)), +1)
 
     await db.clear_order_shipped(order["id"])
     request_sync()

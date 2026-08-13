@@ -1,9 +1,9 @@
 """
 Расходники под физические товары (malimadmins): коробки и поп-фильтры.
 
-Списываются автоматически при отметке позиции «распечатано» и возвращаются
-при отмене отметки — привязка к печати, а не к оплате, потому что именно
-в этот момент товар реально уходит в коробку.
+Списываются автоматически при отметке заказа «отправлен» и возвращаются
+при снятии отметки — привязка к отправке, а не к печати или оплате,
+потому что именно тогда товар реально уходит в коробку.
 """
 import json
 import logging
@@ -36,24 +36,21 @@ class StockStates(StatesGroup):
 
 
 async def _queue_need() -> dict[str, int]:
-    """Сколько каждого расходника нужно на ещё не напечатанные позиции.
+    """Сколько каждого расходника нужно на ещё не отправленные заказы.
 
-    Повторяет логику очереди печати из order_actions (_order_positions,
-    _print_map) — импорт внутри функции, чтобы не ловить цикл импортов
-    (order_actions зовёт этот модуль обратно при отметке печати).
+    Списание происходит при отправке заказа целиком, поэтому в очередь
+    идут ВСЕ позиции неотправленных заказов — независимо от того,
+    напечатаны они уже или нет. Импорт внутри функции, чтобы не ловить
+    цикл импортов (order_actions зовёт этот модуль обратно при отправке).
     """
-    from handlers.order_actions import _order_positions, _print_map
+    from handlers.order_actions import _order_positions
 
     orders = await db.get_orders(only_unshipped=True)
     need: dict[str, int] = {}
     for order in orders:
-        prints = await db.get_order_prints(order["id"])
         total = _order_positions(order)
-        printed = _print_map(order, prints)
         round_products = _positions_products(order, total)
         for pos in range(1, total + 1):
-            if pos in printed:
-                continue
             pid = round_products[pos - 1] if pos - 1 < len(round_products) else order["product_id"]
             for key in CONSUMABLE_RULES.get(pid, []):
                 need[key] = need.get(key, 0) + 1
@@ -73,7 +70,7 @@ def _positions_products(order: dict, total: int) -> list[int]:
     return round_products
 
 
-async def apply_print_delta(order: dict, positions: set[int], sign: int) -> set[str]:
+async def apply_stock_delta(order: dict, positions: set[int], sign: int) -> set[str]:
     """Списывает (sign=-1) или возвращает (sign=+1) расходники под positions.
 
     Возвращает ключи задетых расходников — по ним потом проверяем остаток.
