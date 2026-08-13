@@ -263,7 +263,12 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         sheet_delivery_cost = delivery_out(
             delivery_cost_val, delivery_amt if delivery_cost_val == 0 else 0,
             config.PRODAMUS_FEE_PERCENT)
-        request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost)
+        goods_comment = ", ".join(
+            products_by_id[pid]["name"] + (f" ×{counts[pid]}" if counts[pid] > 1 else "")
+            for pid in order_ids
+        )
+        request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost,
+                               comment=goods_comment)
 
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
         # Печатающих может быть несколько: заказ покажется каждому из них.

@@ -2352,7 +2352,10 @@ async def get_orders_for_finance_export() -> list[dict]:
     order_code бывает пуст у заказов до появления сквозной нумерации —
     для них берём prodamus_order_id (как и для цифровых покупок в
     get_digital_purchases_for_finance_export), иначе заказ молча
-    выпадает из выгрузки."""
+    выпадает из выгрузки.
+
+    comment — названия товаров заказа через запятую (с «×N» при
+    quantity > 1), для смешанного заказа — все позиции сразу."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -2361,9 +2364,15 @@ async def get_orders_for_finance_export() -> list[dict]:
                       COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost,
                       COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
                                         THEN pu.delivery_amount ELSE 0 END), 0)
-                          AS delivery_legacy
+                          AS delivery_legacy,
+                      GROUP_CONCAT(
+                          p.name || CASE WHEN pu.quantity > 1
+                                         THEN ' ×' || pu.quantity ELSE '' END,
+                          ', '
+                      ) AS comment
                FROM orders o
                LEFT JOIN purchases pu ON pu.telegram_payment_id = o.prodamus_order_id
+               LEFT JOIN products p ON p.id = pu.product_id
                GROUP BY o.id
                ORDER BY o.created_at"""
         ) as cur:
@@ -2425,7 +2434,7 @@ async def get_cashflow_export_rows() -> list[dict]:
     for r in await get_orders_for_finance_export():
         rows.append({
             "code": r["order_code"], "created_at": r["created_at"], "amount": r["amount"],
-            "kind": "Приход", "comment": "",
+            "kind": "Приход", "comment": r["comment"] or "",
             "delivery_cost": r["delivery_cost"], "delivery_legacy": r["delivery_legacy"],
         })
 
