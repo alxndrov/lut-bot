@@ -251,28 +251,6 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             round_products_json=json.dumps(round_products, ensure_ascii=False),
         )
 
-        # Строка в финансовый лист Google Таблицы — по заказу целиком, не
-        # по позициям (доставка/комиссия/налог считаются от полной суммы).
-        # Комиссия/Налог/К выплате там — формулами, дописываются вместе со
-        # строкой (см. services/gsheets.py)
-        from services.gsheets import request_finance_append
-        from services.payout import delivery_out
-        order_date_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
-        # Точного счёта СДЭК может не быть (интеграция выключена, адрес
-        # собран свободным текстом) — тогда оцениваем как и везде в боте
-        sheet_delivery_cost = delivery_out(
-            delivery_cost_val, delivery_amt if delivery_cost_val == 0 else 0,
-            config.PRODAMUS_FEE_PERCENT)
-        goods_comment = ", ".join(
-            products_by_id[pid]["name"] + (f" ×{counts[pid]}" if counts[pid] > 1 else "")
-            for pid in order_ids
-        )
-        # Кто печатал — ещё не известно (заказ только что оплачен, печать
-        # впереди, может пройти дни, заказ может и передаться другому
-        # админу) — колонку проставит cb_order_printed, когда допечатают
-        request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost,
-                               comment=goods_comment, goods_type="Физический")
-
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
         # Печатающих может быть несколько: заказ покажется каждому из них.
         # Разметку позиций храним отдельно: её потом можно менять по одной
@@ -286,6 +264,33 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
                                               f"@{printers[0]['username']}")
             from handlers.order_actions import _order_text
             summary = _order_text(await db.get_order(order_row_id))
+
+        # Строка в финансовый лист Google Таблицы — по заказу целиком, не
+        # по позициям (доставка/комиссия/налог считаются от полной суммы).
+        # Комиссия/Налог/К выплате там — формулами, дописываются вместе со
+        # строкой (см. services/gsheets.py). После разметки/назначения
+        # исполнителя (см. выше) — «Позиций напечатал Даня» считается той
+        # же db.order_print_credits, что и «Взаиморасчёт» в самом боте, и
+        # ей нужны routing/assignee, чтобы сразу дать то же число, что
+        # покажет бот прямо сейчас (печати ещё не было — счёт по тому, за
+        # кем заказ числится; уточнится по факту в cb_order_printed).
+        from services.gsheets import request_finance_append
+        from services.payout import delivery_out
+        order_date_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+        # Точного счёта СДЭК может не быть (интеграция выключена, адрес
+        # собран свободным текстом) — тогда оцениваем как и везде в боте
+        sheet_delivery_cost = delivery_out(
+            delivery_cost_val, delivery_amt if delivery_cost_val == 0 else 0,
+            config.PRODAMUS_FEE_PERCENT)
+        goods_comment = ", ".join(
+            products_by_id[pid]["name"] + (f" ×{counts[pid]}" if counts[pid] > 1 else "")
+            for pid in order_ids
+        )
+        fresh_order = await db.get_order(order_row_id)
+        credits = await db.order_print_credits(fresh_order, [], config.ADMIN_IDS)
+        request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost,
+                               comment=goods_comment, goods_type="Физический",
+                               printer_positions=credits.get(config.PARTNER_ID, 0))
 
         await _send_order_notify(order_row_id, summary, main_bot=bot, rounds=rounds,
                                  order_number=order_code)

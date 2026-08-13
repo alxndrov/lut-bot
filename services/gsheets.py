@@ -393,7 +393,8 @@ def _open_finance_sheet():
 
 def _append_cashflow_row(code: str, date_msk: str, amount: float, kind: str,
                          comment: str = "", delivery_cost: float | None = None,
-                         goods_type: str | None = None, printer: str | None = None) -> None:
+                         goods_type: str | None = None, printer: str | None = None,
+                         printer_positions: int | None = None) -> None:
     """Дописывает одну строку (приход или расход) в первую свободную
     строку финансового листа. Общая часть append_payment_row/append_expense_row.
 
@@ -405,7 +406,8 @@ def _append_cashflow_row(code: str, date_msk: str, amount: float, kind: str,
         _ensure_rows(sheet, row)
         cells = _row_cells(header_cols, row, date_msk=date_msk, code=code, amount=amount,
                            kind=kind, comment=comment, delivery_cost=delivery_cost,
-                           goods_type=goods_type, printer=printer)
+                           goods_type=goods_type, printer=printer,
+                           printer_positions=printer_positions)
         sheet.batch_update(cells, value_input_option="USER_ENTERED")
         logger.info(f"gsheets: записана строка {code!r} ({kind}) в финансовый лист (строка {row})")
     except SheetsError:
@@ -416,7 +418,7 @@ def _append_cashflow_row(code: str, date_msk: str, amount: float, kind: str,
 
 def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_cost: float,
                        comment: str = "", goods_type: str | None = None,
-                       printer: str | None = None) -> None:
+                       printer: str | None = None, printer_positions: int | None = None) -> None:
     """Дописывает приход — оплату физ- или цифрового товара. Комиссия/
     Налог/К выплате — формулами, которые бот сам копирует в новую строку
     (по тем же ставкам, что в остальных расчётах бота).
@@ -424,7 +426,7 @@ def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_c
     Блокирующая функция (gspread синхронный) — вызывать через to_thread.
     """
     _append_cashflow_row(order_code, date_msk, amount, "Приход", comment, delivery_cost,
-                         goods_type, printer)
+                         goods_type, printer, printer_positions)
 
 
 def append_expense_row(code: str, date_msk: str, amount: float, comment: str,
@@ -440,7 +442,7 @@ def append_expense_row(code: str, date_msk: str, amount: float, comment: str,
 
 def request_finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float,
                            comment: str = "", goods_type: str | None = None,
-                           printer: str | None = None):
+                           printer: str | None = None, printer_positions: int | None = None):
     """Просит дописать приход в финансовый лист. Вызывать неблокирующе.
 
     В отличие от request_sync — без задержки: одна строка добавляется
@@ -450,17 +452,17 @@ def request_finance_append(order_code: str, date_msk: str, amount: float, delive
         return
     try:
         asyncio.create_task(_finance_append(order_code, date_msk, amount, delivery_cost,
-                                            comment, goods_type, printer))
+                                            comment, goods_type, printer, printer_positions))
     except RuntimeError:
         logger.warning("gsheets: request_finance_append вне event loop, пропускаю")
 
 
 async def _finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float,
                           comment: str = "", goods_type: str | None = None,
-                          printer: str | None = None):
+                          printer: str | None = None, printer_positions: int | None = None):
     try:
         await asyncio.to_thread(append_payment_row, order_code, date_msk, amount,
-                                delivery_cost, comment, goods_type, printer)
+                                delivery_cost, comment, goods_type, printer, printer_positions)
     except SheetsError as e:
         logger.error(f"gsheets: запись в финансовый лист не удалась ({order_code}) — {e}")
     except Exception:

@@ -1899,15 +1899,24 @@ async def clear_order_shipped(order_id: int):
 
 
 def period_bounds(dt_from: str, dt_to: str) -> tuple[str, str]:
-    """Голую дату дотягиваем до полных суток.
+    """Голую дату ('2026-08-05', без времени) дотягиваем до полных суток
+    ПО МОСКВЕ — бизнес считает день/месяц по Москве (см. GOOGLE_SHEET
+    финансовый лист, где «Дата заказа» тоже московская), а created_at и
+    все остальные timestamp'ы в базе — UTC (SQLite CURRENT_TIMESTAMP).
+    Поэтому границу переводим в UTC (-3 часа), иначе заказ из первых
+    трёх часов суток по Москве (ещё вчерашний вечер по UTC) улетал бы не
+    в тот месяц при сравнении с created_at.
 
-    Иначе '2026-08-05' с обеих сторон означает полночь, и всё, что было
-    в течение дня, в выборку не попадает.
-    """
+    Если время уже указано явно (не голая дата, длина не 10) — это уже
+    готовая UTC-граница момента (например, дата прошлого взаиморасчёта),
+    её не трогаем."""
+    from datetime import datetime, timedelta
     if len(dt_from) == 10:
-        dt_from += " 00:00:00"
+        dt_from = (datetime.strptime(dt_from, "%Y-%m-%d")
+                  - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
     if len(dt_to) == 10:
-        dt_to += " 23:59:59"
+        dt_to = (datetime.strptime(dt_to, "%Y-%m-%d") + timedelta(hours=23, minutes=59, seconds=59)
+                - timedelta(hours=3)).strftime("%Y-%m-%d %H:%M:%S")
     return dt_from, dt_to
 
 
@@ -2445,15 +2454,11 @@ async def get_orders_for_finance_export(admin_ids: list[int] | None = None,
     if admin_ids and partner_id:
         for r in rows:
             order = await get_order(r["id"])
-            # Только для уже полностью распечатанных — как и «Печатал»,
-            # до печати число не считаем: order_print_credits в отсутствие
-            # отметки печати достаёт позицию из текущего исполнителя
-            # (assignee), а он на заказ назначается сразу при оплате, ещё
-            # до какой-либо реальной печати — раньше времени записали бы
-            # заказ Дане, хотя он его ещё не касался.
-            if not order.get("printed_at"):
-                continue
             prints = await get_order_prints(r["id"])
+            # Тот же order_print_credits, что и в services.payout._print_credits
+            # («Взаиморасчёт») — сколько именно сейчас числится, включая
+            # заказы, ещё не тронутые печатью (тогда позиция засчитывается
+            # по тому, за кем заказ вообще числится — так же, как в боте).
             credits = await order_print_credits(order, prints, admin_ids)
             r["partner_positions"] = credits.get(partner_id, 0)
     return rows
