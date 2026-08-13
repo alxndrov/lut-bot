@@ -170,6 +170,11 @@ async def on_expense_amount(message: Message, state: FSMContext):
     expense_id = await db.add_expense(category, amount, comment, u.id, name)
     await state.clear()
 
+    from services.gsheets import request_expense_append
+    sheet_comment = category if not comment else f"{category}: {comment}"
+    request_expense_append(f"exp-{expense_id}", datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
+                           amount, sheet_comment)
+
     tail = f"\n💬 {comment}" if comment else ""
     await message.answer(
         f"✅ Записал расход\n\n🧾 <b>{category}</b> — <b>{amount:,.2f} ₽</b>{tail}",

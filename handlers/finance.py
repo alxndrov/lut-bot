@@ -453,6 +453,11 @@ async def on_payout_amount(message: Message, state: FSMContext):
     payout_id = await db.add_payout(recipient, amount, comment, u.id, name)
     await state.clear()
 
+    from services.gsheets import request_expense_append
+    sheet_comment = f"Выплата {recipient}" + (f": {comment}" if comment else "")
+    request_expense_append(f"payout-{payout_id}", datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
+                           amount, sheet_comment)
+
     tail = f"\n💬 {comment}" if comment else ""
     await message.answer(
         f"✅ Записал выплату\n\n👤 <b>{recipient}: {amount:,.2f} ₽</b>{tail}",
@@ -655,22 +660,24 @@ async def cb_settle_log(callback: CallbackQuery):
 
 @router.message(Command("gsheets_backfill"))
 async def cmd_gsheets_backfill(message: Message):
-    """Разовая команда: переносит уже созданные заказы в финансовый лист
-    Google Таблицы (новые заказы туда и так пишутся сами, см.
-    prodamus_webhook.py). Идемпотентна — можно жать сколько угодно раз,
-    уже перенесённые заказы не задвоятся."""
+    """Разовая команда: переносит уже накопленные операции (приходы —
+    физ- и цифровые товары, расходы — траты и выплаты партнёрам) в
+    финансовый лист Google Таблицы (новые операции туда и так пишутся
+    сами по мере появления, см. prodamus_webhook.py/expenses.py/finance.py).
+    Идемпотентна — можно жать сколько угодно раз, уже перенесённые
+    операции не задвоятся."""
     if message.from_user.id not in config.ADMIN_IDS:
         return
     if not config.GSHEETS_ENABLED:
         await message.answer("Google Таблица не настроена — нет GOOGLE_SHEET_ID в .env.")
         return
 
-    rows = await db.get_orders_for_finance_export()
+    rows = await db.get_cashflow_export_rows()
     if not rows:
-        await message.answer("Заказов с номером (физтовары) в базе не нашлось — переносить нечего.")
+        await message.answer("Операций в базе не нашлось — переносить нечего.")
         return
 
-    m = await message.answer(f"⏳ Переношу заказы в лист «{config.GOOGLE_SHEET_FINANCE_TAB}»…")
+    m = await message.answer(f"⏳ Переношу операции в лист «{config.GOOGLE_SHEET_FINANCE_TAB}»…")
     try:
         from services.gsheets import backfill_finance_rows, SheetsError
         added, skipped = await asyncio.to_thread(backfill_finance_rows, rows)

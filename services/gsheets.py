@@ -228,11 +228,12 @@ async def _delayed_sync(delay: float):
         logger.exception("gsheets: неожиданная ошибка автовыгрузки")
 
 
-# --- Финансовая книга: по строке на заказ, дописывается, не перезаписывается ---
+# --- Финансовая книга: кэшфлоу (приходы + расходы), по строке на операцию,
+# лист дописывается, не перезаписывается ---
 
 FINANCE_HEADERS = [
     "Дата заказа", "Номер заказа", "Оплата", "Комиссия Prodamus",
-    "Налог", "Отложено на СДЭК", "К выплате",
+    "Налог", "Отложено на СДЭК", "К выплате", "Тип", "Комментарий",
 ]
 
 
@@ -252,53 +253,6 @@ def _col_letter(col: int) -> str:
     return letters
 
 
-def _header_columns(sheet, headers: list[str]) -> dict[str, int]:
-    """Название столбца из шапки листа -> номер столбца (с 1).
-
-    Запись идёт по названию столбца, а не по фиксированной позиции A-G:
-    если в листе руками вставили новый столбец (даже в середине — до
-    существующих), шапка сдвинется, но бот всё равно попадёт в нужный
-    по названию столбец, а не затрёт чужие данные/формулы и не собьёт
-    условное форматирование, привязанное к конкретным буквам.
-    """
-    header_row = sheet.row_values(1)
-    cols = {name: i + 1 for i, name in enumerate(header_row) if name}
-    missing = [h for h in headers if h not in cols]
-    if missing:
-        raise SheetsError(
-            f"в листе «{config.GOOGLE_SHEET_FINANCE_TAB}» не найден столбец «{missing[0]}» — "
-            "шапку переименовали? верните исходный текст заголовка."
-        )
-    return cols
-
-
-def _finance_row_cells(header_cols: dict[str, int], row_num: int, date_msk: str,
-                        order_code: str, amount: float, delivery_cost: float) -> list[dict]:
-    """Ячейки одной строки финансового листа — каждая привязана к столбцу
-    по названию из header_cols (см. _header_columns), не по букве A-G."""
-    def letter(name: str) -> str:
-        return _col_letter(header_cols[name])
-
-    pay_cell = f"{letter('Оплата')}{row_num}"
-    fee_cell = f"{letter('Комиссия Prodamus')}{row_num}"
-    npd_cell = f"{letter('Налог')}{row_num}"
-    cdek_cell = f"{letter('Отложено на СДЭК')}{row_num}"
-
-    values = {
-        "Дата заказа": date_msk,
-        "Номер заказа": order_code,
-        "Оплата": amount,
-        "Комиссия Prodamus": _pct_formula(pay_cell, config.PRODAMUS_FEE_PERCENT),
-        "Налог": _pct_formula(pay_cell, config.NPD_PERCENT),
-        "Отложено на СДЭК": delivery_cost,
-        "К выплате": f"={pay_cell}-{fee_cell}-{npd_cell}-{cdek_cell}",
-    }
-    return [
-        {"range": f"{letter(name)}{row_num}", "values": [[value]]}
-        for name, value in values.items()
-    ]
-
-
 def _ensure_rows(sheet, need_rows: int):
     """Расширяет лист, если целевая строка выходит за текущий размер грида.
 
@@ -309,46 +263,141 @@ def _ensure_rows(sheet, need_rows: int):
         sheet.add_rows(need_rows - sheet.row_count + 50)
 
 
-def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_cost: float) -> None:
-    """Дописывает одну строку в финансовый лист (GOOGLE_SHEET_FINANCE_TAB) —
-    в отличие от sync_orders, ничего не перезаписывает: остальные строки
-    и вписанные туда формулы/пометки не трогаются.
+def _ensure_cols(sheet, need_cols: int):
+    """Аналогично _ensure_rows, но по столбцам — нужно, когда шапке
+    дописывают недостающие названия (см. _header_columns)."""
+    if need_cols > sheet.col_count:
+        sheet.add_cols(need_cols - sheet.col_count + 10)
 
-    Комиссия/Налог/К выплате — формулами, которые бот сам копирует в новую
-    строку (по тем же ставкам, что в остальных расчётах бота), чтобы не
-    зависеть от того, подхватит ли Google Sheets автозаполнение сам.
 
-    Каждое значение пишется в столбец по названию из шапки (см.
-    _header_columns), а не в фиксированную букву — если в листе вручную
-    добавили столбец, запись всё равно попадёт куда нужно.
+def _header_columns(sheet, headers: list[str]) -> dict[str, int]:
+    """Название столбца из шапки листа -> номер столбца (с 1).
+
+    Запись идёт по названию столбца, а не по фиксированной позиции A-G:
+    если в листе руками вставили новый столбец (даже в середине — до
+    существующих), шапка сдвинется, но бот всё равно попадёт в нужный
+    по названию столбец, а не затрёт чужие данные/формулы и не собьёт
+    условное форматирование, привязанное к конкретным буквам.
+
+    Названий из headers, которых в шапке ещё нет (например, «Тип» и
+    «Комментарий» — их не было в листе до появления кэшфлоу), бот сам
+    дописывает в конец шапки, а не падает с ошибкой: так лист сам
+    донастраивается под новые возможности бота, ничего вручную двигать
+    не нужно.
+    """
+    header_row = sheet.row_values(1)
+    cols = {name: i + 1 for i, name in enumerate(header_row) if name}
+    missing = [h for h in headers if h not in cols]
+    if missing:
+        next_col = len(header_row) + 1
+        _ensure_cols(sheet, next_col + len(missing) - 1)
+        new_cells = []
+        for h in missing:
+            cols[h] = next_col
+            new_cells.append({"range": f"{_col_letter(next_col)}1", "values": [[h]]})
+            next_col += 1
+        sheet.batch_update(new_cells, value_input_option="USER_ENTERED")
+        logger.info(f"gsheets: в шапку листа дописаны столбцы: {', '.join(missing)}")
+    return cols
+
+
+def _row_cells(header_cols: dict[str, int], row_num: int, *, date_msk: str, code: str,
+               amount: float, kind: str, comment: str = "",
+               delivery_cost: float | None = None) -> list[dict]:
+    """Ячейки одной строки кэшфлоу — привязаны к столбцу по названию из
+    header_cols (см. _header_columns), не по букве A-G.
+
+    kind — 'Приход' (оплата физ- или цифрового товара) или 'Расход'
+    (трата из /expenses, выплата партнёру). Комиссия/Налог/К выплате
+    считаются формулой только для приходов (delivery_cost задан) — у
+    расходов эти столбцы просто не трогаем, их сумма никуда не идёт."""
+    def letter(name: str) -> str:
+        return _col_letter(header_cols[name])
+
+    values = {
+        "Дата заказа": date_msk,
+        "Номер заказа": code,
+        "Оплата": amount,
+        "Тип": kind,
+        "Комментарий": comment,
+    }
+    if delivery_cost is not None:
+        pay_cell = f"{letter('Оплата')}{row_num}"
+        fee_cell = f"{letter('Комиссия Prodamus')}{row_num}"
+        npd_cell = f"{letter('Налог')}{row_num}"
+        cdek_cell = f"{letter('Отложено на СДЭК')}{row_num}"
+        values["Комиссия Prodamus"] = _pct_formula(pay_cell, config.PRODAMUS_FEE_PERCENT)
+        values["Налог"] = _pct_formula(pay_cell, config.NPD_PERCENT)
+        values["Отложено на СДЭК"] = delivery_cost
+        values["К выплате"] = f"={pay_cell}-{fee_cell}-{npd_cell}-{cdek_cell}"
+
+    return [
+        {"range": f"{letter(name)}{row_num}", "values": [[value]]}
+        for name, value in values.items()
+    ]
+
+
+def _open_finance_sheet():
+    """Открывает (создаёт при необходимости, с шапкой) финансовый лист.
+    Возвращает (sheet, header_cols) — header_cols см. _header_columns."""
+    book = _open_book()
+    title = config.GOOGLE_SHEET_FINANCE_TAB
+    try:
+        sheet = book.worksheet(title)
+    except Exception:
+        sheet = book.add_worksheet(title=title, rows=200, cols=len(FINANCE_HEADERS))
+        sheet.update(values=[FINANCE_HEADERS], range_name="A1")
+        sheet.freeze(rows=1)
+    header_cols = _header_columns(sheet, FINANCE_HEADERS)
+    return sheet, header_cols
+
+
+def _append_cashflow_row(code: str, date_msk: str, amount: float, kind: str,
+                         comment: str = "", delivery_cost: float | None = None) -> None:
+    """Дописывает одну строку (приход или расход) в первую свободную
+    строку финансового листа. Общая часть append_payment_row/append_expense_row.
 
     Блокирующая функция (gspread синхронный) — вызывать через to_thread.
     """
-    book = _open_book()
-
     try:
-        title = config.GOOGLE_SHEET_FINANCE_TAB
-        try:
-            sheet = book.worksheet(title)
-        except Exception:
-            sheet = book.add_worksheet(title=title, rows=200, cols=len(FINANCE_HEADERS))
-            sheet.update(values=[FINANCE_HEADERS], range_name="A1")
-            sheet.freeze(rows=1)
-
-        header_cols = _header_columns(sheet, FINANCE_HEADERS)
+        sheet, header_cols = _open_finance_sheet()
         row = len(sheet.get_all_values()) + 1
         _ensure_rows(sheet, row)
-        cells = _finance_row_cells(header_cols, row, date_msk, order_code, amount, delivery_cost)
+        cells = _row_cells(header_cols, row, date_msk=date_msk, code=code, amount=amount,
+                           kind=kind, comment=comment, delivery_cost=delivery_cost)
         sheet.batch_update(cells, value_input_option="USER_ENTERED")
-        logger.info(f"gsheets: записан заказ {order_code} в финансовый лист (строка {row})")
+        logger.info(f"gsheets: записана строка {code!r} ({kind}) в финансовый лист (строка {row})")
     except SheetsError:
         raise
     except Exception as e:
         raise SheetsError(f"не удалось записать строку: {type(e).__name__}: {e}")
 
 
-def request_finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float):
-    """Просит дописать заказ в финансовый лист. Вызывать неблокирующе.
+def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_cost: float,
+                       comment: str = "") -> None:
+    """Дописывает приход — оплату физ- или цифрового товара. Комиссия/
+    Налог/К выплате — формулами, которые бот сам копирует в новую строку
+    (по тем же ставкам, что в остальных расчётах бота).
+
+    Блокирующая функция (gspread синхронный) — вызывать через to_thread.
+    """
+    _append_cashflow_row(order_code, date_msk, amount, "Приход", comment, delivery_cost)
+
+
+def append_expense_row(code: str, date_msk: str, amount: float, comment: str,
+                       kind: str = "Расход") -> None:
+    """Дописывает расход — трату из /expenses или выплату партнёру — в тот
+    же финансовый лист. Без формул комиссии/налога/СДЭК: сумма расхода
+    просто пишется как есть, дальше пользователь считает сам.
+
+    Блокирующая функция (gspread синхронный) — вызывать через to_thread.
+    """
+    _append_cashflow_row(code, date_msk, amount, kind, comment, delivery_cost=None)
+
+
+def request_finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float,
+                           comment: str = ""):
+    """Просит дописать приход в финансовый лист. Вызывать неблокирующе.
 
     В отличие от request_sync — без задержки: одна строка добавляется
     одним лёгким запросом, откладывать и схлопывать с другими нечего.
@@ -356,46 +405,60 @@ def request_finance_append(order_code: str, date_msk: str, amount: float, delive
     if not config.GSHEETS_ENABLED:
         return
     try:
-        asyncio.create_task(_finance_append(order_code, date_msk, amount, delivery_cost))
+        asyncio.create_task(_finance_append(order_code, date_msk, amount, delivery_cost, comment))
     except RuntimeError:
         logger.warning("gsheets: request_finance_append вне event loop, пропускаю")
 
 
-async def _finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float):
+async def _finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float,
+                          comment: str = ""):
     try:
-        await asyncio.to_thread(append_payment_row, order_code, date_msk, amount, delivery_cost)
+        await asyncio.to_thread(append_payment_row, order_code, date_msk, amount,
+                                delivery_cost, comment)
     except SheetsError as e:
         logger.error(f"gsheets: запись в финансовый лист не удалась ({order_code}) — {e}")
     except Exception:
         logger.exception(f"gsheets: неожиданная ошибка записи в финансовый лист ({order_code})")
 
 
-def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
-    """Дописывает в финансовый лист заказы из rows (см.
-    db.get_orders_for_finance_export), которых там ещё нет.
+def request_expense_append(code: str, date_msk: str, amount: float, comment: str,
+                           kind: str = "Расход"):
+    """Просит дописать расход в финансовый лист. Вызывать неблокирующе."""
+    if not config.GSHEETS_ENABLED:
+        return
+    try:
+        asyncio.create_task(_expense_append(code, date_msk, amount, comment, kind))
+    except RuntimeError:
+        logger.warning("gsheets: request_expense_append вне event loop, пропускаю")
 
-    Идемпотентно: сверяет по номеру заказа (столбец «Номер заказа», по
+
+async def _expense_append(code: str, date_msk: str, amount: float, comment: str,
+                          kind: str = "Расход"):
+    try:
+        await asyncio.to_thread(append_expense_row, code, date_msk, amount, comment, kind)
+    except SheetsError as e:
+        logger.error(f"gsheets: запись расхода в финансовый лист не удалась ({code}) — {e}")
+    except Exception:
+        logger.exception(f"gsheets: неожиданная ошибка записи расхода в финансовый лист ({code})")
+
+
+def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
+    """Дописывает в финансовый лист операции из rows (см.
+    db.get_cashflow_export_rows), которых там ещё нет — и приходы
+    (физ-/цифровые товары), и расходы (траты, выплаты партнёрам).
+
+    Идемпотентно: сверяет по коду операции (столбец «Номер заказа», по
     названию из шапки — см. _header_columns) с уже вписанными строками —
-    повторный запуск (или заказы, попавшие туда «живой» записью до
+    повторный запуск (или операции, попавшие туда «живой» записью до
     бэкафилла) не задвоит их. Возвращает (добавлено, уже было).
 
     Все ячейки всех новых строк пишутся ОДНИМ батч-запросом, а не по
-    одной — иначе на полусотне заказов легко упереться в лимит запросов
+    одной — иначе на полусотне операций легко упереться в лимит запросов
     Google API. Каждая ячейка привязана к столбцу по названию из шапки
-    (см. _finance_row_cells), не по фиксированной букве A-G.
+    (см. _row_cells), не по фиксированной букве A-G.
     Блокирующая функция (gspread синхронный) — вызывать через to_thread.
     """
-    book = _open_book()
-    title = config.GOOGLE_SHEET_FINANCE_TAB
-    try:
-        sheet = book.worksheet(title)
-    except Exception:
-        sheet = book.add_worksheet(title=title, rows=max(200, len(rows) + 10),
-                                   cols=len(FINANCE_HEADERS))
-        sheet.update(values=[FINANCE_HEADERS], range_name="A1")
-        sheet.freeze(rows=1)
-
-    header_cols = _header_columns(sheet, FINANCE_HEADERS)
+    sheet, header_cols = _open_finance_sheet()
     order_col = header_cols["Номер заказа"]
     existing_codes = set(sheet.col_values(order_col)[1:])  # без шапки
     row_num = len(sheet.get_all_values()) + 1
@@ -406,17 +469,20 @@ def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
     added = 0
     skipped = 0
     for r in rows:
-        code = r["order_code"]
+        code = r["code"]
         if not code or code in existing_codes:
             skipped += 1
             continue
-        # Заказы до появления точного счёта СДЭК в purchases.delivery_cost —
-        # оцениваем той же формулой, что и «Взаиморасчёт»/«Касса»
-        # (delivery_legacy > 0 только когда delivery_cost так и не сохранился)
-        delivery_cost = delivery_out(float(r["delivery_cost"]), float(r["delivery_legacy"]),
-                                     config.PRODAMUS_FEE_PERCENT)
-        cells += _finance_row_cells(header_cols, row_num, _msk(r["created_at"]), code,
-                                    float(r["amount"]), delivery_cost)
+        delivery_cost = None
+        if r.get("delivery_cost") is not None:
+            # Заказы до появления точного счёта СДЭК в purchases.delivery_cost —
+            # оцениваем той же формулой, что и «Взаиморасчёт»/«Касса»
+            # (delivery_legacy > 0 только когда delivery_cost так и не сохранился)
+            delivery_cost = delivery_out(float(r["delivery_cost"]), float(r["delivery_legacy"]),
+                                         config.PRODAMUS_FEE_PERCENT)
+        cells += _row_cells(header_cols, row_num, date_msk=_msk(r["created_at"]), code=code,
+                            amount=float(r["amount"]), kind=r["kind"],
+                            comment=r.get("comment", ""), delivery_cost=delivery_cost)
         row_num += 1
         added += 1
 

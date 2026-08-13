@@ -2366,6 +2366,92 @@ async def get_orders_for_finance_export() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_digital_purchases_for_finance_export() -> list[dict]:
+    """Цифровые/инфобиз-покупки для финансового листа — в отличие от
+    физтоваров, у них не бывает нескольких разных товаров в одной оплате,
+    так что схлопывать нечего: каждая покупка — своя строка.
+
+    Своего сквозного номера заказа (order_code) у них нет — в качестве
+    идентификатора строки берём telegram_payment_id (id платежа в Prodamus)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT pu.telegram_payment_id AS order_code, pu.created_at,
+                      pu.amount, p.name AS product_name
+               FROM purchases pu
+               JOIN products p ON p.id = pu.product_id
+               WHERE p.category != 'physical'
+               ORDER BY pu.created_at"""
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_expenses_for_finance_export() -> list[dict]:
+    """Все расходы (см. /expenses) — расходные строки финансового листа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, spent_at, category, amount, comment FROM expenses ORDER BY spent_at"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_payouts_for_finance_export() -> list[dict]:
+    """Все выплаты партнёрам (см. «Взаиморасчёт») — тоже расходные строки
+    финансового листа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, paid_at, recipient, amount, comment FROM payouts ORDER BY paid_at"
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_cashflow_export_rows() -> list[dict]:
+    """Все операции для финансового листа — приходы (физ- и цифровые
+    товары) и расходы (траты + выплаты партнёрам) одним списком, по дате.
+
+    Общая форма строки: {code, created_at, amount, kind, comment,
+    delivery_cost, delivery_legacy}. delivery_cost/delivery_legacy —
+    только у приходов физтоваров (см. get_orders_for_finance_export);
+    у остальных строк — None, чтобы вызывающий код (backfill_finance_rows)
+    не считал для них формулу Комиссии/Налога/СДЭК/К выплате."""
+    rows = []
+
+    for r in await get_orders_for_finance_export():
+        rows.append({
+            "code": r["order_code"], "created_at": r["created_at"], "amount": r["amount"],
+            "kind": "Приход", "comment": "",
+            "delivery_cost": r["delivery_cost"], "delivery_legacy": r["delivery_legacy"],
+        })
+
+    for r in await get_digital_purchases_for_finance_export():
+        rows.append({
+            "code": r["order_code"], "created_at": r["created_at"], "amount": r["amount"],
+            "kind": "Приход", "comment": r["product_name"] or "",
+            "delivery_cost": 0.0, "delivery_legacy": 0.0,
+        })
+
+    for r in await get_expenses_for_finance_export():
+        comment = r["category"] if not r["comment"] else f"{r['category']}: {r['comment']}"
+        rows.append({
+            "code": f"exp-{r['id']}", "created_at": r["spent_at"], "amount": r["amount"],
+            "kind": "Расход", "comment": comment,
+            "delivery_cost": None, "delivery_legacy": None,
+        })
+
+    for r in await get_payouts_for_finance_export():
+        comment = f"Выплата {r['recipient']}" + (f": {r['comment']}" if r["comment"] else "")
+        rows.append({
+            "code": f"payout-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
+            "kind": "Расход", "comment": comment,
+            "delivery_cost": None, "delivery_legacy": None,
+        })
+
+    rows.sort(key=lambda r: r["created_at"] or "")
+    return rows
+
+
 async def get_orders(only_unshipped: bool = False) -> list[dict]:
     """Оплаченные заказы (для аналитики отправок), свежие сверху."""
     where = "WHERE o.shipped_at IS NULL" if only_unshipped else ""
