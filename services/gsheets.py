@@ -232,9 +232,17 @@ async def _delayed_sync(delay: float):
 # лист дописывается, не перезаписывается ---
 
 FINANCE_HEADERS = [
-    "Дата заказа", "Номер заказа", "Оплата", "Комиссия Prodamus",
+    "Дата заказа", "Номер операции", "Сумма", "Комиссия Prodamus",
     "Налог", "Отложено на СДЭК", "К выплате", "Тип", "Комментарий",
 ]
+
+# Старые названия столбцов -> новые. Переименовываем ячейку шапки на
+# месте (см. _header_columns), а не дописываем новый столбец в конец —
+# иначе старые и новые записи расползлись бы по разным колонкам.
+_HEADER_RENAMES = {
+    "Номер заказа": "Номер операции",
+    "Оплата": "Сумма",
+}
 
 
 def _pct_formula(cell: str, pct: float) -> str:
@@ -284,8 +292,23 @@ def _header_columns(sheet, headers: list[str]) -> dict[str, int]:
     дописывает в конец шапки, а не падает с ошибкой: так лист сам
     донастраивается под новые возможности бота, ничего вручную двигать
     не нужно.
+
+    Старые названия (см. _HEADER_RENAMES) переименовываются в текущей
+    позиции столбца — иначе они бы считались «отсутствующими» и бот
+    дописал бы для них новый столбец в конец, расколов старые и новые
+    записи по разным колонкам.
     """
     header_row = sheet.row_values(1)
+    renamed = []
+    for i, name in enumerate(header_row):
+        new_name = _HEADER_RENAMES.get(name)
+        if new_name and new_name not in header_row:
+            header_row[i] = new_name
+            renamed.append({"range": f"{_col_letter(i + 1)}1", "values": [[new_name]]})
+    if renamed:
+        sheet.batch_update(renamed, value_input_option="USER_ENTERED")
+        logger.info(f"gsheets: переименованы столбцы шапки: {', '.join(r['values'][0][0] for r in renamed)}")
+
     cols = {name: i + 1 for i, name in enumerate(header_row) if name}
     missing = [h for h in headers if h not in cols]
     if missing:
@@ -316,13 +339,13 @@ def _row_cells(header_cols: dict[str, int], row_num: int, *, date_msk: str, code
 
     values = {
         "Дата заказа": date_msk,
-        "Номер заказа": code,
-        "Оплата": amount,
+        "Номер операции": code,
+        "Сумма": amount,
         "Тип": kind,
         "Комментарий": comment,
     }
     if delivery_cost is not None:
-        pay_cell = f"{letter('Оплата')}{row_num}"
+        pay_cell = f"{letter('Сумма')}{row_num}"
         fee_cell = f"{letter('Комиссия Prodamus')}{row_num}"
         npd_cell = f"{letter('Налог')}{row_num}"
         cdek_cell = f"{letter('Отложено на СДЭК')}{row_num}"
@@ -447,7 +470,7 @@ def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
     db.get_cashflow_export_rows), которых там ещё нет — и приходы
     (физ-/цифровые товары), и расходы (траты, выплаты партнёрам).
 
-    Идемпотентно: сверяет по коду операции (столбец «Номер заказа», по
+    Идемпотентно: сверяет по коду операции (столбец «Номер операции», по
     названию из шапки — см. _header_columns) с уже вписанными строками —
     повторный запуск (или операции, попавшие туда «живой» записью до
     бэкафилла) не задвоит их. Возвращает (добавлено, уже было).
@@ -459,7 +482,7 @@ def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
     Блокирующая функция (gspread синхронный) — вызывать через to_thread.
     """
     sheet, header_cols = _open_finance_sheet()
-    order_col = header_cols["Номер заказа"]
+    order_col = header_cols["Номер операции"]
     existing_codes = set(sheet.col_values(order_col)[1:])  # без шапки
     row_num = len(sheet.get_all_values()) + 1
 
