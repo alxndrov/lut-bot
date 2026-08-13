@@ -87,6 +87,10 @@ POLICY_REQUIRED: bool = bool(PRIVACY_POLICY_URL)
 GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "google-service-account.json")
 GOOGLE_SHEET_TAB: str = os.getenv("GOOGLE_SHEET_TAB", "Заказы")
+# Отдельный лист той же таблицы — финансовая книга по заказам (по строке на
+# заказ, с формулами комиссии/налога/к выплате). Лист создаётся сам при
+# первой записи, если его ещё нет.
+GOOGLE_SHEET_FINANCE_TAB: str = os.getenv("GOOGLE_SHEET_FINANCE_TAB", "Финансы")
 GSHEETS_ENABLED: bool = bool(GOOGLE_SHEET_ID)
 DAILY_REPORT_HOUR_MSK: int = int(os.getenv("DAILY_REPORT_HOUR_MSK", "9"))
 

@@ -129,11 +129,9 @@ def _apply_formatting(book, sheet):
     book.batch_update({"requests": requests})
 
 
-def sync_orders(orders: list[dict]) -> str:
-    """Перезаписывает лист заказами. Возвращает ссылку на таблицу.
-
-    Блокирующая функция (gspread синхронный) — вызывать через to_thread.
-    """
+def _open_book():
+    """Открывает таблицу сервисным аккаунтом. Блокирующая функция (gspread
+    синхронный) — вызывать через to_thread. Общая для всех выгрузок."""
     if not config.GOOGLE_SHEET_ID:
         raise SheetsError("не задан GOOGLE_SHEET_ID")
     if not config.GOOGLE_CREDENTIALS_FILE:
@@ -151,7 +149,7 @@ def sync_orders(orders: list[dict]) -> str:
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
         client = gspread.authorize(creds)
-        book = client.open_by_key(config.GOOGLE_SHEET_ID)
+        return client.open_by_key(config.GOOGLE_SHEET_ID)
     except FileNotFoundError:
         raise SheetsError(f"файл ключа не найден: {config.GOOGLE_CREDENTIALS_FILE}")
     except Exception as e:
@@ -162,6 +160,14 @@ def sync_orders(orders: list[dict]) -> str:
                 "сервисному аккаунту (почта из файла ключа)."
             )
         raise SheetsError(f"{name}: {e}")
+
+
+def sync_orders(orders: list[dict]) -> str:
+    """Перезаписывает лист заказами. Возвращает ссылку на таблицу.
+
+    Блокирующая функция (gspread синхронный) — вызывать через to_thread.
+    """
+    book = _open_book()
 
     try:
         title = config.GOOGLE_SHEET_TAB
@@ -220,3 +226,69 @@ async def _delayed_sync(delay: float):
         logger.error(f"gsheets: автовыгрузка не удалась — {e}")
     except Exception:
         logger.exception("gsheets: неожиданная ошибка автовыгрузки")
+
+
+# --- Финансовая книга: по строке на заказ, дописывается, не перезаписывается ---
+
+FINANCE_HEADERS = [
+    "Дата заказа", "Номер заказа", "Оплата", "Комиссия Prodamus",
+    "Налог", "Отложено на СДЭК", "К выплате",
+]
+
+
+def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_cost: float) -> None:
+    """Дописывает одну строку в финансовый лист (GOOGLE_SHEET_FINANCE_TAB) —
+    в отличие от sync_orders, ничего не перезаписывает: остальные строки
+    и вписанные туда формулы/пометки не трогаются.
+
+    Комиссия/Налог/К выплате — формулами, которые бот сам копирует в новую
+    строку (по тем же ставкам, что в остальных расчётах бота), чтобы не
+    зависеть от того, подхватит ли Google Sheets автозаполнение сам.
+
+    Блокирующая функция (gspread синхронный) — вызывать через to_thread.
+    """
+    book = _open_book()
+
+    try:
+        title = config.GOOGLE_SHEET_FINANCE_TAB
+        try:
+            sheet = book.worksheet(title)
+        except Exception:
+            sheet = book.add_worksheet(title=title, rows=200, cols=len(FINANCE_HEADERS))
+            sheet.update(values=[FINANCE_HEADERS], range_name="A1")
+            sheet.freeze(rows=1)
+
+        row = len(sheet.get_all_values()) + 1
+        fee_formula = f"=C{row}*{config.PRODAMUS_FEE_PERCENT:g}%"
+        npd_formula = f"=C{row}*{config.NPD_PERCENT:g}%"
+        payout_formula = f"=C{row}-D{row}-E{row}-F{row}"
+        sheet.append_row(
+            [date_msk, order_code, amount, fee_formula, npd_formula, delivery_cost, payout_formula],
+            value_input_option="USER_ENTERED",
+        )
+        logger.info(f"gsheets: записан заказ {order_code} в финансовый лист (строка {row})")
+    except Exception as e:
+        raise SheetsError(f"не удалось записать строку: {type(e).__name__}: {e}")
+
+
+def request_finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float):
+    """Просит дописать заказ в финансовый лист. Вызывать неблокирующе.
+
+    В отличие от request_sync — без задержки: одна строка добавляется
+    одним лёгким запросом, откладывать и схлопывать с другими нечего.
+    """
+    if not config.GSHEETS_ENABLED:
+        return
+    try:
+        asyncio.create_task(_finance_append(order_code, date_msk, amount, delivery_cost))
+    except RuntimeError:
+        logger.warning("gsheets: request_finance_append вне event loop, пропускаю")
+
+
+async def _finance_append(order_code: str, date_msk: str, amount: float, delivery_cost: float):
+    try:
+        await asyncio.to_thread(append_payment_row, order_code, date_msk, amount, delivery_cost)
+    except SheetsError as e:
+        logger.error(f"gsheets: запись в финансовый лист не удалась ({order_code}) — {e}")
+    except Exception:
+        logger.exception(f"gsheets: неожиданная ошибка записи в финансовый лист ({order_code})")
