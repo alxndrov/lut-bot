@@ -2347,11 +2347,16 @@ async def get_orders_for_finance_export() -> list[dict]:
     точный счёт СДЭК (delivery_cost): для них точной цифры нет, отдаём
     сырую сумму доставки отдельно, чтобы вызывающий код прогнал её через
     services.payout.delivery_out() — ту же оценочную формулу, что и везде
-    в боте для таких старых заказов."""
+    в боте для таких старых заказов.
+
+    order_code бывает пуст у заказов до появления сквозной нумерации —
+    для них берём prodamus_order_id (как и для цифровых покупок в
+    get_digital_purchases_for_finance_export), иначе заказ молча
+    выпадает из выгрузки."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT o.order_code, o.created_at,
+            """SELECT COALESCE(o.order_code, o.prodamus_order_id) AS order_code, o.created_at,
                       COALESCE(SUM(pu.amount), 0) AS amount,
                       COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost,
                       COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
@@ -2359,7 +2364,6 @@ async def get_orders_for_finance_export() -> list[dict]:
                           AS delivery_legacy
                FROM orders o
                LEFT JOIN purchases pu ON pu.telegram_payment_id = o.prodamus_order_id
-               WHERE o.order_code IS NOT NULL
                GROUP BY o.id
                ORDER BY o.created_at"""
         ) as cur:
