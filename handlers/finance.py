@@ -104,20 +104,52 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
     return "\n".join(lines)
 
 
-async def _debt_caveats(s: dict, dt_from: str, dt_to: str, now_utc: datetime,
-                        cdek_paid: dict, npd_paid: dict) -> str:
-    """Оговорки к цифрам «Взаиморасчёта»: часть «Принято» может быть ещё не
-    на счету (Prodamus не переводит деньги мгновенно), а часть начисленного
-    СДЭК/НПД — ещё не оплачена по факту. Не ошибка, а просто разное время."""
-    lines = []
+# Правило поддержки Prodamus (дословно): деньги переводятся на 2-й рабочий
+# день после поступления, кроме выходных/праздников — но чт/пт/сб все
+# уходят одним рейсом в ближайший понедельник, а вс — во вторник. Праздники
+# не учитываем (нет календаря под рукой) — тут возможна погрешность в
+# несколько дней в году, некритично для сверки с банком.
+_PRODAMUS_PAYOUT_DELAY_DAYS = {
+    0: 2,  # Понедельник → среда
+    1: 2,  # Вторник → четверг
+    2: 2,  # Среда → пятница
+    3: 4,  # Четверг → понедельник
+    4: 3,  # Пятница → понедельник
+    5: 2,  # Суббота → понедельник
+    6: 2,  # Воскресенье → вторник
+}
 
-    recent_from_dt = max(datetime.strptime(dt_from, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc),
-                         now_utc - timedelta(days=2))
-    recent = await db.get_period_revenue(recent_from_dt.strftime("%Y-%m-%d %H:%M:%S"), dt_to)
-    recent_gross = float(recent["physical"]) + float(recent["digital"]) + float(recent["delivery"])
-    if recent_gross:
-        lines.append(f"<i>⏳ ≈{recent_gross:,.2f} ₽ из «Принято» выше — заказы последних 2 суток, "
-                     f"Prodamus мог их ещё не перевести на счёт</i>")
+
+def _prodamus_arrived(created_at_utc: str, now_msk_date) -> bool:
+    """Дошли ли до счёта деньги за эту покупку — по правилу Prodamus выше.
+    created_at хранится в UTC, день недели считаем по МСК."""
+    try:
+        receipt_utc = datetime.strptime(created_at_utc[:19], "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return True  # не смогли разобрать дату — не пугаем зря
+    receipt_msk_date = (receipt_utc + timedelta(hours=3)).date()
+    delay = _PRODAMUS_PAYOUT_DELAY_DAYS[receipt_msk_date.weekday()]
+    return now_msk_date >= receipt_msk_date + timedelta(days=delay)
+
+
+async def _pending_gross(dt_from: str, dt_to: str, now_utc: datetime) -> float:
+    """Сколько из «Принято» ещё не перевёл на счёт Prodamus — точно, по их
+    правилу, а не «плюс-минус 2 суток»."""
+    purchases = await db.get_purchases_in_range(dt_from, dt_to)
+    now_msk_date = (now_utc + timedelta(hours=3)).date()
+    return sum(float(p["amount"]) for p in purchases
+              if not _prodamus_arrived(p["created_at"], now_msk_date))
+
+
+async def _debt_caveats(s: dict, pending_gross: float, cdek_paid: dict, npd_paid: dict) -> str:
+    """Оговорки к цифрам «Взаиморасчёта»: часть «Принято» ещё не на счету
+    (Prodamus переводит не мгновенно — 2-й рабочий день после оплаты), а
+    часть начисленного СДЭК/НПД — ещё не оплачена по факту. Не ошибка,
+    а просто разное время."""
+    lines = []
+    if pending_gross:
+        lines.append(f"<i>⏳ ≈{pending_gross:,.2f} ₽ из «Принято» выше ещё не на счету — "
+                     f"Prodamus переводит на 2-й рабочий день после оплаты</i>")
 
     not_paid_cdek = s["delivery_out"] - float(cdek_paid["total"])
     not_paid_npd = s["npd"] - float(npd_paid["total"])
@@ -131,33 +163,45 @@ async def _debt_caveats(s: dict, dt_from: str, dt_to: str, now_utc: datetime,
 
 
 async def _debt_block(s: dict | None, last_settlement: dict | None,
-                      dt_from: str, dt_to: str, now_utc: datetime) -> tuple[str, dict, dict]:
+                      dt_from: str, dt_to: str, now_utc: datetime) -> tuple[str, dict, dict, float]:
     """«Взаиморасчёт» + оговорки к его цифрам одним текстом. Заодно
-    отдаёт cdek_paid/npd_paid, чтобы «Касса» не считала их повторно."""
+    отдаёт cdek_paid/npd_paid/pending_gross, чтобы «Касса» не считала их
+    повторно."""
     text = _fmt_debt_screen(s, last_settlement)
     cdek_paid = npd_paid = {"total": 0, "count": 0}
+    pending_gross = 0.0
     if s and s["count"] > 0:
         cdek_paid = await db.get_cdek_payments_summary(dt_from, dt_to)
         npd_paid = await db.get_npd_payments_summary(dt_from, dt_to)
-        caveats = await _debt_caveats(s, dt_from, dt_to, now_utc, cdek_paid, npd_paid)
+        pending_gross = await _pending_gross(dt_from, dt_to, now_utc)
+        caveats = await _debt_caveats(s, pending_gross, cdek_paid, npd_paid)
         if caveats:
             text += "\n" + caveats
-    return text, cdek_paid, npd_paid
+    return text, cdek_paid, npd_paid, pending_gross
 
 
-async def _cash_block_text(s: dict, dt_from: str, dt_to: str,
-                           cdek_paid: dict, npd_paid: dict) -> str:
+async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
+                           npd_paid: dict, pending_gross: float) -> str:
     """«Взаиморасчёт» выше — начисление: сколько ДОЛЖНО уйти на налог, СДЭК
-    и доли партнёров. Здесь — сколько реально ушло (по вашим отметкам) и
-    сколько поэтому реально должно быть на счету прямо сейчас."""
+    и доли партнёров. Здесь — сколько реально ушло (по вашим отметкам),
+    сколько Prodamus реально перевёл (см. pending_gross) и сколько поэтому
+    реально должно быть на счету прямо сейчас."""
     payouts = await db.get_payouts_summary(dt_from, dt_to)
+    # Комиссия с ещё не переведённой части — плоская оценка по общей ставке
+    # периода, точнее взять неоткуда (Prodamus не отдаёт комиссию по заказу)
+    pending_net = pending_gross * (1 - s["fee_pct"] / 100)
 
     cash = (s["gross"] - s["fee"] - s["expenses"]
-            - float(cdek_paid["total"]) - float(npd_paid["total"]) - payouts["total"])
+            - float(cdek_paid["total"]) - float(npd_paid["total"]) - payouts["total"]
+            - pending_net)
 
     lines = [
         "💰 <b>Касса</b> — реальные деньги на счету, не доля прибыли выше",
         "─" * 30,
+    ]
+    if pending_net:
+        lines.append(f"Ещё не перевёл Prodamus: −{pending_net:,.2f} ₽")
+    lines += [
         f"Оплачено СДЭК по факту: −{float(cdek_paid['total']):,.2f} ₽"
         + (f" ({int(cdek_paid['count'])} плат.)" if cdek_paid["count"] else ""),
         f"Оплачено НПД по факту: −{float(npd_paid['total']):,.2f} ₽"
@@ -238,12 +282,13 @@ async def _debt_and_cash_text() -> tuple[str, bool]:
     взаиморасчёт (главный экран «Финансы» и подменю «🤝 Взаиморасчёт»),
     чтобы не приходилось скакать между экранами за половиной цифр."""
     s, last_settlement, dt_from, dt_to, now_utc = await _settle_split()
-    debt_text, cdek_paid, npd_paid = await _debt_block(s, last_settlement, dt_from, dt_to, now_utc)
+    debt_text, cdek_paid, npd_paid, pending_gross = await _debt_block(
+        s, last_settlement, dt_from, dt_to, now_utc)
     has_debt = bool(s and s["count"] > 0)
 
     parts = [debt_text]
     if has_debt:
-        parts.append(await _cash_block_text(s, dt_from, dt_to, cdek_paid, npd_paid))
+        parts.append(await _cash_block_text(s, dt_from, dt_to, cdek_paid, npd_paid, pending_gross))
 
     return "\n\n".join(parts), has_debt
 
