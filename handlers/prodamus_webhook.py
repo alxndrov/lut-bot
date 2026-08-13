@@ -248,8 +248,14 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         # Комиссия/Налог/К выплате там — формулами, дописываются вместе со
         # строкой (см. services/gsheets.py)
         from services.gsheets import request_finance_append
+        from services.payout import delivery_out
         order_date_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
-        request_finance_append(order_code, order_date_msk, amount, delivery_cost_val)
+        # Точного счёта СДЭК может не быть (интеграция выключена, адрес
+        # собран свободным текстом) — тогда оцениваем как и везде в боте
+        sheet_delivery_cost = delivery_out(
+            delivery_cost_val, delivery_amt if delivery_cost_val == 0 else 0,
+            config.PRODAMUS_FEE_PERCENT)
+        request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost)
 
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
         # Печатающих может быть несколько: заказ покажется каждому из них.

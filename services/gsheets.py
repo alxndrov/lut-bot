@@ -236,6 +236,13 @@ FINANCE_HEADERS = [
 ]
 
 
+def _pct_formula(cell: str, pct: float) -> str:
+    """'C6', 3.8 -> '=C6*3,8%'. Запятая, не точка: таблица на русской
+    локали, с точкой дробный множитель в формуле не распознаётся числом
+    (Google Sheets тогда либо ругается, либо тихо считает неверно)."""
+    return f"={cell}*{pct:g}%".replace(".", ",")
+
+
 def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_cost: float) -> None:
     """Дописывает одну строку в финансовый лист (GOOGLE_SHEET_FINANCE_TAB) —
     в отличие от sync_orders, ничего не перезаписывает: остальные строки
@@ -259,8 +266,8 @@ def append_payment_row(order_code: str, date_msk: str, amount: float, delivery_c
             sheet.freeze(rows=1)
 
         row = len(sheet.get_all_values()) + 1
-        fee_formula = f"=C{row}*{config.PRODAMUS_FEE_PERCENT:g}%"
-        npd_formula = f"=C{row}*{config.NPD_PERCENT:g}%"
+        fee_formula = _pct_formula(f"C{row}", config.PRODAMUS_FEE_PERCENT)
+        npd_formula = _pct_formula(f"C{row}", config.NPD_PERCENT)
         payout_formula = f"=C{row}-D{row}-E{row}-F{row}"
         sheet.append_row(
             [date_msk, order_code, amount, fee_formula, npd_formula, delivery_cost, payout_formula],
@@ -319,6 +326,8 @@ def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
     existing_codes = set(sheet.col_values(2)[1:])  # без шапки
     row_num = len(sheet.get_all_values()) + 1
 
+    from services.payout import delivery_out
+
     new_values = []
     skipped = 0
     for r in rows:
@@ -326,12 +335,17 @@ def backfill_finance_rows(rows: list[dict]) -> tuple[int, int]:
         if not code or code in existing_codes:
             skipped += 1
             continue
-        fee_formula = f"=C{row_num}*{config.PRODAMUS_FEE_PERCENT:g}%"
-        npd_formula = f"=C{row_num}*{config.NPD_PERCENT:g}%"
+        fee_formula = _pct_formula(f"C{row_num}", config.PRODAMUS_FEE_PERCENT)
+        npd_formula = _pct_formula(f"C{row_num}", config.NPD_PERCENT)
         payout_formula = f"=C{row_num}-D{row_num}-E{row_num}-F{row_num}"
+        # Заказы до появления точного счёта СДЭК в purchases.delivery_cost —
+        # оцениваем той же формулой, что и «Взаиморасчёт»/«Касса»
+        # (delivery_legacy > 0 только когда delivery_cost так и не сохранился)
+        delivery_cost = delivery_out(float(r["delivery_cost"]), float(r["delivery_legacy"]),
+                                     config.PRODAMUS_FEE_PERCENT)
         new_values.append([
             _msk(r["created_at"]), code, float(r["amount"]),
-            fee_formula, npd_formula, float(r["delivery_cost"]), payout_formula,
+            fee_formula, npd_formula, delivery_cost, payout_formula,
         ])
         row_num += 1
 
