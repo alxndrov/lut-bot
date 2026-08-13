@@ -16,7 +16,7 @@ from aiogram.types import (
 
 import config
 import database as db
-from services.gsheets import request_sync
+from services.gsheets import request_sync, request_finance_printer_update
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -758,6 +758,13 @@ async def cb_order_printed(callback: CallbackQuery):
     if not waiting:
         await db.set_order_printed(order["id"], uid, name)
         note = "Отмечено: распечатано целиком 🖨" if marked else "Уже отмечено 🖨"
+        # В финансовый лист «Печатал» проставляем только теперь — при
+        # оплате исполнитель ещё не известен, а заказ до печати мог и
+        # передаться другому админу, поэтому берём фактических печатавших
+        # (order_prints), а не того, за кем заказ числится
+        if order.get("order_code"):
+            printers = ", ".join(sorted({p["user_name"] for p in prints if p["user_name"]}))
+            request_finance_printer_update(order["order_code"], printers)
     elif total > 1:
         note = (f"Отмечено: {_pos_list(sorted(targets))} 🖨 Осталось: {_pos_list(waiting)}"
                 if marked else "Эта позиция уже отмечена 🖨")
