@@ -493,6 +493,9 @@ async def cb_pending_paylink(callback: CallbackQuery, bot: Bot):
     Нужна, когда у клиента ссылка не открылась (например, Prodamus сменил
     платформу) — прежнюю пересоздать нельзя, а заново проходить опрос
     клиента заставлять не хочется: сумма и состав заказа уже посчитаны.
+
+    Клиенту сама не уходит: ссылка отдаётся админу, он решает, писать ли
+    и что написать. Отправить одной кнопкой можно тут же.
     """
     if not await admin_only(callback):
         return
@@ -520,7 +523,45 @@ async def cb_pending_paylink(callback: CallbackQuery, bot: Bot):
         notification_url=config.PRODAMUS_WEBHOOK_URL_PHYSICAL,
     )
 
-    sent = False
+    await callback.message.answer(
+        f"🔗 <b>Новая ссылка на оплату</b> — <b>{amount} ₽</b>\n"
+        f"{url}\n\n"
+        f"Клиенту пока не отправлена — скопируйте её или отправьте кнопкой ниже.",
+        parse_mode="HTML", disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📨 Отправить клиенту",
+                                 callback_data=f"admin:paysend:{uid}:{pid}:{amount}")
+        ]]),
+    )
+
+
+@router.callback_query(F.data.startswith("admin:paysend:"))
+async def cb_pending_paysend(callback: CallbackQuery, bot: Bot):
+    """Отправляет клиенту ссылку, созданную кнопкой выше — уже по решению админа.
+
+    Ссылку не пересобираем из callback_data (она длинная и там не помещается),
+    а создаём заново: у Prodamus каждая ссылка одноразово-независима, лишняя
+    несозданная оплата ничему не мешает.
+    """
+    if not await admin_only(callback):
+        return
+    parts = callback.data.split(":")
+    uid, pid, amount = int(parts[2]), int(parts[3]), int(parts[4])
+
+    order = await db.get_pending_order(uid, pid)
+    if not order:
+        await callback.answer("Заказ уже не в списке.", show_alert=True)
+        return
+
+    await callback.answer("Отправляю…")
+    from services.prodamus import create_payment_url
+    url = await create_payment_url(
+        shop_url=config.PRODAMUS_SHOP_URL_PHYSICAL,
+        product_name=await _pending_payment_name(order, await db.get_product(pid)),
+        price=amount, user_id=uid, product_id=pid, order_type="p",
+        secret=config.PRODAMUS_SECRET_PHYSICAL,
+        notification_url=config.PRODAMUS_WEBHOOK_URL_PHYSICAL,
+    )
     try:
         await bot.send_message(uid, (
             "🔗 Вот новая ссылка на оплату вашего заказа — прежняя могла не открыться.\n"
@@ -528,16 +569,13 @@ async def cb_pending_paylink(callback: CallbackQuery, bot: Bot):
         ), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f"💳 Оплатить {amount} ₽", url=url)
         ]]))
-        sent = True
     except Exception as e:
         logger.warning(f"paylink: не отправил клиенту {uid}: {e}")
-
-    note = ("✅ Отправил клиенту новую ссылку."
-            if sent else "⚠️ Клиенту отправить не удалось (заблокировал бота?).")
-    await callback.message.answer(
-        f"{note}\n\n<b>{amount} ₽</b>\n{url}", parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
+        await callback.message.answer(
+            "⚠️ Клиенту отправить не удалось — возможно, он заблокировал бота.")
+        return
+    await callback.message.edit_reply_markup(reply_markup=None)
+    await callback.message.answer("✅ Отправил клиенту новую ссылку на оплату.")
 
 
 async def _pending_payment_name(order: dict, product: dict | None) -> str:
