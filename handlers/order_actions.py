@@ -297,6 +297,32 @@ def _pos_list(positions: list) -> str:
     return ", ".join(f"поз.{p}" for p in positions)
 
 
+_PRODUCT_WORDS = {config.MIC_PRODUCT_ID: "микрофон", config.CASE_PRODUCT_ID: "кейс"}
+
+
+def _round_products(order: dict, total: int) -> list[int]:
+    """Товар каждой позиции заказа — как считает сам бот (см. unpack_round_products)."""
+    try:
+        rounds = json.loads(order.get("rounds_json") or "[]")
+    except Exception:
+        rounds = []
+    rp = db.unpack_round_products(order.get("round_products_json"), rounds, order["product_id"])
+    if not rp:
+        rp = [order["product_id"]] * total
+    return rp
+
+
+def _products_label(order: dict, positions: list, total: int) -> str:
+    """' (кейс)' / ' (кейс, микрофон)' — какой товар в этих позициях. Два физтовара
+    в очереди легко перепутать по одному только "Напечатать"/"Отправить" в списке."""
+    rp = _round_products(order, total)
+    words = dict.fromkeys(
+        _PRODUCT_WORDS[rp[p - 1]] for p in positions
+        if p - 1 < len(rp) and rp[p - 1] in _PRODUCT_WORDS
+    )
+    return f" ({', '.join(words)})" if words else ""
+
+
 def _list_item_text(order: dict, index: int, has_card: bool,
                     viewer_id: int | None = None, prints: list | None = None,
                     mode: str = "my") -> str:
@@ -313,20 +339,21 @@ def _list_item_text(order: dict, index: int, has_card: bool,
 
     if mode == "sent":
         when = _msk(order.get("shipped_at"))
-        action = "✅ Отправлено" + (f" · {when}" if when else "")
+        action = "✅ Отправлено" + _products_label(order, list(range(1, total + 1)), total)
+        action += f" · {when}" if when else ""
         if order.get("shipped_by_name"):
             action += f" · {order['shipped_by_name']}"
         if has_card and order.get("cdek_number"):
             action += f"\n📦 СДЭК {order['cdek_number']}"   # без карточки трек и так ниже
     elif order.get("shipped_at"):
-        action = "✅ <s>Отправлено</s>"
+        action = "✅ <s>Отправлено</s>" + _products_label(order, list(range(1, total + 1)), total)
     elif not waiting:
-        action = "📦 Отправить"
+        action = "📦 Отправить" + _products_label(order, list(range(1, total + 1)), total)
     elif total == 1:
-        action = "🖨 Напечатать"
+        action = "🖨 Напечатать" + _products_label(order, [1], total)
     elif mode == "my":
         mine = [p for p in _my_positions(order, viewer_id) if p in waiting]
-        action = (f"🖨 Напечатать {_pos_list(mine)}" if mine
+        action = (f"🖨 Напечатать {_pos_list(mine)}" + _products_label(order, mine, total) if mine
                   else "⏳ Ждём вторую часть")
     else:
         whos = db.order_routing(order)
@@ -334,8 +361,9 @@ def _list_item_text(order: dict, index: int, has_card: bool,
         for p in waiting:
             who = (whos[p - 1] if p <= len(whos) else None) or "не определён"
             by_who.setdefault(who, []).append(p)
-        action = "🖨 " + " · ".join(f"Напечатать {_pos_list(ps)} — {who}"
-                                   for who, ps in by_who.items())
+        action = "🖨 " + " · ".join(
+            f"Напечатать {_pos_list(ps)}{_products_label(order, ps, total)} — {who}"
+            for who, ps in by_who.items())
 
     text = f"<b>{index}.</b> {action}"
     if not has_card:
