@@ -514,8 +514,8 @@ async def cb_pending_paylink(callback: CallbackQuery, bot: Bot):
         return
 
     await callback.answer("Создаю ссылку…")
-    from services.prodamus import create_payment_url
-    url = await create_payment_url(
+    from services.prodamus import build_payment_url
+    url = build_payment_url(
         shop_url=config.PRODAMUS_SHOP_URL_PHYSICAL,
         product_name=await _pending_payment_name(order, product),
         price=amount, user_id=uid, product_id=pid, order_type="p",
@@ -554,8 +554,8 @@ async def cb_pending_paysend(callback: CallbackQuery, bot: Bot):
         return
 
     await callback.answer("Отправляю…")
-    from services.prodamus import create_payment_url
-    url = await create_payment_url(
+    from services.prodamus import build_payment_url
+    url = build_payment_url(
         shop_url=config.PRODAMUS_SHOP_URL_PHYSICAL,
         product_name=await _pending_payment_name(order, await db.get_product(pid)),
         price=amount, user_id=uid, product_id=pid, order_type="p",

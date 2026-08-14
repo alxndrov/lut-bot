@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import config
 import database as db
-from services.prodamus import create_payment_url
+from services.prodamus import build_payment_url
 from services.geocode import geocode
 from keyboards.user import back_to_catalog_keyboard
 
@@ -646,7 +646,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
     # order_id в ссылке кодирует один product_id — берём анкорный (первый
     # выбранный) товар, остальные товары заказа лежат в round_products_json.
     product_name = _goods_payment_name(goods_items)
-    url = await create_payment_url(
+    url = build_payment_url(
         shop_url=config.PRODAMUS_SHOP_URL_PHYSICAL,
         product_name=product_name,
         price=total,

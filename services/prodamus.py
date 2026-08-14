@@ -104,6 +104,10 @@ def build_payment_url(
     - notification_url → параметр urlNotification: адрес, куда Prodamus пришлёт webhook.
       Задаётся в самой ссылке (участвует в подписи), поэтому не зависит от настроек
       кабинета Prodamus и переживает переезд на другой сервер.
+
+    Работает и на новой платформе (Prodamus.Pay): магазин сам отвечает 302
+    на link.payform.ru/?orderId=<uuid>, создав заказ. Ломает её только
+    эмодзи в названии товара — их снимает clean_product_name.
     """
     params = _payment_params(product_name, price, user_id, product_id,
                              order_type, secret, notification_url, do="pay")
@@ -138,51 +142,3 @@ def _payment_params(product_name: str, price: int, user_id: int, product_id: int
     if secret:
         params["signature"] = make_signature(params, secret)
     return params
-
-
-async def create_payment_url(
-    shop_url: str,
-    product_name: str,
-    price: int,
-    user_id: int,
-    product_id: int,
-    order_type: str = "p",
-    secret: str = "",
-    notification_url: str = "",
-    timeout: int = 20,
-) -> str:
-    """Просит Prodamus СОЗДАТЬ ссылку (do=link) и возвращает её.
-
-    Магазины на новой платформе (Prodamus.Pay, форма живёт на link.payform.ru)
-    открывают только заранее созданную ссылку вида ?orderId=<uuid>; прямая
-    подписанная ссылка do=pay там отдаёт клиенту 400 Bad Request. Режим
-    do=link создаёт заказ на стороне Prodamus и отдаёт короткий URL, при
-    этом наш order_num сохраняется как merchantOrderNumber — привязка
-    платежа к клиенту и товару не теряется.
-
-    Ссылку отдаём ровно такой, какой её вернул Prodamus (короткая
-    tiny.payform.ru/xxxxxx с редиректом на link.payform.ru). Тот же
-    orderId на домене магазина НЕ работает: страница открывается, но
-    заказ не подтягивает — показывает пустую форму «Сумма платежа» и
-    «Нет способов для оплаты» (проверено 14.08.2026). API заказа там
-    отвечает, поэтому проверять надо именно отрисовку страницы.
-
-    Если Prodamus недоступен или ответил не ссылкой, откатываемся на
-    обычную do=pay-ссылку: на старой платформе она рабочая, и клиент в
-    любом случае получает кнопку оплаты, а не ошибку.
-    """
-    params = _payment_params(product_name, price, user_id, product_id,
-                             order_type, secret, notification_url, do="link")
-    url = shop_url.rstrip("/") + "/?" + _urlencode(params)
-    try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            resp = await session.get(url, timeout=aiohttp.ClientTimeout(total=timeout))
-            text = (await resp.text()).strip()
-            if text.startswith("http://") or text.startswith("https://"):
-                return text
-        logger.error(f"prodamus do=link: ответ не ссылка ({resp.status}): {text[:200]!r}")
-    except Exception as e:
-        logger.error(f"prodamus do=link: {type(e).__name__}: {e}")
-    return build_payment_url(shop_url, product_name, price, user_id, product_id,
-                             order_type, secret, notification_url)
