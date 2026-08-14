@@ -49,7 +49,8 @@ async def _routing_diagnosis(pid: int, product: dict | None, answers: list) -> l
         return lines
     lines.append(f"  вопрос-распределитель: «{router_q['text']}»")
 
-    answer = next((a.get("text") for a in answers if a.get("q") == router_q["text"]), None)
+    from handlers.prodamus_webhook import find_answer
+    answer = find_answer(answers, router_q["text"])
     if answer is None:
         lines.append("  ⚠️ в ответах клиента нет ответа на этот вопрос "
                      "(текст вопроса изменился после заказа?)")

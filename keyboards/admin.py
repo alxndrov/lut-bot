@@ -59,6 +59,8 @@ def missed_orders_keyboard(orders: list[dict]) -> InlineKeyboardMarkup:
 
 def pending_order_keyboard(user_id: int, product_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔗 Сгенерировать новую ссылку для оплаты",
+                              callback_data=f"admin:paylink:{user_id}:{product_id}")],
         [InlineKeyboardButton(text="✅ Оплата пришла — провести заказ",
                               callback_data=f"admin:force_paid:{user_id}:{product_id}")],
         [InlineKeyboardButton(text="🗑 Убрать из списка",

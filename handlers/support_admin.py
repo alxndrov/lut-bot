@@ -4,14 +4,35 @@
 """
 import logging
 
-from aiogram import Router, Bot
-from aiogram.types import Message
+from aiogram import Router, Bot, F
+from aiogram.types import CallbackQuery, ForceReply, Message
 
 import config
 import database as db
 
 router = Router()
 logger = logging.getLogger(__name__)
+
+
+@router.callback_query(F.data.startswith("sup_reply:"))
+async def cb_support_reply(callback: CallbackQuery):
+    """Кнопка «Ответить»: подсовываем поле ответа, дальше — обычный Reply.
+
+    Отдельным сообщением с ForceReply, а не ответом на саму карточку
+    вопроса: так поле ввода открывается сразу и только у нажавшего.
+    """
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer("Только для администраторов.", show_alert=True)
+        return
+    user_id = int(callback.data.split(":", 1)[1])
+    await callback.answer()
+    prompt = await callback.message.answer(
+        "✍️ Напишите ответ клиенту — он придёт ему в основной бот.",
+        reply_markup=ForceReply(selective=True),
+    )
+    # Тот же механизм, что и у обычного Reply: ответ на это сообщение
+    # находит клиента через support_messages
+    await db.add_support_message(prompt.chat.id, prompt.message_id, user_id)
 
 
 async def _support_reply_filter(message: Message):
