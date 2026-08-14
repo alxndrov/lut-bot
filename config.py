@@ -68,6 +68,11 @@ PRODAMUS_WEBHOOK_URL: str = os.getenv("PRODAMUS_WEBHOOK_URL", "")
 PRODAMUS_SHOP_URL_PHYSICAL: str = os.getenv("PRODAMUS_SHOP_URL_PHYSICAL", "") or PRODAMUS_SHOP_URL
 PRODAMUS_SECRET_PHYSICAL: str = os.getenv("PRODAMUS_SECRET_PHYSICAL", "") or PRODAMUS_SECRET
 PRODAMUS_WEBHOOK_URL_PHYSICAL: str = os.getenv("PRODAMUS_WEBHOOK_URL_PHYSICAL", "") or PRODAMUS_WEBHOOK_URL
+# Секрет ПРЕДЫДУЩЕЙ платёжной страницы физтоваров. Пока она не отключена в
+# Prodamus, оплата по оставшейся у клиента старой ссылке приходит с подписью
+# на старом секрете — принимаем и её, иначе заказ потеряется. Убрать, когда
+# старая страница будет окончательно выключена.
+PRODAMUS_SECRET_PHYSICAL_OLD: str = os.getenv("PRODAMUS_SECRET_PHYSICAL_OLD", "")
 
 PRODAMUS_FEE_PERCENT: float = float(os.getenv("PRODAMUS_FEE_PERCENT", "3.5"))
 

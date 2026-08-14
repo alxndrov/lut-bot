@@ -29,7 +29,7 @@ DEFAULT_POST_PAYMENT = (
 )
 
 
-async def handle_webhook(request: web.Request, secret: str = "") -> web.Response:
+async def handle_webhook(request: web.Request, secret: str | list = "") -> web.Response:
     bot: Bot = request.app["bot"]
 
     try:
@@ -40,11 +40,18 @@ async def handle_webhook(request: web.Request, secret: str = "") -> web.Response
 
     logger.info(f"prodamus webhook [{request.path}]: headers.Sign={request.headers.get('Sign')!r}, body={raw}")
 
-    # Проверяем подпись из заголовка Sign (секрет — своего магазина)
-    if secret:
+    # Проверяем подпись из заголовка Sign. Секретов может быть несколько:
+    # при переезде на новую платёжную страницу старая ещё какое-то время
+    # шлёт уведомления (у клиента могла остаться открытой ссылка на неё),
+    # и её подпись считается СТАРЫМ секретом. Принимаем оба, иначе такая
+    # оплата отвалится по «неверная подпись» и заказ потеряется.
+    secrets = [s for s in (secret if isinstance(secret, list) else [secret]) if s]
+    if secrets:
         sign_header = request.headers.get("Sign", "")
-        if not verify_webhook(dict(raw), sign_header, secret):
-            logger.warning(f"prodamus webhook [{request.path}]: неверная подпись")
+        if not any(verify_webhook(dict(raw), sign_header, s) for s in secrets):
+            logger.warning(f"prodamus webhook [{request.path}]: неверная подпись "
+                          f"(проверено секретов: {len(secrets)}, "
+                          f"domain={raw.get('domain')!r})")
             return web.Response(text="invalid sign", status=403)
 
     # Неуспешный платёж — уведомляем покупателя если знаем его user_id
@@ -780,9 +787,12 @@ def create_app(bot: Bot) -> web.Application:
     app["bot"] = bot
     # Основной (цифровой) магазин
     app.router.add_post("/prodamus/webhook", partial(handle_webhook, secret=config.PRODAMUS_SECRET))
-    # Отдельный магазин для физических товаров (свой секрет; при откате — тот же секрет)
+    # Отдельный магазин для физических товаров (свой секрет; при откате — тот же
+    # секрет). Вторым идёт секрет прошлой платёжной страницы: пока она не
+    # отключена, оплата по оставшейся у клиента старой ссылке тоже должна пройти
     app.router.add_post(
         "/prodamus/webhook/physical",
-        partial(handle_webhook, secret=config.PRODAMUS_SECRET_PHYSICAL),
+        partial(handle_webhook, secret=[config.PRODAMUS_SECRET_PHYSICAL,
+                                        config.PRODAMUS_SECRET_PHYSICAL_OLD]),
     )
     return app
