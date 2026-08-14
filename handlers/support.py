@@ -8,7 +8,7 @@ from aiogram import Router, Bot
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
 import config
 import database as db
@@ -48,6 +48,11 @@ async def on_support_message(message: Message, state: FSMContext):
     header = (f"🆘 <b>Вопрос в поддержку</b>\n"
              f"👤 {user.first_name or '—'} {username} (id:{user.id})")
 
+    # Кнопка «Ответить» — иначе единственный способ ответить это Reply
+    # вручную, и его легко не заметить
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✍️ Ответить", callback_data=f"sup_reply:{user.id}")
+    ]])
     try:
         support_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
         try:
@@ -55,12 +60,13 @@ async def on_support_message(message: Message, state: FSMContext):
                 try:
                     if message.text:
                         sent = await support_bot.send_message(
-                            admin_id, f"{header}\n\n{message.text}", parse_mode="HTML")
+                            admin_id, f"{header}\n\n{message.text}",
+                            parse_mode="HTML", reply_markup=kb)
                         await db.add_support_message(admin_id, sent.message_id, user.id)
                     else:
                         # Фото/голос/документ и т.п. — шапка отдельно, дальше копия как есть
                         sent_header = await support_bot.send_message(
-                            admin_id, header, parse_mode="HTML")
+                            admin_id, header, parse_mode="HTML", reply_markup=kb)
                         await db.add_support_message(admin_id, sent_header.message_id, user.id)
                         sent_copy = await support_bot.copy_message(
                             admin_id, message.chat.id, message.message_id)

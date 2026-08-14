@@ -327,6 +327,30 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
     return True
 
 
+def norm_question(text: str) -> str:
+    """Текст вопроса для сравнения: без разницы в пробелах и пустых строках.
+
+    Ответы клиента хранятся вместе с текстом вопроса на момент заказа, а в
+    настройках товара текст живёт отдельно. Стоит поправить в вопросе
+    лишнюю пустую строку — и точное сравнение перестаёт находить ответ:
+    распределение молча выдаёт «печатающий не определён» (так вышло с
+    вопросом-распределителем кейса).
+    """
+    return " ".join((text or "").split()).casefold()
+
+
+def find_answer(answers: list, question_text: str) -> str | None:
+    """Ответ клиента на этот вопрос: сначала точно, затем без учёта пробелов."""
+    for a in answers:
+        if a.get("q") == question_text:
+            return a.get("text")
+    target = norm_question(question_text)
+    for a in answers:
+        if norm_question(a.get("q")) == target:
+            return a.get("text")
+    return None
+
+
 def _parse_routing(text: str) -> dict:
     """'Даня: 1,2,3\\nПартнёр: 4,5' -> {'1':'Даня','2':'Даня',...,'4':'Партнёр',...}"""
     import re
@@ -498,7 +522,7 @@ async def _routing_whos(round_products: list[int], products_by_id: dict, rounds:
             return None
         if pid not in rmap_cache:
             rmap_cache[pid] = _parse_routing(routing)
-        val = next((a.get("text") for a in answers if a.get("q") == router_q["text"]), "") or ""
+        val = find_answer(answers, router_q["text"]) or ""
         nums = re.findall(r"\d+", val)
         return rmap_cache[pid].get(nums[0]) if nums else None
 

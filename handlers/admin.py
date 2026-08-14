@@ -5,7 +5,8 @@ from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram import Bot
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup,
+                           InlineKeyboardButton)
 from datetime import datetime, timedelta, timezone
 
 import config
@@ -483,6 +484,80 @@ def _pending_amount(order: dict, product: dict | None) -> int:
         except Exception:
             pass
     return (product or {}).get("price", 0) * max(1, len(rounds))
+
+
+@router.callback_query(F.data.startswith("admin:paylink:"))
+async def cb_pending_paylink(callback: CallbackQuery, bot: Bot):
+    """Новая ссылка на оплату для незавершённого заказа.
+
+    Нужна, когда у клиента ссылка не открылась (например, Prodamus сменил
+    платформу) — прежнюю пересоздать нельзя, а заново проходить опрос
+    клиента заставлять не хочется: сумма и состав заказа уже посчитаны.
+    """
+    if not await admin_only(callback):
+        return
+    parts = callback.data.split(":")
+    uid, pid = int(parts[2]), int(parts[3])
+
+    order = await db.get_pending_order(uid, pid)
+    if not order:
+        await callback.answer("Заказ уже не в списке.", show_alert=True)
+        return
+    product = await db.get_product(pid)
+    amount = _pending_amount(order, product)
+    if not amount:
+        await callback.answer("У заказа не посчитана сумма — ссылку не собрать.",
+                              show_alert=True)
+        return
+
+    await callback.answer("Создаю ссылку…")
+    from services.prodamus import create_payment_url
+    url = await create_payment_url(
+        shop_url=config.PRODAMUS_SHOP_URL_PHYSICAL,
+        product_name=await _pending_payment_name(order, product),
+        price=amount, user_id=uid, product_id=pid, order_type="p",
+        secret=config.PRODAMUS_SECRET_PHYSICAL,
+        notification_url=config.PRODAMUS_WEBHOOK_URL_PHYSICAL,
+    )
+
+    sent = False
+    try:
+        await bot.send_message(uid, (
+            "🔗 Вот новая ссылка на оплату вашего заказа — прежняя могла не открыться.\n"
+            "Состав заказа и сумма прежние, заново ничего заполнять не нужно."
+        ), reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"💳 Оплатить {amount} ₽", url=url)
+        ]]))
+        sent = True
+    except Exception as e:
+        logger.warning(f"paylink: не отправил клиенту {uid}: {e}")
+
+    note = ("✅ Отправил клиенту новую ссылку."
+            if sent else "⚠️ Клиенту отправить не удалось (заблокировал бота?).")
+    await callback.message.answer(
+        f"{note}\n\n<b>{amount} ₽</b>\n{url}", parse_mode="HTML",
+        disable_web_page_preview=True,
+    )
+
+
+async def _pending_payment_name(order: dict, product: dict | None) -> str:
+    """Название позиции для ссылки — как при оформлении (см. delivery.py)."""
+    from handlers.delivery import _goods_payment_name
+    try:
+        rounds = json.loads(order.get("survey_json") or "[]")
+    except Exception:
+        rounds = []
+    round_products = db.unpack_round_products(
+        order.get("round_products_json"), rounds, order["product_id"])
+    counts: dict[int, int] = {}
+    for rp in round_products or [order["product_id"]]:
+        counts[rp] = counts.get(rp, 0) + 1
+    items = []
+    for rp, qty in counts.items():
+        p = await db.get_product(rp) or product
+        if p:
+            items.append((p, qty))
+    return _goods_payment_name(items) if items else (product or {}).get("name", "Заказ")
 
 
 @router.callback_query(F.data == "admin:missed")
