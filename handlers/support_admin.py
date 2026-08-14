@@ -30,9 +30,7 @@ async def _support_reply_filter(message: Message):
 
 @router.message(_support_reply_filter)
 async def on_support_reply(message: Message, support_user_id: int):
-    admin = message.from_user
-    who = f"@{admin.username}" if admin.username else (admin.first_name or "поддержка")
-    header = f"💬 <b>Ответ поддержки</b> ({who}):"
+    header = "💬 <b>Ответ поддержки</b>:"
 
     main_bot = Bot(token=config.BOT_TOKEN)
     try:
