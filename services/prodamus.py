@@ -160,10 +160,12 @@ async def create_payment_url(
     этом наш order_num сохраняется как merchantOrderNumber — привязка
     платежа к клиенту и товару не теряется.
 
-    Prodamus отдаёт короткую ссылку-редирект (tiny.payform.ru/xxxxxx) на
-    служебный домен link.payform.ru. Клиенту приятнее видеть свой магазин,
-    поэтому разворачиваем её в {shop_url}/?orderId=<uuid> — та же форма
-    оплаты, но на своём домене (см. _brand_link).
+    Ссылку отдаём ровно такой, какой её вернул Prodamus (короткая
+    tiny.payform.ru/xxxxxx с редиректом на link.payform.ru). Тот же
+    orderId на домене магазина НЕ работает: страница открывается, но
+    заказ не подтягивает — показывает пустую форму «Сумма платежа» и
+    «Нет способов для оплаты» (проверено 14.08.2026). API заказа там
+    отвечает, поэтому проверять надо именно отрисовку страницы.
 
     Если Prodamus недоступен или ответил не ссылкой, откатываемся на
     обычную do=pay-ссылку: на старой платформе она рабочая, и клиент в
@@ -178,29 +180,9 @@ async def create_payment_url(
             resp = await session.get(url, timeout=aiohttp.ClientTimeout(total=timeout))
             text = (await resp.text()).strip()
             if text.startswith("http://") or text.startswith("https://"):
-                return await _brand_link(session, text, shop_url, timeout)
+                return text
         logger.error(f"prodamus do=link: ответ не ссылка ({resp.status}): {text[:200]!r}")
     except Exception as e:
         logger.error(f"prodamus do=link: {type(e).__name__}: {e}")
     return build_payment_url(shop_url, product_name, price, user_id, product_id,
                              order_type, secret, notification_url)
-
-
-async def _brand_link(session, short_url: str, shop_url: str, timeout: int) -> str:
-    """tiny.payform.ru/xxxxxx → {shop_url}/?orderId=<uuid>.
-
-    Короткая ссылка ведёт редиректом на служебный link.payform.ru; тот же
-    orderId открывается и на домене магазина, форма оплаты там та же.
-    Не получилось развернуть — отдаём короткую, она рабочая.
-    """
-    try:
-        import aiohttp
-        resp = await session.get(short_url, allow_redirects=True,
-                                 timeout=aiohttp.ClientTimeout(total=timeout))
-        order_id = resp.url.query.get("orderId")
-        if order_id:
-            return f"{shop_url.rstrip('/')}/?orderId={order_id}"
-        logger.warning(f"prodamus: в {resp.url} нет orderId — оставляю {short_url}")
-    except Exception as e:
-        logger.warning(f"prodamus: не развернул {short_url}: {type(e).__name__}: {e}")
-    return short_url
