@@ -346,6 +346,20 @@ async def init_db():
                     "VALUES (?, ?, ?, 0)",
                     (uid, key, name),
                 )
+        # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
+        # админском боте. Строка на каждую отправленную копию (у каждого
+        # админа свой message_id той же копии) — так реплай любого из них
+        # находит нужного клиента. Переживает рестарт бота — вопрос могут
+        # прочитать не сразу.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS support_messages (
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, message_id)
+            )
+        """)
         # Оплаченные счета СДЭК. СДЭК работает постоплатой: сначала возит,
         # потом выставляет счёт — его и записываем. Стоимость самих
         # накладных сюда НЕ пишется, она считается из заказов.
@@ -890,6 +904,26 @@ async def set_consumable_qty(user_id: int, key: str, qty: int) -> None:
             "UPDATE consumables SET qty = ? WHERE user_id = ? AND key = ?",
             (max(0, int(qty)), user_id, key))
         await db.commit()
+
+
+async def add_support_message(chat_id: int, message_id: int, user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO support_messages (chat_id, message_id, user_id) "
+            "VALUES (?, ?, ?)",
+            (chat_id, message_id, user_id),
+        )
+        await db.commit()
+
+
+async def get_support_user(chat_id: int, message_id: int) -> int | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT user_id FROM support_messages WHERE chat_id = ? AND message_id = ?",
+            (chat_id, message_id),
+        )
+        row = await cur.fetchone()
+        return row[0] if row else None
 
 
 def unpack_round_products(raw: str | None, rounds: list, fallback_product_id: int) -> list[int]:

@@ -1,0 +1,52 @@
+"""
+Ответы поддержки (malimadmins): админ отвечает Reply на пересланный
+вопрос клиента — ответ уходит клиенту в основной бот (см. handlers/support.py).
+"""
+import logging
+
+from aiogram import Router, Bot
+from aiogram.types import Message
+
+import config
+import database as db
+
+router = Router()
+logger = logging.getLogger(__name__)
+
+
+async def _support_reply_filter(message: Message):
+    """Реплай админа именно на нашу пересланную копию вопроса.
+
+    Возвращает False на любой другой reply (например, внутри /expense) —
+    тогда aiogram передаёт апдейт дальше, другим хендлерам этого бота.
+    """
+    if not message.reply_to_message or message.from_user.id not in config.ADMIN_IDS:
+        return False
+    user_id = await db.get_support_user(message.chat.id, message.reply_to_message.message_id)
+    if user_id is None:
+        return False
+    return {"support_user_id": user_id}
+
+
+@router.message(_support_reply_filter)
+async def on_support_reply(message: Message, support_user_id: int):
+    admin = message.from_user
+    who = f"@{admin.username}" if admin.username else (admin.first_name or "поддержка")
+    header = f"💬 <b>Ответ поддержки</b> ({who}):"
+
+    main_bot = Bot(token=config.BOT_TOKEN)
+    try:
+        if message.text:
+            await main_bot.send_message(support_user_id, f"{header}\n\n{message.text}",
+                                        parse_mode="HTML")
+        else:
+            await main_bot.send_message(support_user_id, header, parse_mode="HTML")
+            await main_bot.copy_message(support_user_id, message.chat.id, message.message_id)
+    except Exception as e:
+        logger.error(f"support: reply to {support_user_id} failed: {e}")
+        await message.reply("⚠️ Не удалось отправить клиенту (заблокировал бота?).")
+        return
+    finally:
+        await main_bot.session.close()
+
+    await message.reply("✅ Отправлено клиенту.")
