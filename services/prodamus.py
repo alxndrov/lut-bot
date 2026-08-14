@@ -1,4 +1,4 @@
-"""
+r"""
 Интеграция с Prodamus по официальной документации.
 
 Алгоритм подписи:
@@ -16,8 +16,11 @@ order_id в URL → order_num в вебхуке (наш сквозной иде�
 import json
 import hmac
 import hashlib
+import logging
 import re
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- Подпись ----------
@@ -102,10 +105,31 @@ def build_payment_url(
       Задаётся в самой ссылке (участвует в подписи), поэтому не зависит от настроек
       кабинета Prodamus и переживает переезд на другой сервер.
     """
+    params = _payment_params(product_name, price, user_id, product_id,
+                             order_type, secret, notification_url, do="pay")
+    return shop_url.rstrip("/") + "/?" + _urlencode(params)
+
+
+def clean_product_name(name: str) -> str:
+    """Убирает из названия эмодзи — новая платформа Prodamus их не принимает.
+
+    Названия товаров у нас с эмодзи («🎤 Microphone Handled Kit»), а
+    Prodamus.Pay на таком названии отвечает 400 Bad Request, и клиент
+    видит ошибку вместо оплаты. Ломаются только символы вне BMP
+    (эмодзи, кодовая точка > U+FFFF) — «✅», «×», «—», ««»» проходят,
+    поэтому вырезаем именно их, не трогая остальное.
+    """
+    out = "".join(ch for ch in (name or "") if ord(ch) <= 0xFFFF)
+    return re.sub(r"\s+", " ", out).strip() or "Заказ"
+
+
+def _payment_params(product_name: str, price: int, user_id: int, product_id: int,
+                    order_type: str, secret: str, notification_url: str,
+                    do: str) -> dict:
     params = {
-        "do": "pay",
+        "do": do,
         "order_id": f"{order_type}_{user_id}_{product_id}",
-        "products[0][name]": product_name,
+        "products[0][name]": clean_product_name(product_name),
         "products[0][price]": str(price),
         "products[0][quantity]": "1",
     }
@@ -113,4 +137,45 @@ def build_payment_url(
         params["urlNotification"] = notification_url
     if secret:
         params["signature"] = make_signature(params, secret)
-    return shop_url.rstrip("/") + "/?" + _urlencode(params)
+    return params
+
+
+async def create_payment_url(
+    shop_url: str,
+    product_name: str,
+    price: int,
+    user_id: int,
+    product_id: int,
+    order_type: str = "p",
+    secret: str = "",
+    notification_url: str = "",
+    timeout: int = 20,
+) -> str:
+    """Просит Prodamus СОЗДАТЬ ссылку (do=link) и возвращает её.
+
+    Магазины на новой платформе (Prodamus.Pay, форма живёт на link.payform.ru)
+    открывают только заранее созданную ссылку вида ?orderId=<uuid>; прямая
+    подписанная ссылка do=pay там отдаёт клиенту 400 Bad Request. Режим
+    do=link создаёт заказ на стороне Prodamus и отдаёт короткий URL, при
+    этом наш order_num сохраняется как merchantOrderNumber — привязка
+    платежа к клиенту и товару не теряется.
+
+    Если Prodamus недоступен или ответил не ссылкой, откатываемся на
+    обычную do=pay-ссылку: на старой платформе она рабочая, и клиент в
+    любом случае получает кнопку оплаты, а не ошибку.
+    """
+    params = _payment_params(product_name, price, user_id, product_id,
+                             order_type, secret, notification_url, do="link")
+    url = shop_url.rstrip("/") + "/?" + _urlencode(params)
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            resp = await session.get(url, timeout=aiohttp.ClientTimeout(total=timeout))
+            text = (await resp.text()).strip()
+        if text.startswith("http://") or text.startswith("https://"):
+            return text
+        logger.error(f"prodamus do=link: ответ не ссылка ({resp.status}): {text[:200]!r}")
+    except Exception as e:
+        logger.error(f"prodamus do=link: {type(e).__name__}: {e}")
+    return build_payment_url(shop_url, product_name, price, user_id, product_id,
+                             order_type, secret, notification_url)
