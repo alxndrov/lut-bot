@@ -856,14 +856,15 @@ def combine_packages(packages: list[dict]) -> dict:
     """Несколько коробок склеиваются по узкой стороне в одно грузовое место.
 
     Вес суммируется, узкие стороны (мин. грань каждой коробки) складываются
-    вдоль склейки, а две другие грани берутся по максимуму среди коробок.
+    вдоль склейки и дают ШИРИНУ, а две другие грани берутся по максимуму
+    среди коробок: большая — длина, средняя — высота.
     """
     weight = sum(p["weight"] for p in packages)
     sorted_dims = [sorted((p["length"], p["width"], p["height"])) for p in packages]
     narrow = sum(d[0] for d in sorted_dims)
     mid = max(d[1] for d in sorted_dims)
     wide = max(d[2] for d in sorted_dims)
-    return {"weight": weight, "length": wide, "width": mid, "height": narrow}
+    return {"weight": weight, "length": wide, "width": narrow, "height": mid}
 
 
 async def get_consumables(user_id: int | None = None) -> list[dict]:
