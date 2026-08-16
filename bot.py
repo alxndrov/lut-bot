@@ -90,7 +90,8 @@ async def main():
                 BotCommand(command="sentorders", description="Отправленные заказы"),
                 BotCommand(command="refresh", description="Обновить карточки заказов"),
                 BotCommand(command="finance", description="💳 Финансы: выручка, расчёт, касса"),
-                BotCommand(command="expense", description="🧾 Внести расход"),
+                # /expense в меню не выносим — внести расход можно кнопкой
+                # прямо на экране /expenses
                 BotCommand(command="expenses", description="🧾 Расходы за месяц"),
                 BotCommand(command="cdek", description="🚚 Счета СДЭК"),
                 BotCommand(command="stock", description="📦 Расходники"),
