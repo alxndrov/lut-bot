@@ -95,12 +95,24 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
         "─" * 30,
         f"Чистыми: <b>{s['net']:,.2f} ₽</b>",
         "",
-        f"👤 {config.OWNER_NAME}: <b>{s['owner']:,.2f} ₽</b>  ← к выплате",
-        f"👤 {config.PARTNER_NAME}: <b>{s['partner']:,.2f} ₽</b>",
+    ]
+    # Если часть доли уже отдали внутри периода — показываем остаток, иначе
+    # цифра выглядит как долг, которого на самом деле уже нет
+    for name, share, paid, left in (
+        (config.OWNER_NAME, s["owner"], s.get("paid_owner", 0), s.get("owner_left", s["owner"])),
+        (config.PARTNER_NAME, s["partner"], s.get("paid_partner", 0),
+         s.get("partner_left", s["partner"])),
+    ):
+        if paid:
+            lines.append(f"👤 {name}: <b>{left:,.2f} ₽</b>  ← осталось выплатить")
+            lines.append(f"    <i>доля {share:,.2f} − уже выплачено {paid:,.2f}</i>")
+        else:
+            lines.append(f"👤 {name}: <b>{share:,.2f} ₽</b>")
+    lines.append(
         f"    <i>{config.PARTNER_GOODS_PERCENT:g}% с товара {s['partner_goods']:,.2f}"
         f" · печать {s['printed']} × {config.PARTNER_PRINT_FEE} ₽ = {s['partner_print']:,.2f}"
-        f" · цифра {config.PARTNER_DIGITAL_PERCENT:g}% = {s['partner_digital']:,.2f}</i>",
-    ]
+        f" · цифра {config.PARTNER_DIGITAL_PERCENT:g}% = {s['partner_digital']:,.2f}</i>"
+    )
     return "\n".join(lines)
 
 

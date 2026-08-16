@@ -96,6 +96,13 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
                + printed * config.PARTNER_PRINT_FEE
                + digital_net * config.PARTNER_DIGITAL_PERCENT / 100)
 
+    # Уже выплаченное внутри периода: доля начисляется за весь период, но
+    # часть её могли отдать раньше расчёта — частичной выплатой. Без этого
+    # «Взаиморасчёт» повторно показывал бы уже отданные деньги как долг.
+    paid = (await db.get_payouts_summary(dt_from, dt_to))["by_recipient"]
+    paid_partner = float(paid.get(config.PARTNER_NAME, 0))
+    paid_owner = float(paid.get(config.OWNER_NAME, 0))
+
     return {
         "gross": gross, "physical": physical, "digital": digital,
         "delivery": delivery, "count": int(goods["count"]),
@@ -104,6 +111,9 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
         "net": net,
         "printed": printed, "print_credits": credits,
         "partner": partner, "owner": net - partner,
+        "paid_partner": paid_partner, "paid_owner": paid_owner,
+        "partner_left": partner - paid_partner,
+        "owner_left": net - partner - paid_owner,
         "partner_goods": physical_net * config.PARTNER_GOODS_PERCENT / 100,
         "partner_print": printed * config.PARTNER_PRINT_FEE,
         "partner_digital": digital_net * config.PARTNER_DIGITAL_PERCENT / 100,
