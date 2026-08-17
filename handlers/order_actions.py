@@ -492,15 +492,24 @@ async def _apply_routing(order: dict, whos: list, actor_id: int, actor_name: str
     ids = list(after)
     await db.set_order_printers(oid, ids)
 
-    # Позиция сменила хозяина — её отметка о печати снимается: новому
-    # печатать заново. Отметки нетронутых позиций остаются
+    # Позиция сменила хозяина — снимаем отметку только с ЕЩЁ НЕ напечатанных:
+    # новому печатать заново. Уже напечатанное трогать нельзя — это факт,
+    # за который начислены 200 ₽, и терять его молча при смене исполнителя
+    # нельзя. Ошиблись — есть явная кнопка «↩️ Откатить печать».
     moved = {i + 1 for i in range(len(whos))
              if _owner_of(before, i) != _owner_of(after, i)}
-    if moved:
-        order_now = await db.get_order(oid)
-        for p in await db.get_order_prints(oid):
-            kept = _print_positions_of(order_now, p) - moved
+    order_now = await db.get_order(oid)
+    prints_now = await db.get_order_prints(oid)
+    printed_pos = set(_print_map(order_now, prints_now))
+    to_clear = moved - printed_pos
+    if to_clear:
+        for p in prints_now:
+            kept = _print_positions_of(order_now, p) - to_clear
             await db.set_order_print_positions(oid, p["user_id"], p["user_name"], kept)
+    kept_printed = moved & printed_pos
+    if kept_printed:
+        logger.info(f"order {oid}: позиции {sorted(kept_printed)} сменили исполнителя, "
+                    f"но отметки о печати сохранены")
 
     order_now = await db.get_order(oid)
     if _all_printed(order_now, await db.get_order_prints(oid)):
