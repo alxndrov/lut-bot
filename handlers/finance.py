@@ -192,6 +192,33 @@ async def _debt_block(s: dict | None, last_settlement: dict | None,
     return text, cdek_paid, npd_paid, pending_gross
 
 
+async def _free_to_payout(dt_from: str, dt_to: str, now_utc: datetime) -> tuple[float, float, float, float]:
+    """Сколько можно выплатить прямо сейчас, ничего не сломав.
+
+    Резерв на СДЭК и начисленный НПД физически лежат на том же счету, что и
+    прибыль, — их легко выплатить как долю и потом не найти денег на счёт
+    СДЭК (так и вышло в августе 2026). Поэтому «свободно» — это ожидаемый
+    остаток на счету МИНУС то, что уже начислено, но ещё не оплачено.
+
+    Возвращает (свободно, остаток_на_счету, долг_СДЭК, долг_НПД).
+    """
+    from services import payout as payout_svc
+    s = await payout_svc.split(dt_from, dt_to)
+    if not s or not s["count"]:
+        return 0.0, 0.0, 0.0, 0.0
+    cdek_paid = await db.get_cdek_payments_summary(dt_from, dt_to)
+    npd_paid = await db.get_npd_payments_summary(dt_from, dt_to)
+    payouts = await db.get_payouts_summary(dt_from, dt_to)
+    pending_net = (await _pending_gross(dt_from, dt_to, now_utc)) * (1 - s["fee_pct"] / 100)
+
+    cash = (s["gross"] - s["fee"] - s["expenses"]
+            - float(cdek_paid["total"]) - float(npd_paid["total"])
+            - payouts["total"] - pending_net)
+    owe_cdek = max(0.0, s["delivery_out"] - float(cdek_paid["total"]))
+    owe_npd = max(0.0, s["npd"] - float(npd_paid["total"]))
+    return cash - owe_cdek - owe_npd, cash, owe_cdek, owe_npd
+
+
 async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
                            npd_paid: dict, pending_gross: float) -> str:
     """«Взаиморасчёт» выше — начисление: сколько ДОЛЖНО уйти на налог, СДЭК
@@ -222,10 +249,18 @@ async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
     if payouts["total"]:
         by = " · ".join(f"{name} {amt:,.2f} ₽" for name, amt in payouts["by_recipient"].items())
         lines.append(f"Выплачено партнёрам: −{payouts['total']:,.2f} ₽ ({by})")
+    owe_cdek = max(0.0, s["delivery_out"] - float(cdek_paid["total"]))
+    owe_npd = max(0.0, s["npd"] - float(npd_paid["total"]))
+    free = cash - owe_cdek - owe_npd
     lines += [
         "─" * 30,
         f"💰 <b>Ожидаемый остаток на счету: {cash:,.2f} ₽</b>",
         "<i>сверьте с выпиской банка</i>",
+        "",
+        f"🔒 Из них зарезервировано: СДЭК {owe_cdek:,.2f} ₽ · НПД {owe_npd:,.2f} ₽",
+        f"✅ <b>Свободно к выплате: {free:,.2f} ₽</b>" if free > 0
+        else f"⛔️ <b>Свободных денег нет: {free:,.2f} ₽</b> — на счету не хватает "
+             f"даже на СДЭК и налог, выплаты лучше приостановить",
     ]
     return "\n".join(lines)
 
@@ -462,8 +497,21 @@ async def on_payout_amount(message: Message, state: FSMContext):
     recipient = data.get("recipient") or config.OWNER_NAME
     u = message.from_user
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
+
+    # Сколько можно отдать, не залезая в резерв на СДЭК и налог
+    _, _, dt_from, dt_to, now_utc = await _settle_split()
+    free, _cash, owe_cdek, owe_npd = await _free_to_payout(dt_from, dt_to, now_utc)
+
     payout_id = await db.add_payout(recipient, amount, comment, u.id, name)
     await state.clear()
+
+    warn = ""
+    if amount > free:
+        warn = (f"\n\n⚠️ <b>Выплата больше свободных денег.</b>\n"
+                f"Свободно было: <b>{free:,.2f} ₽</b> — это остаток на счету за вычетом "
+                f"неоплаченного СДЭК ({owe_cdek:,.2f} ₽) и налога ({owe_npd:,.2f} ₽).\n"
+                f"После этой выплаты на обязательные платежи не хватает "
+                f"<b>{amount - free:,.2f} ₽</b>. Записал, но имейте в виду.")
 
     from services.gsheets import request_expense_append
     sheet_comment = f"Выплата {recipient}" + (f": {comment}" if comment else "")
@@ -472,7 +520,7 @@ async def on_payout_amount(message: Message, state: FSMContext):
 
     tail = f"\n💬 {comment}" if comment else ""
     await message.answer(
-        f"✅ Записал выплату\n\n👤 <b>{recipient}: {amount:,.2f} ₽</b>{tail}",
+        f"✅ Записал выплату\n\n👤 <b>{recipient}: {amount:,.2f} ₽</b>{tail}{warn}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"payout_del:{payout_id}")],
