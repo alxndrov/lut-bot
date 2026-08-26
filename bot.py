@@ -42,6 +42,8 @@ async def main():
     dp.include_router(channel_access.router)
     dp.include_router(funnel_handler.router)
     dp.include_router(bonus_handler.router)
+    # Последним: ловит ответ на просьбу об отзыве — всё, что не разобрали выше
+    dp.include_router(support.review_router)
 
     await bot.set_my_commands([
         BotCommand(command="start",       description="🏠 В начало"),
