@@ -32,7 +32,9 @@ async def cmd_cancel_feedback(message: Message, state: FSMContext):
     await message.answer("❌ Отменено.")
 
 
-@router.message(FeedbackState.waiting_text)
+# Команду (/help и любую другую) не считаем текстом отзыва: клиент
+# просто перепутал раздел — пусть команда сработает как обычно
+@router.message(FeedbackState.waiting_text, ~(F.text & F.text.startswith("/")))
 async def receive_feedback(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
 
