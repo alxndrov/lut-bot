@@ -4,7 +4,7 @@
 """
 import logging
 
-from aiogram import Router, Bot
+from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -39,7 +39,8 @@ async def cmd_support_cancel(message: Message, state: FSMContext):
     await message.answer("❌ Отменено.")
 
 
-@router.message(SupportState.waiting_text)
+# Команду не считаем вопросом в поддержку — см. тот же случай в feedback.py
+@router.message(SupportState.waiting_text, ~(F.text & F.text.startswith("/")))
 async def on_support_message(message: Message, state: FSMContext):
     await state.clear()
 
