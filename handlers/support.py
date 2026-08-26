@@ -8,7 +8,8 @@ from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (Message, InlineKeyboardMarkup, InlineKeyboardButton,
+                           BufferedInputFile)
 
 import config
 import database as db
@@ -19,6 +20,41 @@ logger = logging.getLogger(__name__)
 
 class SupportState(StatesGroup):
     waiting_text = State()
+
+
+# Медиа между двумя ботами: copy_message тут не работает — админский бот не
+# видит чат клиента («chat not found»), а file_id у каждого бота свой.
+# Поэтому качаем файл основным ботом и заливаем админским.
+_MEDIA = (
+    ("photo", "send_photo", "photo.jpg"),
+    ("video", "send_video", "video.mp4"),
+    ("voice", "send_voice", "voice.ogg"),
+    ("video_note", "send_video", "video.mp4"),
+    ("animation", "send_animation", "animation.mp4"),
+    ("audio", "send_audio", "audio.mp3"),
+    ("document", "send_document", None),
+)
+
+
+async def relay_media(message: Message, to_bot: Bot, chat_id: int):
+    """Пересылает вложение клиента админскому боту. Возвращает Message или None."""
+    for attr, method, default_name in _MEDIA:
+        obj = getattr(message, attr, None)
+        if not obj:
+            continue
+        obj = obj[-1] if isinstance(obj, (list, tuple)) else obj      # photo — список размеров
+        try:
+            file = await message.bot.get_file(obj.file_id)
+            buf = await message.bot.download_file(file.file_path)
+            name = getattr(obj, "file_name", None) or default_name or "file"
+            data = BufferedInputFile(buf.read(), filename=name)
+            return await getattr(to_bot, method)(chat_id, data,
+                                                 caption=message.caption or None)
+        except Exception as e:
+            logger.error(f"relay_media ({attr}): {e}")
+            return await to_bot.send_message(
+                chat_id, f"⚠️ Вложение ({attr}) переслать не удалось: {e}")
+    return None
 
 
 @router.message(Command("help"))
@@ -69,9 +105,9 @@ async def on_support_message(message: Message, state: FSMContext):
                         sent_header = await support_bot.send_message(
                             admin_id, header, parse_mode="HTML", reply_markup=kb)
                         await db.add_support_message(admin_id, sent_header.message_id, user.id)
-                        sent_copy = await support_bot.copy_message(
-                            admin_id, message.chat.id, message.message_id)
-                        await db.add_support_message(admin_id, sent_copy.message_id, user.id)
+                        sent_copy = await relay_media(message, support_bot, admin_id)
+                        if sent_copy:
+                            await db.add_support_message(admin_id, sent_copy.message_id, user.id)
                 except Exception as e:
                     logger.error(f"support: notify admin {admin_id} failed: {e}")
         finally:
@@ -91,7 +127,8 @@ async def on_support_message(message: Message, state: FSMContext):
 review_router = Router()
 
 
-@review_router.message(F.text | F.photo | F.video | F.voice | F.document)
+@review_router.message(F.text | F.photo | F.video | F.voice | F.document
+                       | F.video_note | F.animation | F.audio)
 async def on_review_reply(message: Message, state: FSMContext):
     if await state.get_state() is not None:
         return                                   # человек внутри другого сценария
@@ -106,6 +143,9 @@ async def on_review_reply(message: Message, state: FSMContext):
     header = (f"⭐️ <b>Отзыв о покупке</b>\n"
              f"👤 {user.first_name or '—'} {username} (id:{user.id})\n"
              f"🛍 {push['product_name']}")
+    # Подпись к фото/видео — тоже текст отзыва, показываем её в шапке
+    if not message.text and message.caption:
+        header += f"\n\n{message.caption}"
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✍️ Ответить", callback_data=f"sup_reply:{user.id}")
     ]])
@@ -121,8 +161,9 @@ async def on_review_reply(message: Message, state: FSMContext):
                     sent = await bot.send_message(admin_id, header, parse_mode="HTML",
                                                   reply_markup=kb)
                     await db.add_support_message(admin_id, sent.message_id, user.id)
-                    copy = await bot.copy_message(admin_id, message.chat.id, message.message_id)
-                    await db.add_support_message(admin_id, copy.message_id, user.id)
+                    copy = await relay_media(message, bot, admin_id)
+                    if copy:
+                        await db.add_support_message(admin_id, copy.message_id, user.id)
             except Exception as e:
                 logger.error(f"review reply → admin {admin_id}: {e}")
     finally:
