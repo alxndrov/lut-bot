@@ -1077,6 +1077,29 @@ async def get_due_review_pushes() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def recent_review_push(user_id: int, days: int = 21) -> dict | None:
+    """Недавно отправленный этому клиенту пуш с просьбой об отзыве.
+
+    Нужен, чтобы понять, что присланный текст — это ответ на просьбу, а
+    не случайное сообщение: пуш зовёт написать отзыв, и без этого ответ
+    просто пропадал (ни один хендлер его не ловил).
+    """
+    from datetime import datetime, timezone, timedelta
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT rq.id, rq.product_id, rq.send_at, p.name AS product_name
+               FROM review_push_queue rq
+               JOIN products p ON p.id = rq.product_id
+               WHERE rq.user_id = ? AND rq.sent = 1 AND rq.send_at >= ?
+               ORDER BY rq.send_at DESC LIMIT 1""",
+            (user_id, since),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
 async def mark_review_push_sent(push_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE review_push_queue SET sent = 1 WHERE id = ?", (push_id,))
