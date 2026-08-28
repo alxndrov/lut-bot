@@ -14,7 +14,9 @@ echo "=== Папка проекта: $REPO_DIR ==="
 echo ""
 
 echo "=== [1/6] Обновление системы ==="
-sudo apt-get update -y && sudo apt-get install -y python3 python3-pip python3-venv git
+# potrace обводит логотип в вектор, poppler-utils растрирует логотипы в PDF
+sudo apt-get update -y && sudo apt-get install -y python3 python3-pip python3-venv git \
+    potrace poppler-utils
 
 echo "=== [2/6] Клонирование репозитория ==="
 read -p "Вставь ссылку на GitHub-репозиторий (https://github.com/...): " REPO_URL
