@@ -927,6 +927,26 @@ async def get_support_user(chat_id: int, message_id: int) -> int | None:
         return row[0] if row else None
 
 
+async def recent_support_contact(user_id: int, days: int = 14) -> str | None:
+    """Когда клиент последний раз общался с поддержкой (время последнего
+    сообщения переписки).
+
+    Нужно, чтобы следующее сообщение клиента считалось продолжением
+    разговора, а не пропадало: после ответа админа человек отвечает прямо
+    в боте, и заново вводить /help он не станет.
+    """
+    from datetime import datetime, timezone, timedelta
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "SELECT MAX(created_at) FROM support_messages "
+            "WHERE user_id = ? AND created_at >= ?",
+            (user_id, since),
+        )
+        row = await cur.fetchone()
+        return row[0] if row and row[0] else None
+
+
 def unpack_round_products(raw: str | None, rounds: list, fallback_product_id: int) -> list[int]:
     """Товар каждого раунда: parallel-массив к rounds из round_products_json.
 

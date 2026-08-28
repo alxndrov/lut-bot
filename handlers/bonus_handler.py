@@ -6,6 +6,7 @@
 import logging
 import re
 from aiogram import Router, F, Bot
+from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.types import Message
 
 import config
@@ -24,12 +25,14 @@ async def handle_possible_video_link(message: Message, bot: Bot):
     # Ищем URL в сообщении
     urls = URL_RE.findall(message.text or "")
     if not urls:
-        return
+        # UNHANDLED, а не обычный return: иначе aiogram считает сообщение
+        # обработанным и следующие роутеры (отзыв, поддержка) его не видят
+        return UNHANDLED
 
     # Проверяем — есть ли у пользователя активный бонус хоть по одному продукту
     bonuses = await db.get_bonus_winners_for_any_product(user_id)
     if not bonuses:
-        return  # Не победитель — игнорируем (другие хендлеры разберутся)
+        return UNHANDLED   # Не победитель — пусть разберутся другие роутеры
 
     link = urls[0].rstrip(".,)")  # берём первую ссылку, чистим пунктуацию
 

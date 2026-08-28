@@ -9,6 +9,7 @@ from aiogram.types import CallbackQuery, ForceReply, Message
 
 import config
 import database as db
+from handlers.support import relay_media
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -51,16 +52,21 @@ async def _support_reply_filter(message: Message):
 
 @router.message(_support_reply_filter)
 async def on_support_reply(message: Message, support_user_id: int):
-    header = "💬 <b>Ответ поддержки</b>:"
+    header = ("💬 <b>Ответ поддержки</b>:" if message.text else
+              "💬 <b>Ответ поддержки</b>")
+    hint = "\n\n<i>Можно ответить прямо здесь — я передам.</i>"
 
     main_bot = Bot(token=config.BOT_TOKEN)
     try:
         if message.text:
-            await main_bot.send_message(support_user_id, f"{header}\n\n{message.text}",
+            await main_bot.send_message(support_user_id,
+                                        f"{header}\n\n{message.text}{hint}",
                                         parse_mode="HTML")
         else:
-            await main_bot.send_message(support_user_id, header, parse_mode="HTML")
-            await main_bot.copy_message(support_user_id, message.chat.id, message.message_id)
+            # copy_message тут не работает: основной бот не видит чат админа
+            # с админским ботом. Качаем файл и заливаем заново (см. relay_media).
+            await main_bot.send_message(support_user_id, header + hint, parse_mode="HTML")
+            await relay_media(message, main_bot, support_user_id)
     except Exception as e:
         logger.error(f"support: reply to {support_user_id} failed: {e}")
         await message.reply("⚠️ Не удалось отправить клиенту (заблокировал бота?).")
@@ -68,4 +74,7 @@ async def on_support_reply(message: Message, support_user_id: int):
     finally:
         await main_bot.session.close()
 
+    # Свой же ответ тоже кладём в переписку: на него можно ответить Reply,
+    # и по нему видно, что разговор с клиентом ещё живой
+    await db.add_support_message(message.chat.id, message.message_id, support_user_id)
     await message.reply("✅ Отправлено клиенту.")
