@@ -10,7 +10,7 @@ import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
-from handlers import support, support_admin
+from handlers import support, support_admin, logo
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop, monthly_report_loop
 from services.funnel import funnel_worker
@@ -83,6 +83,8 @@ async def main():
         admin_dp.include_router(debug_cmd.router)
         admin_dp.include_router(consumables.router)
         admin_dp.include_router(support_admin.router)
+        # Последним: ловит присланный файл, который не забрал никто
+        admin_dp.include_router(logo.router)
         asyncio.create_task(
             admin_dp.start_polling(admin_bot,
                                    allowed_updates=["callback_query", "message"])

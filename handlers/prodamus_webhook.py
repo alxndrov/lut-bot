@@ -17,6 +17,7 @@ from aiogram.types import BufferedInputFile
 import config
 import database as db
 from services.prodamus import verify_webhook
+from services.logo_svg import to_svg, is_logo_question, is_vector
 
 logger = logging.getLogger(__name__)
 
@@ -661,7 +662,8 @@ async def _send_order_media(main_bot: Bot, notify_bot: Bot, rounds: list, order_
             if not fetched:
                 continue
             data, name = fetched
-            caption = f"{head}{prefix}Ответ {i}: {str(a.get('q', ''))[:180]}"
+            question = str(a.get("q", ""))
+            caption = f"{head}{prefix}Ответ {i}: {question[:180]}"
             for admin_id in config.ADMIN_IDS:
                 try:
                     file = BufferedInputFile(data, filename=name)
@@ -671,6 +673,31 @@ async def _send_order_media(main_bot: Bot, notify_bot: Bot, rounds: list, order_
                         await notify_bot.send_document(admin_id, file, caption=caption)
                 except Exception as e:
                     logger.error(f"Order media to {admin_id} failed: {e}")
+
+            if is_logo_question(question):
+                await _send_logo_svg(notify_bot, data, name,
+                                     f"{head}{prefix}".rstrip(" ··").strip())
+
+
+async def _send_logo_svg(notify_bot: Bot, data: bytes, name: str, head: str = ""):
+    """Логотип отдельным сообщением ещё и вектором — с ним и работаем при печати."""
+    if is_vector(name):
+        return
+    try:
+        result = await to_svg(data, name)
+    except Exception as e:
+        logger.error(f"logo svg failed ({name}): {e}")
+        return
+    if not result:
+        return
+    svg, svg_name = result
+    caption = (f"{head} · " if head else "") + "🖤 Логотип в SVG — всё, кроме фона, чёрным"
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await notify_bot.send_document(
+                admin_id, BufferedInputFile(svg, filename=svg_name), caption=caption)
+        except Exception as e:
+            logger.error(f"logo svg to {admin_id} failed: {e}")
 
 
 async def _deliver_digital(bot: Bot, user_id: int, product: dict):
