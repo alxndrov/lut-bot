@@ -16,6 +16,7 @@ from services.daily_report import daily_report_loop, monthly_report_loop
 from services.funnel import funnel_worker
 from services.review_push import review_push_worker
 from services.cdek_tracker import cdek_tracking_worker
+from services.message_log import MessageLogMiddleware
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,6 +29,9 @@ async def main():
 
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
+
+    # Каждое входящее сообщение — в лог, до и после хендлеров
+    dp.update.outer_middleware(MessageLogMiddleware("клиент"))
 
     # Регистрируем роутеры
     dp.include_router(admin.router)   # Сначала админ, чтобы перехватывал FSM-состояния
@@ -71,6 +75,7 @@ async def main():
     if config.WAITLIST_BOT_TOKEN:
         admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
         admin_dp = Dispatcher(storage=MemoryStorage())
+        admin_dp.update.outer_middleware(MessageLogMiddleware("админ"))
         admin_dp.include_router(order_actions.router)
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)

@@ -5,6 +5,7 @@
 import logging
 
 from aiogram import Router, Bot, F
+from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -146,10 +147,12 @@ review_router = Router()
 @review_router.message(F.text | F.photo | F.video | F.voice | F.document
                        | F.video_note | F.animation | F.audio)
 async def on_free_message(message: Message, state: FSMContext):
+    # UNHANDLED, а не голый return: так в логе видно, что сообщение не
+    # разобрал никто (см. services/message_log.py)
     if await state.get_state() is not None:
-        return                                   # человек внутри другого сценария
+        return UNHANDLED                         # человек внутри другого сценария
     if message.text and message.text.startswith("/"):
-        return
+        return UNHANDLED
 
     user_id = message.from_user.id
     push = await db.recent_review_push(user_id)
@@ -166,7 +169,7 @@ async def on_free_message(message: Message, state: FSMContext):
                                f"🛍 {push['product_name']}")
         reply_text = "Спасибо за отзыв! 🙏 Передал команде."
     else:
-        return
+        return UNHANDLED
 
     if await notify_admins(message, header, user_id):
         await message.answer(reply_text)
