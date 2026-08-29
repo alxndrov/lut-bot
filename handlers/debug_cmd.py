@@ -18,7 +18,7 @@ from aiogram.types import Message
 import config
 import database as db
 from handlers.order_actions import _msk
-from handlers.prodamus_webhook import _parse_routing
+from handlers.prodamus_webhook import _parse_routing, routing_lookup
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -57,17 +57,21 @@ async def _routing_diagnosis(pid: int, product: dict | None, answers: list) -> l
         return lines
     lines.append(f"  ответ клиента: «{answer}»")
 
+    rmap = _parse_routing(routing_text)
     nums = re.findall(r"\d+", answer or "")
-    if not nums:
+    if not nums and "*" not in rmap:
         lines.append("  ⚠️ в ответе нет числа — номер не извлечь")
         return lines
 
-    rmap = _parse_routing(routing_text)
-    name = rmap.get(nums[0])
+    num = nums[0] if nums else None
+    name = routing_lookup(rmap, num)
     if not name:
-        lines.append(f"  ⚠️ номер «{nums[0]}» не встречается в правиле выше — позиция ничья")
+        lines.append(f"  ⚠️ номер «{num}» не встречается в правиле выше — позиция ничья")
         return lines
-    lines.append(f"  по номеру «{nums[0]}» должен печатать: <b>{name}</b>")
+    if num and rmap.get(num):
+        lines.append(f"  по номеру «{num}» должен печатать: <b>{name}</b>")
+    else:
+        lines.append(f"  по правилу «*» (всё остальное) должен печатать: <b>{name}</b>")
 
     admin = await db.get_admin_by_username(name, config.ADMIN_IDS)
     if not admin:

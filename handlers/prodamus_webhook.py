@@ -353,7 +353,12 @@ def find_answer(answers: list, question_text: str) -> str | None:
 
 
 def _parse_routing(text: str) -> dict:
-    """'Даня: 1,2,3\\nПартнёр: 4,5' -> {'1':'Даня','2':'Даня',...,'4':'Партнёр',...}"""
+    """'Даня: 1,2,3\\nПартнёр: 4,5' -> {'1':'Даня','2':'Даня',...,'4':'Партнёр',...}
+
+    Вместо номеров можно написать «*» — тогда этому человеку достаётся
+    всё, что не расписано поимённо. Нужно, когда печатает кто-то один:
+    иначе новый цвет не попадает ни в один список и позиция остаётся ничьей.
+    """
     import re
     result = {}
     for line in (text or "").splitlines():
@@ -361,9 +366,16 @@ def _parse_routing(text: str) -> dict:
             continue
         name, nums = line.split(":", 1)
         name = name.strip()
+        if "*" in nums:
+            result["*"] = name
         for n in re.findall(r"\d+", nums):
             result[n] = name
     return result
+
+
+def routing_lookup(rmap: dict, num: str | None) -> str | None:
+    """Кто печатает этот номер цвета: точное правило, иначе «*»."""
+    return (rmap.get(num) if num else None) or rmap.get("*")
 
 
 async def _create_cdek_order(order_row_id: int, pending: dict, round_products: list[int],
@@ -525,7 +537,7 @@ async def _routing_whos(round_products: list[int], products_by_id: dict, rounds:
             rmap_cache[pid] = _parse_routing(routing)
         val = find_answer(answers, router_q["text"]) or ""
         nums = re.findall(r"\d+", val)
-        return rmap_cache[pid].get(nums[0]) if nums else None
+        return routing_lookup(rmap_cache[pid], nums[0] if nums else None)
 
     return [await who(pid, answers) for pid, answers in zip(round_products, rounds)]
 
