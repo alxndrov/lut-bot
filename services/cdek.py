@@ -239,6 +239,37 @@ class CDEKClient:
             logger.error(f"CDEK create_order error: {e}")
         return None
 
+    async def update_order(self, uuid: str, **fields) -> Optional[dict]:
+        """Корректирует уже созданный заказ. Возвращает {'state','errors'}.
+
+        СДЭК разрешает менять заказ, пока он не принят на складе: заново
+        создавать накладную из-за смены точки отправления не нужно.
+        Ответ, как и на создание, асинхронный — результат смотрим через
+        get_order_info.
+        """
+        token = await self.get_token()
+        if not token:
+            return None
+        body = {"uuid": uuid, **fields}
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.patch(
+                    f"{self.base_url}/orders",
+                    json=body,
+                    headers={"Authorization": f"Bearer {token}",
+                             "Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                )
+                data = await resp.json()
+                req = next((r for r in (data.get("requests") or [])
+                            if r.get("type") == "UPDATE"), {})
+                return {"state": req.get("state"),
+                        "errors": req.get("errors") or [],
+                        "raw": data}
+        except Exception as e:
+            logger.error(f"CDEK update_order error: {e}")
+        return None
+
     async def get_order_info(self, uuid: str) -> Optional[dict]:
         """Статус заявки. Возвращает {'state', 'cdek_number', 'errors'}."""
         token = await self.get_token()
