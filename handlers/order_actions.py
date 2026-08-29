@@ -5,6 +5,7 @@
 """
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 
 from aiogram import Router, F
@@ -323,6 +324,16 @@ def _products_label(order: dict, positions: list, total: int) -> str:
     return f" ({', '.join(words)})" if words else ""
 
 
+def _order_num(order: dict) -> str:
+    """Номер заказа цифрами: malimabi-store-075 → 075.
+
+    В списке важен именно номер, а не полный код: он короткий, его видно
+    с одного взгляда и им же заказ называют вслух.
+    """
+    nums = re.findall(r"\d+", order.get("order_code") or "")
+    return nums[-1] if nums else str(order.get("id", ""))
+
+
 def _list_item_text(order: dict, index: int, has_card: bool,
                     viewer_id: int | None = None, prints: list | None = None,
                     mode: str = "my") -> str:
@@ -365,7 +376,7 @@ def _list_item_text(order: dict, index: int, has_card: bool,
             f"Напечатать {_pos_list(ps)}{_products_label(order, ps, total)} — {who}"
             for who, ps in by_who.items())
 
-    text = f"<b>{index}.</b> {action}"
+    text = f"<b>{index}.</b> №{_order_num(order)} · {action}"
     if not has_card:
         text += f"\n{_order_line(order, prints)}"
     return text
@@ -570,12 +581,11 @@ def _stage(order: dict, prints: list | None = None) -> tuple[str, str]:
 
 
 def _order_line(order: dict, prints: list | None = None) -> str:
-    num = order.get("order_code") or order.get("prodamus_order_id") or f"#{order['id']}"
     icon, stage = _stage(order, prints)
     client = f"@{order['username']}" if order.get("username") else (
         order.get("first_name") or f"id:{order.get('user_id')}")
     when = _msk(order.get("created_at"))
-    line = f"{icon} <b>{num}</b> — {stage}\n    {client}"
+    line = f"{icon} {stage}\n    {client}"
     if order.get("product_name"):
         line += f" · {order['product_name']}"
     if when:
