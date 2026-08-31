@@ -69,7 +69,7 @@ class CDEKClient:
                 self._token_expires_at = time.monotonic() + int(data.get("expires_in", 3600)) - 60
                 return self._token
         except Exception as e:
-            logger.error(f"CDEK get_token error: {e}")
+            logger.error(f"CDEK get_token error: {type(e).__name__}: {e}")
             return None
 
     async def get_city_code(self, city_name: str) -> Optional[int]:
@@ -88,7 +88,7 @@ class CDEKClient:
                 if isinstance(data, list) and data:
                     return data[0].get("code")
         except Exception as e:
-            logger.error(f"CDEK get_city_code error: {e}")
+            logger.error(f"CDEK get_city_code error: {type(e).__name__}: {e}")
         return None
 
     async def get_from_city_code(self) -> Optional[int]:
@@ -156,7 +156,7 @@ class CDEKClient:
                     "days_max": data.get("period_max"),
                 }
         except Exception as e:
-            logger.error(f"CDEK calculate_tariff error: {e}")
+            logger.error(f"CDEK calculate_tariff error: {type(e).__name__}: {e}")
         return None
 
     async def create_order(
@@ -236,7 +236,7 @@ class CDEKClient:
                     return None
                 return uuid
         except Exception as e:
-            logger.error(f"CDEK create_order error: {e}")
+            logger.error(f"CDEK create_order error: {type(e).__name__}: {e}")
         return None
 
     async def update_order(self, uuid: str, **fields) -> Optional[dict]:
@@ -267,8 +267,39 @@ class CDEKClient:
                         "errors": req.get("errors") or [],
                         "raw": data}
         except Exception as e:
-            logger.error(f"CDEK update_order error: {e}")
+            logger.error(f"CDEK update_order error: {type(e).__name__}: {e}")
         return None
+
+    async def find_order_by_number(self, im_number: str) -> Optional[dict]:
+        """Заявка по НАШЕМУ номеру заказа. -> {'uuid','cdek_number'} | None.
+
+        Нужна перед повторной попыткой: на таймауте СДЭК мог всё-таки
+        завести заказ, и создавать вторую накладную на ту же посылку нельзя.
+        """
+        token = await self.get_token()
+        if not token:
+            return None
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    f"{self.base_url}/orders",
+                    params={"im_number": im_number},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=aiohttp.ClientTimeout(total=20)
+                )
+                if resp.content_type != "application/json":
+                    logger.error(f"CDEK find_order: {resp.status} не JSON "
+                                 f"({resp.content_type}) — похоже, сбой на их стороне")
+                    return None
+                data = await resp.json()
+        except Exception as e:
+            logger.error(f"CDEK find_order error: {type(e).__name__}: {e}")
+            return None
+        entity = (data or {}).get("entity") or {}
+        uuid = entity.get("uuid")
+        if not uuid:
+            return None
+        return {"uuid": uuid, "cdek_number": entity.get("cdek_number")}
 
     async def get_order_info(self, uuid: str) -> Optional[dict]:
         """Статус заявки. Возвращает {'state', 'cdek_number', 'errors'}."""
@@ -300,7 +331,7 @@ class CDEKClient:
                     "status_codes": [s.get("code") for s in statuses],
                 }
         except Exception as e:
-            logger.error(f"CDEK get_order_info error: {e}")
+            logger.error(f"CDEK get_order_info error: {type(e).__name__}: {e}")
         return None
 
     async def get_barcode_pdf(self, order_uuid: str, fmt: str = "A6",
@@ -366,7 +397,7 @@ class CDEKClient:
                 logger.warning(f"CDEK get_barcode_pdf: форма не готова за "
                                f"{int(attempts * delay)} сек, uuid={form_uuid}")
         except Exception as e:
-            logger.error(f"CDEK get_barcode_pdf error: {e}")
+            logger.error(f"CDEK get_barcode_pdf error: {type(e).__name__}: {e}")
         return None
 
     async def get_pvz(self, city_code: int, limit: int = 1000) -> list:
@@ -411,5 +442,5 @@ class CDEKClient:
                     })
                 return points
         except Exception as e:
-            logger.error(f"CDEK get_pvz error: {e}")
+            logger.error(f"CDEK get_pvz error: {type(e).__name__}: {e}")
         return []

@@ -380,7 +380,8 @@ def routing_lookup(rmap: dict, num: str | None) -> str | None:
 
 async def _create_cdek_order(order_row_id: int, pending: dict, round_products: list[int],
                              products_by_id: dict, order_number: str,
-                             bot: Bot = None, client_id: int = 0):
+                             bot: Bot = None, client_id: int = 0,
+                             notify_fail: bool = True, adopt_existing: bool = False):
     """Заводит накладную в СДЭК после оплаты и сообщает результат админам.
 
     round_products — товар каждой позиции заказа (может быть смешанным).
@@ -388,7 +389,13 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
     одно грузовое место (см. db.combine_packages); все товары попадают
     в накладную этого единственного места.
     Ошибка здесь не ломает заказ — деньги уже получены, заявка админам ушла.
-    Админ просто заведёт отправление в кабинете СДЭК руками.
+    Дальше заказ подхватит воркер повторов (services/cdek_retry.py), а если
+    и он не справится — админ заведёт отправление в кабинете СДЭК руками.
+
+    notify_fail    — писать ли админам о неудаче (у повторов молчим, иначе
+                     на каждой попытке будет одно и то же сообщение).
+    adopt_existing — сперва поискать заявку по номеру заказа: на таймауте
+                     она могла создаться, и второй такой же делать нельзя.
     """
     from handlers.delivery import CDEK_CLIENT
 
@@ -400,11 +407,12 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
     if not CDEK_CLIENT or missing:
         reason = "СДЭК не настроен" if not CDEK_CLIENT else f"не хватает данных: {', '.join(missing)}"
         logger.warning(f"CDEK order {order_number}: пропускаю — {reason}")
-        await _send_notify(None, (
-            f"⚠️ Заказ <code>{order_number}</code>: накладная СДЭК не создана "
-            f"({reason}). Заведите отправление вручную."
-        ))
-        return
+        if notify_fail:
+            await _send_notify(None, (
+                f"⚠️ Заказ <code>{order_number}</code>: накладная СДЭК не создана "
+                f"({reason}). Заведите отправление вручную."
+            ))
+        return True              # не хватает данных — повторять бессмысленно
 
     items, packages = [], []
     for pid in round_products:
@@ -422,7 +430,15 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
     # так удобнее в отправке, чем несколько отдельных коробок.
     if len(packages) > 1:
         packages = [db.combine_packages(packages)]
-    uuid = await CDEK_CLIENT.create_order(
+
+    uuid = None
+    if adopt_existing:
+        found = await CDEK_CLIENT.find_order_by_number(order_number)
+        if found:
+            uuid = found["uuid"]
+            logger.info(f"CDEK order {order_number}: заявка уже есть ({uuid}), "
+                        f"новую не создаём")
+    uuid = uuid or await CDEK_CLIENT.create_order(
         number=order_number,
         shipment_point=config.CDEK_SHIPMENT_POINT,
         delivery_point=pvz_code,
@@ -433,11 +449,12 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
         packages=packages,
     )
     if not uuid:
-        await _send_notify(None, (
-            f"⚠️ Заказ <code>{order_number}</code>: СДЭК не принял накладную. "
-            f"Заведите отправление вручную, подробности в логах."
-        ))
-        return
+        if notify_fail:
+            await _send_notify(None, (
+                f"⚠️ Заказ <code>{order_number}</code>: СДЭК не принял накладную. "
+                f"Пробую ещё, если не выйдет — заведите отправление вручную."
+            ))
+        return False
 
     await db.set_order_cdek(order_row_id, uuid)
 
@@ -464,7 +481,7 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
                 await _sync_order_messages(notify_bot, await db.get_order(order_row_id))
             finally:
                 await notify_bot.session.close()
-            return
+            return True
         if info["state"] == "INVALID":
             errs = "; ".join(e.get("message", "") for e in info.get("errors", []))
             logger.error(f"CDEK order {order_number}: отклонён — {errs}")
@@ -472,13 +489,14 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
                 f"⚠️ Заказ <code>{order_number}</code>: СДЭК отклонил накладную.\n"
                 f"<i>{errs}</i>\nЗаведите отправление вручную."
             ))
-            return
+            return True          # заявка заведена, но забракована — повтор не поможет
 
     logger.warning(f"CDEK order {order_number}: статус не подтвердился за 30 сек, uuid={uuid}")
     await _send_notify(None, (
         f"⏳ Заказ <code>{order_number}</code>: накладная СДЭК отправлена, "
         f"но подтверждение не пришло за 30 секунд. Проверьте кабинет СДЭК."
     ))
+    return True                  # uuid есть, трек подтянет отслеживание
 
 
 async def _send_track_to_client(bot: Bot, client_id: int, order_number: str,

@@ -16,6 +16,7 @@ from services.daily_report import daily_report_loop, monthly_report_loop
 from services.funnel import funnel_worker
 from services.review_push import review_push_worker
 from services.cdek_tracker import cdek_tracking_worker
+from services.cdek_retry import cdek_retry_worker
 from services.message_log import MessageLogMiddleware
 
 logging.basicConfig(
@@ -62,6 +63,7 @@ async def main():
     asyncio.create_task(funnel_worker(bot))
     asyncio.create_task(review_push_worker(bot))
     asyncio.create_task(cdek_tracking_worker(bot))
+    asyncio.create_task(cdek_retry_worker(bot))
 
     # Запускаем aiohttp-сервер для приёма вебхуков от Prodamus
     webhook_app = create_webhook_app(bot)
