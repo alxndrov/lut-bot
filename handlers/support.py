@@ -3,6 +3,7 @@
 в malimadmins, ответ приходит обратно сюда же (см. handlers/support_admin.py).
 """
 import logging
+import re
 
 from aiogram import Router, Bot, F
 from aiogram.dispatcher.event.bases import UNHANDLED
@@ -59,8 +60,13 @@ async def relay_media(message: Message, to_bot: Bot, chat_id: int):
 
 
 async def notify_admins(message: Message, header: str, user_id: int,
-                        bot_token: str | None = None) -> bool:
+                        bot_token: str | None = None, order: dict | None = None) -> bool:
     """Шапка + само сообщение клиента всем админам в malimadmins.
+
+    Если у клиента есть заказ, вопрос уходит ОТВЕТОМ на карточку этого
+    заказа: спрашивают почти всегда про заказ, и искать его вручную по
+    нику — лишняя работа. Карточка у каждого админа своя, поэтому
+    message_id ищем по его чату.
 
     Каждое отправленное сообщение регистрируем в support_messages —
     ответом (Reply) на любое из них админ отвечает клиенту.
@@ -73,24 +79,53 @@ async def notify_admins(message: Message, header: str, user_id: int,
     try:
         for admin_id in config.ADMIN_IDS:
             try:
+                card = await db.order_card_in_chat(order["id"], admin_id) if order else None
                 if message.text:
                     sent = await bot.send_message(admin_id, f"{header}\n\n{message.text}",
-                                                  parse_mode="HTML", reply_markup=kb)
+                                                  parse_mode="HTML", reply_markup=kb,
+                                                  reply_to_message_id=card)
                     await db.add_support_message(admin_id, sent.message_id, user_id)
                 else:
                     # Фото/голос/документ: шапка отдельно, следом вложение
                     sent = await bot.send_message(admin_id, header, parse_mode="HTML",
-                                                  reply_markup=kb)
+                                                  reply_markup=kb, reply_to_message_id=card)
                     await db.add_support_message(admin_id, sent.message_id, user_id)
                     copy = await relay_media(message, bot, admin_id)
                     if copy:
                         await db.add_support_message(admin_id, copy.message_id, user_id)
                 ok = True
             except Exception as e:
+                # Карточку могли удалить — тогда шлём без привязки, лишь бы дошло
                 logger.error(f"support: notify admin {admin_id} failed: {e}")
+                try:
+                    text = f"{header}\n\n{message.text}" if message.text else header
+                    sent = await bot.send_message(admin_id, text, parse_mode="HTML",
+                                                  reply_markup=kb)
+                    await db.add_support_message(admin_id, sent.message_id, user_id)
+                    if not message.text:
+                        copy = await relay_media(message, bot, admin_id)
+                        if copy:
+                            await db.add_support_message(admin_id, copy.message_id, user_id)
+                    ok = True
+                except Exception as e2:
+                    logger.error(f"support: и без карточки не ушло админу {admin_id}: {e2}")
     finally:
         await bot.session.close()
     return ok
+
+
+async def order_hint(user_id: int) -> tuple[dict | None, str]:
+    """Последний заказ клиента и строка о нём для шапки вопроса."""
+    order = await db.last_order_of_user(user_id)
+    if not order:
+        return None, ""
+    nums = re.findall(r"\d+", order.get("order_code") or "")
+    num = nums[-1] if nums else str(order.get("id"))
+    stage = "отправлен" if order.get("shipped_at") else "в работе"
+    line = f"🧾 Заказ №{num} ({stage})"
+    if order.get("cdek_number"):
+        line += f" · СДЭК {order['cdek_number']}"
+    return order, line
 
 
 def client_header(message: Message, title: str, extra: str = "") -> str:
@@ -128,8 +163,10 @@ async def cmd_support_cancel(message: Message, state: FSMContext):
 @router.message(SupportState.waiting_text, ~(F.text & F.text.startswith("/")))
 async def on_support_message(message: Message, state: FSMContext):
     await state.clear()
-    ok = await notify_admins(message, client_header(message, "🆘 <b>Вопрос в поддержку</b>"),
-                             message.from_user.id)
+    order, hint = await order_hint(message.from_user.id)
+    ok = await notify_admins(
+        message, client_header(message, "🆘 <b>Вопрос в поддержку</b>", hint),
+        message.from_user.id, order=order)
     if not ok:
         await message.answer("⚠️ Не получилось отправить, попробуйте ещё раз чуть позже.")
         return
@@ -161,8 +198,10 @@ async def on_free_message(message: Message, state: FSMContext):
     if push and support_at and str(push["send_at"]) > support_at:
         support_at = None
 
+    order = None
     if support_at:
-        header = client_header(message, "🆘 <b>Сообщение в поддержку</b>")
+        order, hint = await order_hint(user_id)
+        header = client_header(message, "🆘 <b>Сообщение в поддержку</b>", hint)
         reply_text = "✅ Передал команде — ответят здесь же."
     elif push:
         header = client_header(message, "⭐️ <b>Отзыв о покупке</b>",
@@ -171,7 +210,7 @@ async def on_free_message(message: Message, state: FSMContext):
     else:
         return UNHANDLED
 
-    if await notify_admins(message, header, user_id):
+    if await notify_admins(message, header, user_id, order=order):
         await message.answer(reply_text)
     else:
         await message.answer("⚠️ Не получилось отправить, попробуйте ещё раз чуть позже.")

@@ -1857,6 +1857,32 @@ async def get_admin_by_username(name: str, admin_ids: list[int]) -> Optional[dic
     return near[0] if len(near) == 1 else None
 
 
+async def last_order_of_user(user_id: int) -> Optional[dict]:
+    """Последний заказ клиента — к нему почти всегда и вопрос в поддержку."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT o.*, pr.name AS product_name
+               FROM orders o LEFT JOIN products pr ON pr.id = o.product_id
+               WHERE o.user_id = ? ORDER BY o.created_at DESC LIMIT 1""",
+            (user_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def order_card_in_chat(order_id: int, chat_id: int) -> Optional[int]:
+    """Где лежит карточка этого заказа в чате админа — чтобы ответить на неё."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            # У таблицы нет своего id — берём последнюю по rowid запись
+            "SELECT message_id FROM order_messages WHERE order_id = ? AND chat_id = ? "
+            "ORDER BY rowid DESC LIMIT 1", (order_id, chat_id),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+
 async def get_order_messages(order_id: int) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
