@@ -124,10 +124,15 @@ async def _stock_text() -> str:
 
     need_by_admin, unassigned = await _queue_need_by_admin()
     lines = ["📦 <b>Расходники</b>", ""]
+    # Показываем только тех, у кого расходники реально есть или на кого
+    # висит очередь: кто не печатает, тому и склад ни к чему.
     for uid in config.ADMIN_IDS:
-        lines.append(f"<b>{_ADMIN_NAMES.get(uid, f'id:{uid}')}</b>")
+        stock = await db.get_consumables(uid)
         need = need_by_admin.get(uid, {})
-        for c in await db.get_consumables(uid):
+        if not stock and not need:
+            continue
+        lines.append(f"<b>{_ADMIN_NAMES.get(uid, f'id:{uid}')}</b>")
+        for c in stock:
             key, name, qty = c["key"], c["name"], c["qty"]
             n = need.get(key, 0)
             if qty < n:
@@ -137,6 +142,10 @@ async def _stock_text() -> str:
                 lines.append(f"  ⚠️ {name}: {qty} шт. — заканчивается (нужно под очередь: {n})")
             else:
                 lines.append(f"  ✅ {name}: {qty} шт. (нужно под очередь: {n})")
+        for key, n in need.items():
+            if n and not any(c["key"] == key for c in stock):
+                lines.append(f"  🚨 {CONSUMABLE_NAMES.get(key, key)}: запаса нет, "
+                            f"а на очередь нужно {n} шт.!")
         lines.append("")
     if unassigned:
         lines.append("❔ <b>Не распределено</b> (заказ ещё никто не взял в работу):")
@@ -215,7 +224,7 @@ async def on_stock_qty(message: Message, state: FSMContext):
     await state.clear()
     new_qty = await db.adjust_consumable(message.from_user.id, key, n)
     if new_qty is None:
-        await message.answer("Такого расходника уже нет.")
+        await message.answer("Такого расходника нет.")
         return
     await message.answer(f"✅ Ваш остаток обновлён: {new_qty} шт.")
     await _show_stock(message)
