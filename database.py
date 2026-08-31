@@ -338,14 +338,9 @@ async def init_db():
                 PRIMARY KEY (user_id, key)
             )
         """)
-        import config as _config
-        for uid in _config.ADMIN_IDS:
-            for key, name in (("box", "Коробка"), ("pop_filter", "Поп-фильтр")):
-                await db.execute(
-                    "INSERT OR IGNORE INTO consumables (user_id, key, name, qty) "
-                    "VALUES (?, ?, ?, 0)",
-                    (uid, key, name),
-                )
+        # Строки заранее не заводим: расходники есть у того, кто печатает и
+        # отправляет, а это не обязательно все админы. Строка появляется,
+        # когда человек первый раз пополняет запас или списывает расход.
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -884,17 +879,21 @@ async def adjust_consumable(user_id: int, key: str, delta: int) -> int | None:
 
     Не уходит ниже нуля — недостачу показывает сравнение с очередью
     отправки (handlers/consumables.py), а не отрицательный остаток.
-    Возвращает новый остаток или None, если такого ключа нет.
+    Строки может не быть: у человека ещё не было этого расходника —
+    тогда заводим её. Возвращает новый остаток или None, если ключ чужой.
     """
+    names = {"box": "Коробка", "pop_filter": "Поп-фильтр"}
+    if key not in names:
+        return None
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "SELECT qty FROM consumables WHERE user_id = ? AND key = ?", (user_id, key))
         row = await cur.fetchone()
-        if row is None:
-            return None
-        new_qty = max(0, row[0] + delta)
-        await db.execute("UPDATE consumables SET qty = ? WHERE user_id = ? AND key = ?",
-                         (new_qty, user_id, key))
+        new_qty = max(0, (row[0] if row else 0) + delta)
+        await db.execute(
+            "INSERT INTO consumables (user_id, key, name, qty) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, key) DO UPDATE SET qty = excluded.qty",
+            (user_id, key, names[key], new_qty))
         await db.commit()
         return new_qty
 
