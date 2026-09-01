@@ -1119,6 +1119,33 @@ async def recent_review_push(user_id: int, days: int = 21) -> dict | None:
             return dict(row) if row else None
 
 
+async def pending_review_push(user_id: int) -> dict | None:
+    """Просьба об отзыве, которая этому клиенту ещё только предстоит.
+
+    Человек может написать отзыв сам, не дожидаясь пуша, — и тогда это
+    всё равно отзыв, а не случайное сообщение.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT rq.id, rq.product_id, rq.send_at, p.name AS product_name
+               FROM review_push_queue rq
+               JOIN products p ON p.id = rq.product_id
+               WHERE rq.user_id = ? AND rq.sent = 0
+               ORDER BY rq.send_at LIMIT 1""",
+            (user_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def drop_review_push(push_id: int) -> None:
+    """Отменяет неотправленную просьбу об отзыве — отзыв уже написан."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM review_push_queue WHERE id = ? AND sent = 0", (push_id,))
+        await db.commit()
+
+
 async def mark_review_push_sent(push_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE review_push_queue SET sent = 1 WHERE id = ?", (push_id,))

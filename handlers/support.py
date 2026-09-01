@@ -198,19 +198,33 @@ async def on_free_message(message: Message, state: FSMContext):
     if push and support_at and str(push["send_at"]) > support_at:
         support_at = None
 
-    order = None
+    order, hint = await order_hint(user_id)
+    # Отзыв пишут и не дожидаясь просьбы: заказ уже пришёл, человеку есть
+    # что сказать. Раньше такое сообщение не подхватывал никто.
+    early = None
+    if not push and not support_at and order and order.get("shipped_at"):
+        early = await db.pending_review_push(user_id)
+
     if support_at:
-        order, hint = await order_hint(user_id)
         header = client_header(message, "🆘 <b>Сообщение в поддержку</b>", hint)
         reply_text = "✅ Передал команде — ответят здесь же."
-    elif push:
+    elif push or early:
+        p = push or early
         header = client_header(message, "⭐️ <b>Отзыв о покупке</b>",
-                               f"🛍 {push['product_name']}")
+                               f"🛍 {p['product_name']}" + (f"\n{hint}" if hint else ""))
         reply_text = "Спасибо за отзыв! 🙏 Передал команде."
+    elif order:
+        # Клиент с заказом просто пишет в бота — это вопрос, а не пустота
+        header = client_header(message, "🆘 <b>Сообщение в поддержку</b>", hint)
+        reply_text = "✅ Передал команде — ответят здесь же."
     else:
         return UNHANDLED
 
     if await notify_admins(message, header, user_id, order=order):
+        if early:
+            # Отзыв уже есть — просить о нём ещё раз незачем
+            await db.drop_review_push(early["id"])
+            logger.info(f"review: {user_id} написал сам, просьбу {early['id']} отменяю")
         await message.answer(reply_text)
     else:
         await message.answer("⚠️ Не получилось отправить, попробуйте ещё раз чуть позже.")
