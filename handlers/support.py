@@ -59,28 +59,39 @@ async def relay_media(message: Message, to_bot: Bot, chat_id: int):
 
 
 async def notify_admins(message: Message, header: str, user_id: int,
-                        bot_token: str | None = None) -> bool:
+                        bot_token: str | None = None, order_id: int | None = None) -> bool:
     """Шапка + само сообщение клиента всем админам в malimadmins.
 
     Каждое отправленное сообщение регистрируем в support_messages —
     ответом (Reply) на любое из них админ отвечает клиенту.
+
+    order_id — если сообщение про конкретный заказ (например, отзыв),
+    шлём его ответом на карточку этого заказа у каждого админа, у кого
+    она есть: так отзыв сразу виден рядом с заказом, а не потерян в чате.
     """
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✍️ Ответить", callback_data=f"sup_reply:{user_id}")
     ]])
+    cards = {}
+    if order_id:
+        for m in await db.get_order_messages(order_id):
+            cards[m["chat_id"]] = m["message_id"]
     ok = False
     bot = Bot(token=bot_token or config.WAITLIST_BOT_TOKEN)
     try:
         for admin_id in config.ADMIN_IDS:
+            card_id = cards.get(admin_id)
             try:
                 if message.text:
                     sent = await bot.send_message(admin_id, f"{header}\n\n{message.text}",
-                                                  parse_mode="HTML", reply_markup=kb)
+                                                  parse_mode="HTML", reply_markup=kb,
+                                                  reply_to_message_id=card_id)
                     await db.add_support_message(admin_id, sent.message_id, user_id)
                 else:
                     # Фото/голос/документ: шапка отдельно, следом вложение
                     sent = await bot.send_message(admin_id, header, parse_mode="HTML",
-                                                  reply_markup=kb)
+                                                  reply_markup=kb,
+                                                  reply_to_message_id=card_id)
                     await db.add_support_message(admin_id, sent.message_id, user_id)
                     copy = await relay_media(message, bot, admin_id)
                     if copy:
@@ -161,17 +172,23 @@ async def on_free_message(message: Message, state: FSMContext):
     if push and support_at and str(push["send_at"]) > support_at:
         support_at = None
 
+    order_id = None
     if support_at:
         header = client_header(message, "🆘 <b>Сообщение в поддержку</b>")
         reply_text = "✅ Передал команде — ответят здесь же."
     elif push:
-        header = client_header(message, "⭐️ <b>Отзыв о покупке</b>",
-                               f"🛍 {push['product_name']}")
+        order_id = push.get("order_id")
+        extra = f"🛍 {push['product_name']}"
+        if order_id:
+            order = await db.get_order(order_id)
+            if order:
+                extra += f" · №{db.order_number_digits(order)}"
+        header = client_header(message, "⭐️ <b>Отзыв о покупке</b>", extra)
         reply_text = "Спасибо за отзыв! 🙏 Передал команде."
     else:
         return UNHANDLED
 
-    if await notify_admins(message, header, user_id):
+    if await notify_admins(message, header, user_id, order_id=order_id):
         await message.answer(reply_text)
     else:
         await message.answer("⚠️ Не получилось отправить, попробуйте ещё раз чуть позже.")

@@ -365,7 +365,7 @@ def _list_item_text(order: dict, index: int, has_card: bool,
             f"Напечатать {_pos_list(ps)}{_products_label(order, ps, total)} — {who}"
             for who, ps in by_who.items())
 
-    text = f"<b>{index}.</b> №{_order_num_digits(order)} {action}"
+    text = f"<b>{index}.</b> №{db.order_number_digits(order)} {action}"
     if not has_card:
         text += f"\n{_order_line(order, prints)}"
     return text
@@ -567,13 +567,6 @@ def _stage(order: dict, prints: list | None = None) -> tuple[str, str]:
     if order.get("assignee_id"):
         return "🧑‍🔧", "в работе"
     return "🆕", "новый"
-
-
-def _order_num_digits(order: dict) -> str:
-    """Номер заказа без букв: 'malimabi-store-007' -> '007'."""
-    code = order.get("order_code") or order.get("prodamus_order_id") or str(order["id"])
-    digits = "".join(ch for ch in str(code) if ch.isdigit())
-    return digits or str(order["id"])
 
 
 def _order_line(order: dict, prints: list | None = None) -> str:

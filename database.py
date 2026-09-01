@@ -1109,7 +1109,7 @@ async def recent_review_push(user_id: int, days: int = 21) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT rq.id, rq.product_id, rq.send_at, p.name AS product_name
+            """SELECT rq.id, rq.product_id, rq.order_id, rq.send_at, p.name AS product_name
                FROM review_push_queue rq
                JOIN products p ON p.id = rq.product_id
                WHERE rq.user_id = ? AND rq.sent = 1 AND rq.send_at >= ?
@@ -1762,6 +1762,13 @@ def parse_routing_line(summary: str) -> list:
             whos.append(None if who in ("", "не определён") else who)
         return whos
     return []
+
+
+def order_number_digits(order: dict) -> str:
+    """Номер заказа без букв: 'malimabi-store-007' -> '007'."""
+    code = order.get("order_code") or order.get("prodamus_order_id") or str(order["id"])
+    digits = "".join(ch for ch in str(code) if ch.isdigit())
+    return digits or str(order["id"])
 
 
 def order_routing(order: dict) -> list:
