@@ -114,18 +114,23 @@ async def notify_admins(message: Message, header: str, user_id: int,
     return ok
 
 
-async def order_hint(user_id: int) -> tuple[dict | None, str]:
-    """Последний заказ клиента и строка о нём для шапки вопроса."""
-    order = await db.last_order_of_user(user_id)
+def order_line(order: dict | None) -> str:
+    """Строка о заказе для шапки: номер, этап, трек."""
     if not order:
-        return None, ""
+        return ""
     nums = re.findall(r"\d+", order.get("order_code") or "")
     num = nums[-1] if nums else str(order.get("id"))
     stage = "отправлен" if order.get("shipped_at") else "в работе"
     line = f"🧾 Заказ №{num} ({stage})"
     if order.get("cdek_number"):
         line += f" · СДЭК {order['cdek_number']}"
-    return order, line
+    return line
+
+
+async def order_hint(user_id: int) -> tuple[dict | None, str]:
+    """Последний заказ клиента и строка о нём для шапки вопроса."""
+    order = await db.last_order_of_user(user_id)
+    return order, order_line(order)
 
 
 def client_header(message: Message, title: str, extra: str = "") -> str:
@@ -210,6 +215,12 @@ async def on_free_message(message: Message, state: FSMContext):
         reply_text = "✅ Передал команде — ответят здесь же."
     elif push or early:
         p = push or early
+        # Отзыв — про тот заказ, по которому просили, а не про самый свежий:
+        # у постоянного клиента их несколько, и привязка к последнему врёт
+        if p.get("order_id"):
+            asked = await db.get_order(p["order_id"])
+            if asked:
+                order, hint = asked, order_line(asked)
         header = client_header(message, "⭐️ <b>Отзыв о покупке</b>",
                                f"🛍 {p['product_name']}" + (f"\n{hint}" if hint else ""))
         reply_text = "Спасибо за отзыв! 🙏 Передал команде."
