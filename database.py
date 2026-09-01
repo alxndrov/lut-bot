@@ -1108,7 +1108,7 @@ async def recent_review_push(user_id: int, days: int = 21) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT rq.id, rq.product_id, rq.send_at, p.name AS product_name
+            """SELECT rq.id, rq.product_id, rq.order_id, rq.send_at, p.name AS product_name
                FROM review_push_queue rq
                JOIN products p ON p.id = rq.product_id
                WHERE rq.user_id = ? AND rq.sent = 1 AND rq.send_at >= ?
@@ -1128,7 +1128,7 @@ async def pending_review_push(user_id: int) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT rq.id, rq.product_id, rq.send_at, p.name AS product_name
+            """SELECT rq.id, rq.product_id, rq.order_id, rq.send_at, p.name AS product_name
                FROM review_push_queue rq
                JOIN products p ON p.id = rq.product_id
                WHERE rq.user_id = ? AND rq.sent = 0
