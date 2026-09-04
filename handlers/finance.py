@@ -27,6 +27,7 @@ from aiogram.types import (
 import config
 import database as db
 from handlers.expenses import MSK, _nav_row, _msk, _parse_amount
+from services import payout
 from services.daily_report import fetch_payments_summary
 
 router = Router()
@@ -108,11 +109,9 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
             lines.append(f"    <i>доля {share:,.2f} − уже выплачено {paid:,.2f}</i>")
         else:
             lines.append(f"👤 {name}: <b>{share:,.2f} ₽</b>")
-    lines.append(
-        f"    <i>{config.PARTNER_GOODS_PERCENT:g}% с товара {s['partner_goods']:,.2f}"
-        f" · печать {s['printed']} × {config.PARTNER_PRINT_FEE} ₽ = {s['partner_print']:,.2f}"
-        f" · цифра {config.PARTNER_DIGITAL_PERCENT:g}% = {s['partner_digital']:,.2f}</i>"
-    )
+    parts = payout.share_parts(s)
+    if parts:
+        lines.append(f"    <i>{' · '.join(parts)}</i>")
     return "\n".join(lines)
 
 
@@ -445,8 +444,8 @@ async def cb_fin_settle(callback: CallbackQuery):
         f"Продаж: <b>{s['count']}</b>  |  Принято: <b>{s['gross']:,.2f} ₽</b>\n"
         f"Чистыми: <b>{s['net']:,.2f} ₽</b>\n"
         f"{config.OWNER_NAME}: <b>{s['owner']:,.2f} ₽</b>\n"
-        f"{config.PARTNER_NAME}: <b>{s['partner']:,.2f} ₽</b> "
-        f"(печать {s['printed']} шт.)"
+        f"{config.PARTNER_NAME}: <b>{s['partner']:,.2f} ₽</b>"
+        + (f" (печать {s['printed_paid']} шт.)" if s.get("printed_paid") else "")
     )
     await callback.message.edit_text(text, parse_mode="HTML",
                                      reply_markup=_settle_menu_keyboard())

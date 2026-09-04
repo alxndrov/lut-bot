@@ -85,6 +85,12 @@ OWNER_NAME: str = os.getenv("OWNER_NAME", "Миша")
 PARTNER_GOODS_PERCENT: float = float(os.getenv("PARTNER_GOODS_PERCENT", "10"))
 PARTNER_PRINT_FEE: int = int(os.getenv("PARTNER_PRINT_FEE", "200"))
 PARTNER_DIGITAL_PERCENT: float = float(os.getenv("PARTNER_DIGITAL_PERCENT", "20"))
+# С 02.09.2026 условия по физтоварам другие: печатает всё Даня, отдельной
+# платы за печать нет, прибыль с таких заказов делится 60/40 в пользу Миши.
+# Заказы до этой даты считаются по-старому — задним числом ничего не
+# переигрываем, расчёты по ним уже проведены.
+PARTNER_GOODS_PERCENT_NEW: float = float(os.getenv("PARTNER_GOODS_PERCENT_NEW", "40"))
+NEW_SPLIT_FROM: str = os.getenv("NEW_SPLIT_FROM", "2026-09-02")      # дата по Москве
 
 # Согласие на обработку персональных данных и оферта. Пока ссылки не заданы,
 # согласие не спрашивается — бот работает как раньше.
