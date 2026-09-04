@@ -4,16 +4,17 @@
 Условия разные по линейкам и по времени:
   • физтовары до 02.09.2026 — Даня получает 10% от стоимости товара (без
     доставки) плюс 200 ₽ за каждую напечатанную им ручку;
-  • физтовары с 02.09.2026 — печатает всё Даня, отдельной платы за печать
-    нет, прибыль с таких заказов делится 60/40 в пользу Миши;
-  • цифровые товары (пресеты) — по-старому 80/20.
+  • цифровые товары (пресеты) — 80/20.
 
-Граница по дате заказа, а не по дате расчёта: период может её пересекать,
-и тогда каждая половина считается по своим условиям. Задним числом старые
-заказы не переигрываем — расчёты по ним уже проведены.
+С 02.09.2026 бизнес общий: вся ЧИСТАЯ прибыль по заказам этой эпохи
+делится 60/40 в пользу Миши. Чистая — уже за вычетом комиссии Prodamus,
+НПД, доставки в СДЭК и расходов на материалы: расходы теперь несут оба
+в той же пропорции, а не один Миша. Отдельной платы за печать нет.
 
-Из общей прибыли до дележа уходят комиссия Prodamus, НПД, доставка в СДЭК
-и расходы на материалы.
+Граница проходит по дате заказа (у расходов — по дате траты), а не по
+дате расчёта: период может её пересекать, и тогда каждая половина
+считается по своим условиям. Задним числом старые заказы не
+переигрываем — расчёты по ним уже проведены.
 """
 import logging
 from datetime import datetime, timedelta
@@ -71,6 +72,36 @@ def _before(moment: str) -> str:
             - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
 
 
+_EMPTY_ERA = {"gross": 0.0, "physical": 0.0, "digital": 0.0, "delivery": 0.0,
+              "count": 0, "fee": 0.0, "npd": 0.0, "out": 0.0, "expenses": 0.0,
+              "net": 0.0, "legacy": 0.0}
+
+
+async def era_totals(dt_from: str, dt_to: str, fee_rate: float, fee_pct: float) -> dict:
+    """Деньги за кусок периода: выручка, вычеты и чистая прибыль.
+
+    Считается по каждую сторону границы условий отдельно: доли разные, а
+    вычеты (комиссия, налог, доставка, материалы) относятся к своей эпохе
+    и делятся по её правилам.
+    """
+    if dt_from > dt_to:
+        return dict(_EMPTY_ERA)
+    goods = await db.get_period_revenue(dt_from, dt_to)
+    physical = float(goods["physical"])
+    digital = float(goods["digital"])
+    delivery = float(goods["delivery"])
+    legacy = float(goods["delivery_legacy"])
+    gross = physical + digital + delivery
+    expenses = (await db.get_expenses_summary(dt_from, dt_to))["total"]
+    fee = gross * fee_rate
+    npd = gross * NPD_RATE
+    out = delivery_out(float(goods["delivery_cost"]), legacy, fee_pct)
+    return {"gross": gross, "physical": physical, "digital": digital,
+            "delivery": delivery, "count": int(goods["count"]),
+            "fee": fee, "npd": npd, "out": out, "expenses": expenses,
+            "net": gross - fee - npd - out - expenses, "legacy": legacy}
+
+
 async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     """Полная раскладка денег и долей за период.
 
@@ -81,61 +112,46 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     fee_pct = config.PRODAMUS_FEE_PERCENT if fee_pct is None else fee_pct
     fee_rate = fee_pct / 100
 
-    goods = await db.get_period_revenue(dt_from, dt_to)
-    physical = float(goods["physical"])
-    digital = float(goods["digital"])
-    delivery = float(goods["delivery"])
-    gross = physical + digital + delivery
+    cut = split_moment()
+    was = await era_totals(dt_from, min(dt_to, _before(cut)), fee_rate, fee_pct)
+    now = await era_totals(max(dt_from, cut), dt_to, fee_rate, fee_pct)
 
-    expenses = (await db.get_expenses_summary(dt_from, dt_to))["total"]
-
-    fee = gross * fee_rate
-    npd = gross * NPD_RATE
-    out = delivery_out(float(goods["delivery_cost"]),
-                       float(goods["delivery_legacy"]), fee_pct)
-    net = gross - fee - npd - out - expenses
+    physical = was["physical"] + now["physical"]
+    digital = was["digital"] + now["digital"]
+    delivery = was["delivery"] + now["delivery"]
+    gross = was["gross"] + now["gross"]
+    fee = was["fee"] + now["fee"]
+    npd = was["npd"] + now["npd"]
+    out = was["out"] + now["out"]
+    expenses = was["expenses"] + now["expenses"]
+    net = was["net"] + now["net"]
 
     credits = await _print_credits(await _orders_in_period(dt_from, dt_to))
     printed = credits.get(config.PARTNER_ID, 0)
-
-    # Печать оплачивается отдельно только по заказам до перехода
-    cut = split_moment()
+    # Печать оплачивается отдельно только по заказам старой эпохи
     old_orders = [o for o in await _orders_in_period(dt_from, dt_to)
                   if (o.get("created_at") or "") < cut]
     printed_paid = (await _print_credits(old_orders)).get(config.PARTNER_ID, 0)
 
-    # Доля Дани — процент не с «грязной» стоимости товара, а с чистой,
+    # Старая эпоха: процент не с «грязной» стоимости товара, а с чистой,
     # после вычета комиссии Prodamus и налога НПД (доставка — транзит, в
-    # неё не входит; она в этот же расчёт входит нулём — см. ниже). Для
-    # цифры так было и раньше (digital_net), для физтоваров — тоже самое,
-    # выведено из того, что реально остаётся «К выплате» по каждому
-    # заказу в финансовом листе: (goods+доставка) минус комиссия, налог
-    # и отложенное на СДЭК — доставка при этом гасит сама себя, кроме
-    # старых заказов (до точного счёта СДЭК), где наценка на доставку не
-    # покрывала налог — оттуда и поправка на delivery_legacy.
-    digital_net = digital * (1 - fee_rate - NPD_RATE)
-    physical_net = physical * (1 - fee_rate - NPD_RATE) - float(goods["delivery_legacy"]) * NPD_RATE
+    # неё не входит). Выведено из того, что реально остаётся «К выплате»
+    # по каждому заказу в финансовом листе: (товар + доставка) минус
+    # комиссия, налог и отложенное на СДЭК — доставка при этом гасит сама
+    # себя, кроме старых заказов (до точного счёта СДЭК), где наценка на
+    # доставку не покрывала налог — оттуда и поправка на legacy.
+    # Материалы в этой эпохе целиком на Мише: они уменьшают его остаток.
+    physical_net_was = (was["physical"] * (1 - fee_rate - NPD_RATE)
+                        - was["legacy"] * NPD_RATE)
+    digital_net_was = was["digital"] * (1 - fee_rate - NPD_RATE)
 
-    # Физтовары делим на до и после перехода: условия по ним разные, а
-    # период расчёта может лежать по обе стороны границы
-    if dt_from < cut <= dt_to:
-        old_goods = await db.get_period_revenue(dt_from, _before(cut))
-        physical_old = float(old_goods["physical"])
-        legacy_old = float(old_goods["delivery_legacy"])
-    elif dt_to < cut:
-        physical_old, legacy_old = physical, float(goods["delivery_legacy"])
-    else:
-        physical_old, legacy_old = 0.0, 0.0
-
-    net_of = lambda v, legacy: v * (1 - fee_rate - NPD_RATE) - legacy * NPD_RATE
-    physical_net_old = net_of(physical_old, legacy_old)
-    physical_net_new = physical_net - physical_net_old
-
-    partner_goods = physical_net_old * config.PARTNER_GOODS_PERCENT / 100
-    partner_goods_new = physical_net_new * config.PARTNER_GOODS_PERCENT_NEW / 100
+    partner_goods = physical_net_was * config.PARTNER_GOODS_PERCENT / 100
     partner_print = printed_paid * config.PARTNER_PRINT_FEE
-    partner_digital = digital_net * config.PARTNER_DIGITAL_PERCENT / 100
-    partner = partner_goods + partner_goods_new + partner_print + partner_digital
+    partner_digital = digital_net_was * config.PARTNER_DIGITAL_PERCENT / 100
+    # Новая эпоха: бизнес общий — делим чистую прибыль целиком, вместе с
+    # расходами на материалы, а не только процент с товара
+    partner_new = now["net"] * config.PARTNER_GOODS_PERCENT_NEW / 100
+    partner = partner_goods + partner_print + partner_digital + partner_new
 
     # Уже выплаченное внутри периода: доля начисляется за весь период, но
     # часть её могли отдать раньше расчёта — частичной выплатой. Без этого
@@ -146,24 +162,24 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
 
     return {
         "gross": gross, "physical": physical, "digital": digital,
-        "delivery": delivery, "count": int(goods["count"]),
+        "delivery": delivery, "count": was["count"] + now["count"],
         "fee": fee, "fee_pct": fee_pct, "npd": npd,
         "delivery_out": out, "expenses": expenses,
         "net": net,
         "printed": printed, "print_credits": credits,
         "printed_paid": printed_paid,
-        "physical_old": physical_old, "physical_new": physical - physical_old,
+        "net_was": was["net"], "net_now": now["net"],
+        "physical_was": was["physical"], "physical_now": now["physical"],
+        "expenses_was": was["expenses"], "expenses_now": now["expenses"],
         "partner": partner, "owner": net - partner,
         "paid_partner": paid_partner, "paid_owner": paid_owner,
         "partner_left": partner - paid_partner,
         "owner_left": net - partner - paid_owner,
         "partner_goods": partner_goods,
-        "partner_goods_new": partner_goods_new,
+        "partner_new": partner_new,
         "partner_print": partner_print,
         "partner_digital": partner_digital,
     }
-
-
 def share_parts(s: dict) -> list[str]:
     """Из чего сложилась доля Дани — только ненулевые слагаемые."""
     parts = []
@@ -173,12 +189,12 @@ def share_parts(s: dict) -> list[str]:
     if s.get("partner_print"):
         parts.append(f"печать {s.get('printed_paid', s['printed'])} × "
                      f"{config.PARTNER_PRINT_FEE} ₽ = {s['partner_print']:,.2f}")
-    if s.get("partner_goods_new"):
-        parts.append(f"{config.PARTNER_GOODS_PERCENT_NEW:g}% с товара с "
-                     f"{_split_date_ru()} = {s['partner_goods_new']:,.2f}")
     if s.get("partner_digital"):
         parts.append(f"цифра {config.PARTNER_DIGITAL_PERCENT:g}% "
                      f"= {s['partner_digital']:,.2f}")
+    if s.get("partner_new"):
+        parts.append(f"{config.PARTNER_GOODS_PERCENT_NEW:g}% чистой прибыли с "
+                     f"{_split_date_ru()} = {s['partner_new']:,.2f}")
     return parts
 
 
