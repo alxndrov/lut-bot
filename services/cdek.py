@@ -11,6 +11,11 @@ CDEK_TEST_URL = "https://api.edu.cdek.ru/v2"
 
 logger = logging.getLogger(__name__)
 
+# Сколько ждём наклейку от СДЭК. Обычно она готова за считаные секунды,
+# но их очередь печати периодически встаёт — держать человека дольше
+# бессмысленно, проще отправить в кабинет.
+BARCODE_WAIT = 180
+
 
 def _split_items(items: list[dict], places: int) -> list[list[dict]]:
     """Раскладывает товары по коробкам: по одной штуке в место.
@@ -336,13 +341,18 @@ class CDEKClient:
 
     async def get_barcode_pdf(self, order_uuid: str, fmt: str = "A6",
                               copy_count: int = 1,
-                              attempts: int = 10, delay: float = 3.0) -> Optional[bytes]:
+                              wait_seconds: int = BARCODE_WAIT) -> Optional[bytes]:
         """Наклейка ШК-места заказа — готовый PDF.
 
         Форма собирается на стороне СДЭК не мгновенно: сначала уходит
         заявка, потом её статус опрашивается до SUCCESSFUL, и только тогда
         появляется ссылка на файл. Ссылка живёт около часа и требует того
         же токена, поэтому качаем сразу и отдаём байтами.
+
+        Ждём долго и с нарастающим интервалом: обычно форма готова за
+        несколько секунд, но у СДЭК бывает, что очередь печати встаёт
+        и заявка висит в ACCEPTED часами (04.09.2026 — весь день).
+        Тогда лучше честно сдаться и сказать про кабинет, чем молча ждать.
 
         fmt: A4, A5, A6 или A7. A6 — одна наклейка 105×148 мм на страницу.
         Мест в заказе может быть несколько — тогда в PDF столько же страниц.
@@ -369,8 +379,11 @@ class CDEKClient:
                     logger.error(f"CDEK get_barcode_pdf: нет uuid формы в ответе: {data}")
                     return None
 
-                for _ in range(attempts):
+                waited, delay = 0.0, 2.0
+                while waited < wait_seconds:
                     await asyncio.sleep(delay)
+                    waited += delay
+                    delay = min(delay * 1.5, 15.0)
                     resp = await session.get(
                         f"{self.base_url}/print/barcodes/{form_uuid}",
                         timeout=aiohttp.ClientTimeout(total=20),
@@ -392,10 +405,11 @@ class CDEKClient:
                             logger.error(f"CDEK get_barcode_pdf: файл не скачался, "
                                          f"код {pdf.status}")
                             return None
+                        logger.info(f"CDEK get_barcode_pdf: готово за {int(waited)} сек")
                         return await pdf.read()
 
-                logger.warning(f"CDEK get_barcode_pdf: форма не готова за "
-                               f"{int(attempts * delay)} сек, uuid={form_uuid}")
+                logger.warning(f"CDEK get_barcode_pdf: форма так и висит в очереди "
+                               f"печати СДЭК ({int(waited)} сек), uuid={form_uuid}")
         except Exception as e:
             logger.error(f"CDEK get_barcode_pdf error: {type(e).__name__}: {e}")
         return None

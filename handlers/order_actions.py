@@ -3,6 +3,7 @@
 «Взял заказ» и «Сменить исполнителя».
 Этот бот слушает только callback_query — отдельным поллингом в bot.py.
 """
+import asyncio
 import json
 import logging
 import re
@@ -895,13 +896,38 @@ async def cb_order_barcode(callback: CallbackQuery):
         await callback.answer("СДЭК не подключён.", show_alert=True)
         return
 
-    await callback.answer("Готовлю штрихкод, секунд десять…")
-    pdf = await CDEK_CLIENT.get_barcode_pdf(order["cdek_uuid"],
-                                            fmt=config.CDEK_BARCODE_FORMAT)
+    if order["id"] in _BARCODE_BUSY:
+        await callback.answer("Наклейка уже готовится — подождите.", show_alert=True)
+        return
+
+    await callback.answer("Готовлю наклейку — пришлю сюда, как СДЭК её отдаст.")
+    # Не держим обработчик: СДЭК собирает форму от пары секунд до минут,
+    # а бывает, что их очередь печати встаёт совсем. Ждём в фоне, чтобы
+    # остальные кнопки в это время работали.
+    asyncio.create_task(_deliver_barcode(callback, order, name, caption))
+
+
+_BARCODE_BUSY: set[int] = set()
+
+
+async def _deliver_barcode(callback: CallbackQuery, order: dict, name: str, caption: str):
+    from handlers.delivery import CDEK_CLIENT
+
+    _BARCODE_BUSY.add(order["id"])
+    try:
+        pdf = await CDEK_CLIENT.get_barcode_pdf(order["cdek_uuid"],
+                                                fmt=config.CDEK_BARCODE_FORMAT)
+    except Exception as e:
+        logger.error(f"barcode {name}: {type(e).__name__}: {e}")
+        pdf = None
+    finally:
+        _BARCODE_BUSY.discard(order["id"])
+
     if not pdf:
         await callback.message.answer(
-            f"⚠️ СДЭК не отдал штрихкод по заказу {name}. "
-            f"Нажмите ещё раз или распечатайте из кабинета СДЭК."
+            f"⚠️ СДЭК не отдал наклейку по заказу {name} — у них зависла очередь "
+            f"печати форм. Нажмите позже или распечатайте из кабинета СДЭК "
+            f"(накладная {order.get('cdek_number') or '—'})."
         )
         return
 
