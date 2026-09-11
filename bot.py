@@ -10,7 +10,7 @@ import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
-from handlers import support, support_admin, logo
+from handlers import support, support_admin, logo, reviews
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop, monthly_report_loop
 from services.funnel import funnel_worker
@@ -84,6 +84,7 @@ async def main():
         admin_dp.include_router(finance.router)
         admin_dp.include_router(debug_cmd.router)
         admin_dp.include_router(consumables.router)
+        admin_dp.include_router(reviews.router)
         admin_dp.include_router(support_admin.router)
         # Последним: ловит присланный файл, который не забрал никто
         admin_dp.include_router(logo.router)
@@ -96,17 +97,13 @@ async def main():
         # Команда видна в меню бота
         try:
             await admin_bot.set_my_commands([
-                BotCommand(command="myorders", description="Мои заказы"),
-                BotCommand(command="allorders", description="Все заказы и статусы"),
-                BotCommand(command="sentorders", description="Отправленные заказы"),
-                BotCommand(command="refresh", description="Обновить карточки заказов"),
+                BotCommand(command="orders", description="📋 Заказы в работе"),
+                BotCommand(command="sentorders", description="📦 Отправленные заказы"),
                 BotCommand(command="finance", description="💳 Финансы: выручка, расчёт, касса"),
-                # /expense в меню не выносим — внести расход можно кнопкой
-                # прямо на экране /expenses
-                BotCommand(command="expenses", description="🧾 Расходы за месяц"),
-                BotCommand(command="cdek", description="🚚 Счета СДЭК"),
                 BotCommand(command="stock", description="📦 Расходники"),
-                BotCommand(command="debug", description="Отладка заказа (код или id)"),
+                BotCommand(command="reviews", description="⭐️ Отзывы клиентов"),
+                # Остальные команды работают, но в меню не выносятся, чтобы
+                # не разрасталось: /expenses, /cdek, /expense, /refresh, /debug
             ])
         except Exception as e:
             logging.warning(f"Не удалось задать команды админского бота: {e}")

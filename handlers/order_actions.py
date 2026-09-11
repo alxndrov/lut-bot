@@ -635,36 +635,6 @@ async def _send_list(message: Message, orders: list, start_index: int,
     return i
 
 
-@router.message(Command("allorders"))
-async def cmd_all_orders(message: Message):
-    """Все заказы в работе — свои и напарника, ответами на карточки."""
-    if message.from_user.id not in config.ADMIN_IDS:
-        return
-    await _ensure_admin_names()
-
-    orders = await db.get_orders(only_unshipped=True)
-    if not orders:
-        await message.answer("📋 Неотправленных заказов нет — всё разослано 🎉")
-        return
-    orders.sort(key=lambda o: o.get("created_at") or "")
-
-    by_person: dict[str, list] = {}
-    for o in orders:
-        by_person.setdefault(o.get("assignee_name") or "ничей", []).append(o)
-
-    await message.answer(f"📋 <b>Все заказы в работе — {len(orders)}</b>",
-                         parse_mode="HTML")
-    _forget_lists(message.chat.id)
-    cards = await _cards_in_chat(orders, message.chat.id)
-
-    i = 1
-    mine = _ADMIN_NAMES.get(message.from_user.id)
-    for who, items in sorted(by_person.items(), key=lambda kv: -len(kv[1])):
-        mark = " (ты)" if who == mine else ""
-        await message.answer(f"👤 <b>{who}</b>{mark} — {len(items)}", parse_mode="HTML")
-        i = await _send_list(message, items, i, cards, mode="all")
-
-
 @router.message(Command("refresh"))
 async def cmd_refresh(message: Message):
     """Перерисовать карточки заказов в работе.
@@ -706,24 +676,20 @@ async def cmd_sent_orders(message: Message):
     await _send_list(message, shown, 1, cards, mode="sent")
 
 
-@router.message(Command("myorders"))
-async def cmd_my_orders(message: Message):
-    """Список заказов, ждущих действия — ответами на исходные карточки.
+# /myorders и /allorders — прежние имена той же команды. Печатает теперь
+# один человек, делить список «мои/все» стало не на что, но старые имена
+# оставлены рабочими: они разосланы в переписке и висят в привычке.
+@router.message(Command("orders", "myorders", "allorders"))
+async def cmd_orders(message: Message):
+    """Заказы в работе — ответами на исходные карточки.
 
     Сам заказ повторно не пересказываем: Telegram покажет процитированную
     карточку, а мы дописываем только номер и что с ним делать.
     """
-    uid = message.from_user.id
-    if uid not in config.ADMIN_IDS:
+    if message.from_user.id not in config.ADMIN_IDS:
         return
 
-    orders = await db.get_orders(only_unshipped=True)
-    # Показываем заказ каждому, кто его печатает: в заказе с разными
-    # позициями печатают оба, и он не должен потеряться ни у кого.
-    todo = [o for o in orders
-            if o.get("assignee_id") == uid
-            or uid in db.printer_ids(o)
-            or not o.get("assignee_id")]
+    todo = await db.get_orders(only_unshipped=True)
     # Старые сверху — обрабатываем по очереди поступления
     todo.sort(key=lambda o: o.get("created_at") or "")
 
@@ -731,7 +697,7 @@ async def cmd_my_orders(message: Message):
         await message.answer("📋 Заказов в работе нет — всё разослано 🎉")
         return
 
-    await message.answer(f"📋 <b>Твои заказы: {len(todo)}</b>", parse_mode="HTML")
+    await message.answer(f"📋 <b>Заказы в работе: {len(todo)}</b>", parse_mode="HTML")
 
     _forget_lists(message.chat.id)
     cards = await _cards_in_chat(todo, message.chat.id)

@@ -341,6 +341,24 @@ async def init_db():
         # Строки заранее не заводим: расходники есть у того, кто печатает и
         # отправляет, а это не обязательно все админы. Строка появляется,
         # когда человек первый раз пополняет запас или списывает расход.
+        # Отзывы клиентов. Раньше отзыв только пересылался админам и нигде
+        # не оседал — посмотреть их все было негде, а сообщение в чате
+        # легко теряется. Текст храним у себя, вложение — ссылкой на
+        # file_id основного бота (у админского бота свои id, см. relay_media).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS reviews (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                username   TEXT,
+                first_name TEXT,
+                order_id   INTEGER,
+                product_id INTEGER,
+                text       TEXT,
+                media_kind TEXT,
+                file_id    TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -904,6 +922,50 @@ async def set_consumable_qty(user_id: int, key: str, qty: int) -> None:
             "UPDATE consumables SET qty = ? WHERE user_id = ? AND key = ?",
             (max(0, int(qty)), user_id, key))
         await db.commit()
+
+
+async def add_review(user_id: int, username: str | None, first_name: str | None,
+                     order_id: int | None, product_id: int | None,
+                     text: str | None, media_kind: str | None = None,
+                     file_id: str | None = None, created_at: str | None = None) -> int:
+    """Сохраняет отзыв. created_at задаём только при переносе старых записей."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        if created_at:
+            cur = await db.execute(
+                "INSERT INTO reviews (user_id, username, first_name, order_id, "
+                "product_id, text, media_kind, file_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, username, first_name, order_id, product_id, text,
+                 media_kind, file_id, created_at))
+        else:
+            cur = await db.execute(
+                "INSERT INTO reviews (user_id, username, first_name, order_id, "
+                "product_id, text, media_kind, file_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (user_id, username, first_name, order_id, product_id, text,
+                 media_kind, file_id))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_reviews(limit: int = 10, offset: int = 0) -> list[dict]:
+    """Отзывы, свежие сверху, с номером заказа и названием товара."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.*, o.order_code, p.name AS product_name
+               FROM reviews r
+               LEFT JOIN orders o ON o.id = r.order_id
+               LEFT JOIN products p ON p.id = r.product_id
+               ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?""",
+            (limit, offset),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def count_reviews() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM reviews")
+        return (await cur.fetchone())[0]
 
 
 async def add_support_message(chat_id: int, message_id: int, user_id: int) -> None:

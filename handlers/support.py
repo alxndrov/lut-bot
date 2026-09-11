@@ -178,6 +178,34 @@ async def on_support_message(message: Message, state: FSMContext):
     await message.answer("✅ Вопрос отправлен! Как только ответят — пришлю сюда.")
 
 
+_MEDIA_KINDS = ("photo", "video", "voice", "video_note", "animation",
+                "audio", "document")
+
+
+async def _save_review(message: Message, order: dict | None, product_id: int | None):
+    """Кладёт отзыв в базу — чтобы их можно было посмотреть все разом (/reviews).
+
+    Вложение храним как file_id ОСНОВНОГО бота: именно он его получил, и
+    только он может его переслать (у админского бота свои id).
+    """
+    kind = file_id = None
+    for attr in _MEDIA_KINDS:
+        obj = getattr(message, attr, None)
+        if obj:
+            kind = attr
+            obj = obj[-1] if isinstance(obj, (list, tuple)) else obj
+            file_id = obj.file_id
+            break
+    u = message.from_user
+    try:
+        await db.add_review(
+            user_id=u.id, username=u.username, first_name=u.first_name,
+            order_id=(order or {}).get("id"), product_id=product_id,
+            text=message.text or message.caption, media_kind=kind, file_id=file_id)
+    except Exception as e:
+        logger.error(f"review save ({u.id}): {type(e).__name__}: {e}")
+
+
 # --- Свободное сообщение клиента ---
 # Человеку неоткуда знать про /help: он просто пишет в бот — в ответ на
 # просьбу об отзыве или продолжая начатую переписку с поддержкой. Раньше
@@ -232,6 +260,8 @@ async def on_free_message(message: Message, state: FSMContext):
         return UNHANDLED
 
     if await notify_admins(message, header, user_id, order=order):
+        if push or early:
+            await _save_review(message, order, (push or early).get("product_id"))
         if early:
             # Отзыв уже есть — просить о нём ещё раз незачем
             await db.drop_review_push(early["id"])
