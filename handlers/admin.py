@@ -135,10 +135,6 @@ class PackageSetup(StatesGroup):
     height = State()
 
 
-class SurveyRouting(StatesGroup):
-    waiting_text = State()
-
-
 class SurveyPaid(StatesGroup):
     waiting_text = State()
 
@@ -2541,68 +2537,6 @@ async def fsm_survey_edit(message: Message, state: FSMContext):
         await _album_collect(message, state, "edit")
         return
     await _save_survey_edit([message], state, message)
-
-
-@router.callback_query(F.data.startswith("admin:survey_router:"))
-async def cb_survey_router(callback: CallbackQuery):
-    if not await admin_only(callback):
-        return
-    parts = callback.data.split(":")   # admin : survey_router : qid : pid
-    qid, pid = int(parts[2]), int(parts[3])
-    on = await db.toggle_router_question(pid, qid)
-    await _render_survey(callback, pid)
-    await callback.answer("🎨 Это вопрос-цвет (по нему определяем, кто печатает)" if on
-                          else "Снял пометку вопроса-цвета")
-
-
-@router.callback_query(F.data.startswith("admin:survey_routing:"))
-async def cb_survey_routing(callback: CallbackQuery, state: FSMContext):
-    if not await admin_only(callback):
-        return
-    pid = int(callback.data.split(":")[2])
-    product = await db.get_product(pid)
-    current = product.get("order_routing_text") if product else None
-    questions = await db.get_product_questions(pid)
-    has_router = any(q.get("is_router") for q in questions)
-    now = f"\n\nСейчас:\n<code>{current}</code>" if current else "\n\n<i>Пока не задано.</i>"
-    warn = "" if has_router else ("\n\n⚠️ Сначала пометьте вопрос-цвет кнопкой 🎨 "
-                                  "в списке вопросов — по нему определяется номер цвета.")
-    await state.set_state(SurveyRouting.waiting_text)
-    await state.update_data(product_id=pid)
-    await callback.message.edit_text(
-        "🖨 <b>Кто печатает — по номеру цвета</b>\n\n"
-        "Пришли распределение по строкам «Имя: номера». Пример:\n"
-        "<code>Даня: 1, 2, 3, 13\nПартнёр: 4, 5, 6, 12</code>\n\n"
-        "Если печатает кто-то один — <code>Даня: *</code>. Звёздочка значит "
-        "«все цвета, кроме расписанных поимённо», и новый цвет не останется ничьим.\n\n"
-        "В заказе появится строка «🖨 Печатает: …» по номеру цвета из ответа клиента."
-        f"{now}{warn}\n\n"
-        "Отправь <code>-</code> — чтобы отключить.",
-        parse_mode="HTML",
-        reply_markup=product_back_keyboard(pid),
-    )
-    await callback.answer()
-
-
-@router.message(SurveyRouting.waiting_text)
-async def fsm_survey_routing(message: Message, state: FSMContext):
-    if not is_admin(message.from_user.id):
-        return
-    text = (message.text or message.caption or "").strip()
-    data = await state.get_data()
-    pid = data["product_id"]
-    if text == "-":
-        await db.set_order_routing_text(pid, None)
-        note = "🖨 Распределение отключено."
-    elif not text:
-        await message.answer("Пусто. Пришли строки «Имя: номера» или <code>-</code>.", parse_mode="HTML")
-        return
-    else:
-        await db.set_order_routing_text(pid, text)
-        note = "✅ Распределение сохранено."
-    await state.clear()
-    product = await db.get_product(pid)
-    await message.answer(note, reply_markup=admin_product_keyboard(product))
 
 
 @router.callback_query(F.data.startswith("admin:survey_paid:"))

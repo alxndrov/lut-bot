@@ -178,43 +178,20 @@ def _msk(ts: str | None) -> str:
         return ""
 
 
-def _routing_render(whos: list) -> str:
-    """Строка «кто печатает» для карточки заказа."""
-    if not whos:
-        return ""
-    if len(whos) == 1:
-        return f"🖨 <b>Печатает:</b> {whos[0] or 'не определён'}"
-    if len(set(whos)) == 1 and whos[0]:
-        return f"🖨 <b>Печатает:</b> {whos[0]}"   # весь заказ у одного
-    parts = [f"Поз.{i} — {w or 'не определён'}" for i, w in enumerate(whos, 1)]
-    return "🖨 <b>Печать:</b> " + " · ".join(parts)
-
-
 # Разбор строки печати из текста заказа живёт в database — им пользуется
 # и расчёт долей, которому до обработчиков дела нет
 parse_routing_line = db.parse_routing_line
 
 
-def _with_routing(summary: str, whos: list) -> str:
-    """Подменяет в тексте заказа строку печати на актуальную разметку."""
-    line = _routing_render(whos)
-    if not line:
-        return summary
-    out, replaced = [], False
-    for ln in (summary or "").split("\n"):
-        if ln.startswith("🖨 <b>Печат"):
-            if not replaced:
-                out.append(line)
-                replaced = True
-            continue
-        out.append(ln)
-    if not replaced:
-        out.insert(1, line)      # сразу под заголовком с номером заказа
-    return "\n".join(out)
+def _without_routing_line(summary: str) -> str:
+    """Убирает строку «🖨 Печатает: …» — она осталась в тексте старых заказов,
+    а исполнитель и так виден в строке «Взял в работу»."""
+    return "\n".join(ln for ln in (summary or "").split("\n")
+                     if not ln.startswith("🖨 <b>Печат"))
 
 
 def _order_text(order: dict, prints: list | None = None) -> str:
-    text = _with_routing(order["summary"], db.order_routing(order))
+    text = _without_routing_line(order["summary"])
     if order.get("repeat_of_order_id") and order.get("repeat_created_by_name"):
         text += ("\n🔁 <b>Повтор оформил:</b> "
                  + html.escape(order["repeat_created_by_name"]))

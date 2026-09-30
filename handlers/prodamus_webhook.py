@@ -263,11 +263,10 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
 
         # Полное уведомление о заказе — только сейчас, после успешной оплаты.
         # Идёт в админский бот (malimadmins) с кнопкой «Взял заказ».
-        whos = await _routing_whos(round_products, products_by_id, rounds)
+        whos = await _default_whos(len(rounds))
         summary = _format_order(
             first_name, username_str, product["name"], amount,
             delivery_info, rounds, now, order_number=order_code,
-            routing_line=_routing_line(whos),
             round_products=round_products, products_by_id=products_by_id,
         )
         order_row_id = await db.create_order(
@@ -347,56 +346,6 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         logger.error(f"prodamus: неизвестный order_type={order_type!r}")
 
     return True
-
-
-def norm_question(text: str) -> str:
-    """Текст вопроса для сравнения: без разницы в пробелах и пустых строках.
-
-    Ответы клиента хранятся вместе с текстом вопроса на момент заказа, а в
-    настройках товара текст живёт отдельно. Стоит поправить в вопросе
-    лишнюю пустую строку — и точное сравнение перестаёт находить ответ:
-    распределение молча выдаёт «печатающий не определён» (так вышло с
-    вопросом-распределителем кейса).
-    """
-    return " ".join((text or "").split()).casefold()
-
-
-def find_answer(answers: list, question_text: str) -> str | None:
-    """Ответ клиента на этот вопрос: сначала точно, затем без учёта пробелов."""
-    for a in answers:
-        if a.get("q") == question_text:
-            return a.get("text")
-    target = norm_question(question_text)
-    for a in answers:
-        if norm_question(a.get("q")) == target:
-            return a.get("text")
-    return None
-
-
-def _parse_routing(text: str) -> dict:
-    """'Даня: 1,2,3\\nПартнёр: 4,5' -> {'1':'Даня','2':'Даня',...,'4':'Партнёр',...}
-
-    Вместо номеров можно написать «*» — тогда этому человеку достаётся
-    всё, что не расписано поимённо. Нужно, когда печатает кто-то один:
-    иначе новый цвет не попадает ни в один список и позиция остаётся ничьей.
-    """
-    import re
-    result = {}
-    for line in (text or "").splitlines():
-        if ":" not in line:
-            continue
-        name, nums = line.split(":", 1)
-        name = name.strip()
-        if "*" in nums:
-            result["*"] = name
-        for n in re.findall(r"\d+", nums):
-            result[n] = name
-    return result
-
-
-def routing_lookup(rmap: dict, num: str | None) -> str | None:
-    """Кто печатает этот номер цвета: точное правило, иначе «*»."""
-    return (rmap.get(num) if num else None) or rmap.get("*")
 
 
 async def _create_cdek_order(order_row_id: int, pending: dict, round_products: list[int],
@@ -553,43 +502,19 @@ async def _send_track_to_client(bot: Bot, client_id: int, order_number: str,
         logger.error(f"CDEK: не отправить трек клиенту {client_id}: {e}")
 
 
-async def _routing_whos(round_products: list[int], products_by_id: dict, rounds: list) -> list:
-    """Кто печатает каждую позицию — по номеру цвета из вопроса-распределителя
-    ЕЁ СОБСТВЕННОГО товара (в смешанном заказе у разных товаров могут быть
-    разные распределители и разные списки печатающих)."""
-    import re
-    # Ни у одного товара заказа не настроена печать по разметке — не
-    # показываем строку «Печатает» вовсе (как раньше для обычного товара)
-    if not any((products_by_id.get(pid) or {}).get("order_routing_text")
-              for pid in set(round_products)):
+async def _default_whos(positions: int) -> list:
+    """Кто печатает каждую позицию: все позиции — партнёру (config.PARTNER_ID).
+
+    Раньше печатающего выбирали по номеру цвета (настройка «Кто печатает»
+    в карточке товара), но печатает один человек, и настройку убрали.
+    Разметка позиций по-прежнему нужна: по ней отмечается печать и
+    передаются позиции напарнику.
+    """
+    admin = await db.get_admin_by_id(config.PARTNER_ID)
+    if not admin or not admin.get("username"):
+        logger.warning(f"routing: у партнёра {config.PARTNER_ID} нет ника — заказ без исполнителя")
         return []
-    questions_cache: dict[int, list] = {}
-    rmap_cache: dict[int, dict] = {}
-
-    async def who(pid: int, answers: list):
-        product = products_by_id.get(pid)
-        routing = product.get("order_routing_text") if product else None
-        if not routing:
-            return None
-        if pid not in questions_cache:
-            questions_cache[pid] = await db.get_product_questions(pid)
-        router_q = next((q for q in questions_cache[pid] if q.get("is_router")), None)
-        # Товару без распределителя (например, «из наличия») достаётся «*»
-        if not router_q and not db.is_stock_product(product):
-            return None
-        if pid not in rmap_cache:
-            rmap_cache[pid] = _parse_routing(routing)
-        val = (find_answer(answers, router_q["text"]) or "") if router_q else ""
-        nums = re.findall(r"\d+", val)
-        return routing_lookup(rmap_cache[pid], nums[0] if nums else None)
-
-    return [await who(pid, answers) for pid, answers in zip(round_products, rounds)]
-
-
-def _routing_line(whos: list) -> str:
-    """Строка «кто печатает» — рисуется там же, где перерисовывается карточка."""
-    from handlers.order_actions import _routing_render
-    return _routing_render(whos)
+    return [f"@{admin['username']}"] * max(1, positions)
 
 
 async def _printer_admins(whos: list) -> list[dict]:
@@ -614,17 +539,15 @@ async def _printer_admins(whos: list) -> list[dict]:
 
 def _format_order(first_name: str, username_str: str, product_name: str, amount: int,
                   delivery_info: str, rounds: list, now: str, order_number: str = "",
-                  routing_line: str = "", round_products: list[int] | None = None,
+                  round_products: list[int] | None = None,
                   products_by_id: dict | None = None) -> str:
-    """Уведомление о заказе: номер, кто печатает, покупатель, товар, ответы, доставка."""
+    """Уведомление о заказе: номер, покупатель, товар, ответы, доставка."""
     multi = len(rounds) > 1
     mixed = bool(round_products) and len(set(round_products)) > 1
     head = "🧾 <b>Новый заказ</b>"
     if order_number:
         head += f" <code>{order_number}</code>"
     lines = ["<b>ТАЦ!</b> 🪿", head]
-    if routing_line:
-        lines.append(routing_line)
     lines += ["", f"👤 {first_name} {username_str}"]
     if mixed and products_by_id:
         order_ids = list(dict.fromkeys(round_products))

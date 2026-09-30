@@ -221,7 +221,7 @@ def _package_label(product: dict) -> str:
 
 
 def _physical_settings_rows(product: dict) -> list[list[InlineKeyboardButton]]:
-    """Доставка, распределение по печати и текст после оплаты — только физтовары."""
+    """Доставка и текст после оплаты — только физтовары."""
     pid = product["id"]
     delivery_on = bool(product.get("survey_delivery_text"))
     if config.CDEK_ENABLED:
@@ -230,15 +230,11 @@ def _physical_settings_rows(product: dict) -> list[list[InlineKeyboardButton]]:
     else:
         delivery_label = "🚚 Доставка: ✅ вкл" if delivery_on else "🚚 Доставка: не задана"
 
-    routing_on = bool(product.get("order_routing_text"))
-    routing_label = "🖨 Кто печатает: ✅ задано" if routing_on else "🖨 Кто печатает: не задано"
-
     paid_on = bool(product.get("post_payment_text"))
     paid_label = "💬 После оплаты: ✅ своё" if paid_on else "💬 После оплаты: по умолчанию"
 
     return [
         [InlineKeyboardButton(text=delivery_label, callback_data=f"admin:survey_delivery:{pid}")],
-        [InlineKeyboardButton(text=routing_label, callback_data=f"admin:survey_routing:{pid}")],
         [InlineKeyboardButton(text=paid_label, callback_data=f"admin:survey_paid:{pid}")],
     ]
 
@@ -358,15 +354,12 @@ def product_submenu_survey(product: dict, questions: list[dict]) -> InlineKeyboa
         qid = q["id"]
         short = q["text"] if len(q["text"]) <= 28 else q["text"][:27] + "…"
         pic = "📷 " if q.get("photo_id") else ""
-        router = "🎨 " if q.get("is_router") else ""
         # заголовок-вопрос (клик просто обновляет экран) + строка управления
         rows.append([InlineKeyboardButton(
-            text=f"{i + 1}. {router}{pic}{short}", callback_data=f"admin:psub:survey:{pid}",
+            text=f"{i + 1}. {pic}{short}", callback_data=f"admin:psub:survey:{pid}",
         )])
         controls = [
             InlineKeyboardButton(text="✏️", callback_data=f"admin:survey_edit:{qid}:{pid}"),
-            InlineKeyboardButton(text="🎨" if not q.get("is_router") else "🎨✅",
-                                 callback_data=f"admin:survey_router:{qid}:{pid}"),
         ]
         if i > 0:
             controls.append(InlineKeyboardButton(text="⬆️", callback_data=f"admin:survey_up:{qid}:{pid}"))

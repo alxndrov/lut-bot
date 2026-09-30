@@ -927,36 +927,6 @@ async def delete_product_question(question_id: int):
         await db.commit()
 
 
-async def toggle_router_question(product_id: int, question_id: int) -> bool:
-    """Помечает вопрос как «распределитель» (по его ответу определяется исполнитель).
-    Такой вопрос может быть только один на товар. Возвращает новое состояние."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT is_router FROM product_questions WHERE id = ?", (question_id,)
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            return False
-        new_state = 0 if row[0] else 1
-        if new_state:
-            await db.execute(
-                "UPDATE product_questions SET is_router = 0 WHERE product_id = ?", (product_id,)
-            )
-        await db.execute(
-            "UPDATE product_questions SET is_router = ? WHERE id = ?", (new_state, question_id)
-        )
-        await db.commit()
-        return bool(new_state)
-
-
-async def set_order_routing_text(product_id: int, text: str | None):
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE products SET order_routing_text = ? WHERE id = ?", (text, product_id)
-        )
-        await db.commit()
-
-
 async def set_post_payment_text(product_id: int, text: str | None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
