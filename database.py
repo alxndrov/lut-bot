@@ -589,6 +589,18 @@ async def init_db():
                 await db.execute(f"ALTER TABLE {table} ADD COLUMN round_products_json TEXT DEFAULT NULL")
             except Exception:
                 pass
+        # Варианты товара в наличии (готовые экземпляры: цвет, модель).
+        # Если у товара есть варианты, клиент первым шагом опроса выбирает
+        # один из тех, что ещё остались; остаток списывается после оплаты.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS product_variants (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
+                name TEXT NOT NULL,
+                stock INTEGER NOT NULL DEFAULT 0
+            )
+        """)
         await db.commit()
 
 
@@ -601,6 +613,17 @@ async def get_all_products(active_only=True) -> list[dict]:
         async with db.execute(f"SELECT * FROM products {condition} ORDER BY id") as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def get_catalog_products(include_hidden: bool = False) -> list[dict]:
+    """Товары каталога. Клиенту не показываем скрытые и распроданные
+    товары «из наличия» (у которых все варианты разобраны)."""
+    products = await get_all_products(active_only=not include_hidden)
+    if include_hidden:
+        return products
+    return [p for p in products
+            if not await get_product_variants(p["id"])
+            or await get_product_variants(p["id"], in_stock_only=True)]
 
 
 async def get_product(product_id: int) -> Optional[dict]:
@@ -670,7 +693,57 @@ async def delete_product(product_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("DELETE FROM products WHERE id = ?", (product_id,))
         await db.execute("DELETE FROM product_questions WHERE product_id = ?", (product_id,))
+        await db.execute("DELETE FROM product_variants WHERE product_id = ?", (product_id,))
         await db.commit()
+
+
+# --- Варианты товара в наличии ---
+
+async def get_product_variants(product_id: int, in_stock_only: bool = False) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        cond = " AND stock > 0" if in_stock_only else ""
+        async with db.execute(
+            f"SELECT * FROM product_variants WHERE product_id = ?{cond} ORDER BY position, id",
+            (product_id,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_product_variant(variant_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM product_variants WHERE id = ?", (variant_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def add_product_variant(product_id: int, name: str, stock: int = 1) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(MAX(position), 0) + 1 FROM product_variants WHERE product_id = ?",
+            (product_id,),
+        ) as cur:
+            pos = int((await cur.fetchone())[0])
+        cursor = await db.execute(
+            "INSERT INTO product_variants (product_id, position, name, stock) VALUES (?, ?, ?, ?)",
+            (product_id, pos, name, stock),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def take_variant_stock(variant_id: int) -> bool:
+    """Списывает один экземпляр. False — его уже не было (продан дважды)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE product_variants SET stock = stock - 1 WHERE id = ? AND stock > 0",
+            (variant_id,),
+        )
+        await db.commit()
+        return cur.rowcount > 0
 
 
 # --- Вопросы опроса (пошаговый ТЗ физического товара) ---

@@ -34,6 +34,22 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
         return
 
     category = product.get("category", "digital")
+
+    # Товар «из наличия»: показываем, что осталось; распроданный — не продаём
+    stock_line = ""
+    variants = await db.get_product_variants(product_id)
+    if variants:
+        in_stock = [v for v in variants if v["stock"] > 0]
+        if not in_stock and not admin:
+            await callback.answer("😔 Всё разобрали — в наличии ничего не осталось.",
+                                  show_alert=True)
+            return
+        if in_stock:
+            stock_line = (f"📦 В наличии: <b>{sum(v['stock'] for v in in_stock)} шт</b>\n"
+                          + "\n".join(f"• {v['name']}" for v in in_stock) + "\n\n")
+        else:
+            stock_line = "📦 В наличии: <b>0 шт</b> — всё разобрали\n\n"
+
     purchase_count = await db.get_product_purchase_count(product_id)
     effective_price = await db.get_effective_price(product)
 
@@ -43,7 +59,9 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
     elif category == "physical":
         category_label = ""
         # Заказ оформляется прямо здесь — сразу объясняем, что будет дальше
-        if await db.get_product_questions(product_id):
+        if variants:
+            file_status = "🛒 Для оформления заказа выберите вариант ниже 👇"
+        elif await db.get_product_questions(product_id):
             file_status = (
                 "🛒 Для оформления заказа ответьте на несколько вопросов ниже — "
                 "это займёт минуту.\nОтвет можно писать текстом или прикреплять фото."
@@ -93,6 +111,7 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
     text = (
         f"<b>{product['name']}</b>\n\n"
         f"{desc_block}"
+        f"{stock_line}"
         f"{counter_line}"
         f"💰 Цена: <b>{effective_price} ₽</b>\n"
         f"{label_line}"

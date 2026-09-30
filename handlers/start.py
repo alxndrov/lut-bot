@@ -113,7 +113,7 @@ async def cmd_start(message: Message):
         await _start_funnel(message.from_user.id, payload)
 
     admin = message.from_user.id in ADMIN_IDS
-    products = await db.get_all_products(active_only=not admin)
+    products = await db.get_catalog_products(include_hidden=admin)
     banner_file_id = await db.get_setting("catalog_banner_file_id")
 
     if not products:
@@ -171,7 +171,7 @@ async def show_catalog(message_or_callback, edit=False, user_id: int | None = No
         )
     import config as _config
     admin = user_id in _config.ADMIN_IDS
-    products = await db.get_all_products(active_only=not admin)
+    products = await db.get_catalog_products(include_hidden=admin)
     banner_file_id = await db.get_setting("catalog_banner_file_id")
 
     if not products:

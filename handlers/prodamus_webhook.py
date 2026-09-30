@@ -210,6 +210,27 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
                 products_by_id[pid] = await db.get_product(pid) or product
         await db.delete_pending_delivery(user_id, product_id)
 
+        # Списываем проданные экземпляры «из наличия». Резерва до оплаты нет,
+        # поэтому один и тот же последний экземпляр могли оплатить двое —
+        # об этом сразу говорим админам, чтобы связались с клиентом.
+        for answers in rounds:
+            for a in answers:
+                vid = a.get("variant_id")
+                if vid and not await db.take_variant_stock(vid):
+                    await _send_notify(bot, (
+                        f"⚠️ <b>Оплачен вариант, которого уже нет в наличии</b>\n\n"
+                        f"👤 {first_name} {username_str}\n"
+                        f"🛍 {a.get('text')}\n"
+                        f"Свяжитесь с клиентом: замена или возврат."
+                    ))
+        for pid in set(round_products):
+            if (await db.get_product_variants(pid)
+                    and not await db.get_product_variants(pid, in_stock_only=True)):
+                await _send_notify(bot, (
+                    f"📦 «{products_by_id[pid]['name']}» — всё распродано, "
+                    f"товар скрыт из каталога."
+                ))
+
         # Доставка внутри суммы — транзит, в выручку не идёт. Разные товары
         # заказа — отдельной строкой purchases на каждый (для отчёта «по
         # товарам» и доли партнёра); доставка целиком уходит в первую
@@ -549,11 +570,12 @@ async def _routing_whos(round_products: list[int], products_by_id: dict, rounds:
         if pid not in questions_cache:
             questions_cache[pid] = await db.get_product_questions(pid)
         router_q = next((q for q in questions_cache[pid] if q.get("is_router")), None)
-        if not router_q:
+        # Товару без распределителя (например, «из наличия») достаётся «*»
+        if not router_q and not await db.get_product_variants(pid):
             return None
         if pid not in rmap_cache:
             rmap_cache[pid] = _parse_routing(routing)
-        val = find_answer(answers, router_q["text"]) or ""
+        val = (find_answer(answers, router_q["text"]) or "") if router_q else ""
         nums = re.findall(r"\d+", val)
         return routing_lookup(rmap_cache[pid], nums[0] if nums else None)
 
