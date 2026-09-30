@@ -1,17 +1,4 @@
-"""
-Финансы в админском боте (malimadmins): один экран /finance — пульс продаж,
-взаиморасчёт с Даней и кассовый остаток вместе, без прыжков по разным
-командам. Расходы и СДЭК остаются отдельными экранами — это не отчёты,
-а свои процессы (внести расход, отметить оплату счёта).
-
-Раньше «Выручка», «Взаиморасчёт» и «Касса» были тремя разными кнопками —
-запутывало: непонятно, чем «Расчёт» отличается от «Кассы». Теперь это один
-текст на одном экране, друг под другом, а разница просто видна по подписям
-(начислено vs реально оплачено).
-
-История расчётов не переезжает — это та же таблица settlements в той же
-БД, что и раньше: какой бот её читает и пишет, не имеет значения.
-"""
+"""Финансовое меню: отдельные экраны выручки, кассы, налогов и расчётов."""
 import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
@@ -26,9 +13,10 @@ from aiogram.types import (
 
 import config
 import database as db
-from handlers.expenses import MSK, _nav_row, _msk, _parse_amount
+from handlers.expenses import MSK, _msk, _parse_amount
 from services import payout
 from services.daily_report import fetch_payments_summary
+from services import tax_account
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -38,6 +26,7 @@ _NPD_RATE = config.NPD_PERCENT / 100
 
 class CashStates(StatesGroup):
     waiting_payout = State()
+    waiting_npd = State()
 
 
 def _dative(name: str) -> str:
@@ -87,7 +76,7 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
     if s["delivery"]:
         lines.append(f"  доставка: {s['delivery']:,.2f} ₽")
     lines.append(f"Комиссия {s['fee_pct']}%: −{s['fee']:,.2f} ₽")
-    lines.append(f"НПД {config.NPD_PERCENT:g}%: −{s['npd']:,.2f} ₽")
+    lines.append(f"НПД с учётом исправлений: −{s['npd']:,.2f} ₽")
     if s["delivery"]:
         lines.append(f"Доставка в СДЭК: −{s['delivery_out']:,.2f} ₽")
     if s["expenses"]:
@@ -99,14 +88,20 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
     ]
     # Если часть доли уже отдали внутри периода — показываем остаток, иначе
     # цифра выглядит как долг, которого на самом деле уже нет
-    for name, share, paid, left in (
-        (config.OWNER_NAME, s["owner"], s.get("paid_owner", 0), s.get("owner_left", s["owner"])),
-        (config.PARTNER_NAME, s["partner"], s.get("paid_partner", 0),
+    for name, share, reimb, paid, left in (
+        (config.OWNER_NAME, s["owner"], s.get("reimb_owner", 0), s.get("paid_owner", 0),
+         s.get("owner_left", s["owner"])),
+        (config.PARTNER_NAME, s["partner"], s.get("reimb_partner", 0), s.get("paid_partner", 0),
          s.get("partner_left", s["partner"])),
     ):
-        if paid:
+        if paid or reimb:
             lines.append(f"👤 {name}: <b>{left:,.2f} ₽</b>  ← осталось выплатить")
-            lines.append(f"    <i>доля {share:,.2f} − уже выплачено {paid:,.2f}</i>")
+            detail = f"доля {share:,.2f}"
+            if reimb:
+                detail += f" + возместить личные траты {reimb:,.2f}"
+            if paid:
+                detail += f" − уже выплачено {paid:,.2f}"
+            lines.append(f"    <i>{detail}</i>")
         else:
             lines.append(f"👤 {name}: <b>{share:,.2f} ₽</b>")
     parts = payout.share_parts(s)
@@ -205,16 +200,14 @@ async def _free_to_payout(dt_from: str, dt_to: str, now_utc: datetime) -> tuple[
     s = await payout_svc.split(dt_from, dt_to)
     if not s or not s["count"]:
         return 0.0, 0.0, 0.0, 0.0
-    cdek_paid = await db.get_cdek_payments_summary(dt_from, dt_to)
-    npd_paid = await db.get_npd_payments_summary(dt_from, dt_to)
+    npd_paid_for_period = await db.get_npd_payments_summary_by_tax_month(dt_from, dt_to)
     payouts = await db.get_payouts_summary(dt_from, dt_to)
     pending_net = (await _pending_gross(dt_from, dt_to, now_utc)) * (1 - s["fee_pct"] / 100)
 
     cash = (s["gross"] - s["fee"] - s["expenses"]
-            - float(cdek_paid["total"]) - float(npd_paid["total"])
             - payouts["total"] - pending_net)
-    owe_cdek = max(0.0, s["delivery_out"] - float(cdek_paid["total"]))
-    owe_npd = max(0.0, s["npd"] - float(npd_paid["total"]))
+    owe_cdek = max(0.0, s["delivery_out"])
+    owe_npd = max(0.0, s["npd"] - float(npd_paid_for_period["total"]))
     return cash - owe_cdek - owe_npd, cash, owe_cdek, owe_npd
 
 
@@ -223,18 +216,17 @@ async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
     """«Взаиморасчёт» выше — начисление: сколько ДОЛЖНО уйти на налог, СДЭК
     и доли партнёров. Здесь — сколько реально ушло (по вашим отметкам),
     сколько Prodamus реально перевёл (см. pending_gross) и сколько поэтому
-    реально должно быть на счету прямо сейчас."""
+    сколько свободно по текущему периоду после резервов."""
     payouts = await db.get_payouts_summary(dt_from, dt_to)
     # Комиссия с ещё не переведённой части — плоская оценка по общей ставке
     # периода, точнее взять неоткуда (Prodamus не отдаёт комиссию по заказу)
     pending_net = pending_gross * (1 - s["fee_pct"] / 100)
 
-    cash = (s["gross"] - s["fee"] - s["expenses"]
-            - float(cdek_paid["total"]) - float(npd_paid["total"]) - payouts["total"]
-            - pending_net)
+    npd_paid_for_period = await db.get_npd_payments_summary_by_tax_month(dt_from, dt_to)
+    cash = (s["gross"] - s["fee"] - s["expenses"] - payouts["total"] - pending_net)
 
     lines = [
-        "💰 <b>Касса</b> — реальные деньги на счету, не доля прибыли выше",
+        "💰 <b>Касса</b> — деньги периода после фактических расходов",
         "─" * 30,
     ]
     if pending_net:
@@ -248,13 +240,12 @@ async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
     if payouts["total"]:
         by = " · ".join(f"{name} {amt:,.2f} ₽" for name, amt in payouts["by_recipient"].items())
         lines.append(f"Выплачено партнёрам: −{payouts['total']:,.2f} ₽ ({by})")
-    owe_cdek = max(0.0, s["delivery_out"] - float(cdek_paid["total"]))
-    owe_npd = max(0.0, s["npd"] - float(npd_paid["total"]))
+    owe_cdek = max(0.0, s["delivery_out"])
+    owe_npd = max(0.0, s["npd"] - float(npd_paid_for_period["total"]))
     free = cash - owe_cdek - owe_npd
     lines += [
         "─" * 30,
-        f"💰 <b>Ожидаемый остаток на счету: {cash:,.2f} ₽</b>",
-        "<i>сверьте с выпиской банка</i>",
+        f"💰 <b>Деньги периода до резервов: {cash:,.2f} ₽</b>",
         "",
         f"🔒 Из них зарезервировано: СДЭК {owe_cdek:,.2f} ₽ · НПД {owe_npd:,.2f} ₽",
         f"✅ <b>Свободно к выплате: {free:,.2f} ₽</b>" if free > 0
@@ -265,8 +256,7 @@ async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
 
 
 async def _finance_pulse_text() -> str:
-    """Пульс продаж — сегодня/неделя/месяц/всё время, без долей и расчётов
-    (та часть — ниже, во «Взаиморасчёте» и «Кассе» одного и того же экрана)."""
+    """Отдельный экран принятых платежей за несколько периодов."""
     now_utc = datetime.now(timezone.utc)
     today_from = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
 
@@ -323,37 +313,23 @@ async def _settle_split() -> tuple[dict | None, dict | None, str, str, datetime]
     return s, last_settlement, dt_from, dt_to, now_utc
 
 
-async def _debt_and_cash_text() -> tuple[str, bool]:
-    """«Взаиморасчёт» + касса одним текстом — везде, где показывается
-    взаиморасчёт (главный экран «Финансы» и подменю «🤝 Взаиморасчёт»),
-    чтобы не приходилось скакать между экранами за половиной цифр."""
-    s, last_settlement, dt_from, dt_to, now_utc = await _settle_split()
-    debt_text, cdek_paid, npd_paid, pending_gross = await _debt_block(
-        s, last_settlement, dt_from, dt_to, now_utc)
-    has_debt = bool(s and s["count"] > 0)
-
-    parts = [debt_text]
-    if has_debt:
-        parts.append(await _cash_block_text(s, dt_from, dt_to, cdek_paid, npd_paid, pending_gross))
-
-    return "\n\n".join(parts), has_debt
-
-
-async def _finance_full() -> tuple[str, bool]:
-    """Весь экран «Финансы»: пульс продаж + взаиморасчёт + касса одним текстом."""
-    pulse = await _finance_pulse_text()
-    debt_and_cash, has_debt = await _debt_and_cash_text()
-    return f"{pulse}\n\n{debt_and_cash}", has_debt
-
-
 def _finance_keyboard() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text="🤝 Взаиморасчёт", callback_data="fin_settle_menu")],
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💳 Принятые платежи", callback_data="fin_revenue")],
+        [InlineKeyboardButton(text="🤝 Взаиморасчёт", callback_data="fin_settle_menu"),
+         InlineKeyboardButton(text="💰 Касса", callback_data="fin_cash")],
         [InlineKeyboardButton(text="🧾 НПД", callback_data="cash_log"),
-         InlineKeyboardButton(text="🔄 Обновить", callback_data="fin_show")],
-    ]
-    rows += _nav_row("show")
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+         InlineKeyboardButton(text="🚚 СДЭК", callback_data="cdek_show")],
+        [InlineKeyboardButton(text="🧾 Расходы", callback_data="exp_show"),
+         InlineKeyboardButton(text="📦 Расходники", callback_data="stk_show")],
+        [InlineKeyboardButton(text="📊 Сводки", callback_data="fin_reports")],
+    ])
+
+
+def _back_to_finance_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ Назад", callback_data="fin_show")
+    ]])
 
 
 def _settle_menu_keyboard() -> InlineKeyboardMarkup:
@@ -362,7 +338,7 @@ def _settle_menu_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.OWNER_NAME)}", callback_data="payout:owner")],
         [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.PARTNER_NAME)}", callback_data="payout:partner")],
         [InlineKeyboardButton(text="📋 История взаиморасчётов", callback_data="settle_log")],
-        [InlineKeyboardButton(text="◀️ К финансам", callback_data="fin_show")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="fin_show")],
     ])
 
 
@@ -374,7 +350,7 @@ async def _admin_only(callback: CallbackQuery) -> bool:
 
 
 async def _show_finance(message: Message):
-    text, _ = await _finance_full()
+    text = "💳 <b>Финансы</b>\n\nВыберите раздел:"
     markup = _finance_keyboard()
     try:
         await message.edit_text(text, parse_mode="HTML", reply_markup=markup)
@@ -383,11 +359,12 @@ async def _show_finance(message: Message):
 
 
 @router.message(Command("finance"))
-async def cmd_finance(message: Message):
+async def cmd_finance(message: Message, state: FSMContext):
     if message.from_user.id not in config.ADMIN_IDS:
         return
-    m = await message.answer("⏳ Загружаю данные…")
-    await _show_finance(m)
+    await state.clear()
+    await message.answer("💳 <b>Финансы</b>\n\nВыберите раздел:",
+                         parse_mode="HTML", reply_markup=_finance_keyboard())
 
 
 @router.callback_query(F.data == "fin_show")
@@ -396,7 +373,6 @@ async def cb_fin_show(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.answer()
-    await callback.message.edit_text("⏳ Загружаю данные…")
     await _show_finance(callback.message)
 
 
@@ -406,8 +382,9 @@ async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.answer()
-    text, _ = await _debt_and_cash_text()
-    await callback.message.answer(
+    s, last, start, end, now = await _settle_split()
+    text, *_ = await _debt_block(s, last, start, end, now)
+    await callback.message.edit_text(
         text,
         parse_mode="HTML",
         reply_markup=_settle_menu_keyboard(),
@@ -436,16 +413,40 @@ async def cb_fin_settle(callback: CallbackQuery):
         )
         return
 
+    # «Мы в расчёте» = обоим перевели их остаток за период. Записываем эти
+    # переводы выплатами — иначе они есть только в банковской выписке, и
+    # сверка счёта не сходится. Время ставим на секунду раньше расчёта,
+    # чтобы выплата попала в закрываемый период, а не в следующий.
+    u = callback.from_user
+    name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
+    paid_at = (now_utc - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
+    now_msk = datetime.now(MSK)
+    comment = f"Мы в расчёте {now_msk.strftime('%d.%m.%Y')}"
+    from services.gsheets import request_expense_append
+    share_lines, overpaid = [], []
+    for recipient, left, reimb in (
+        (config.OWNER_NAME, s["owner_left"], s.get("reimb_owner", 0)),
+        (config.PARTNER_NAME, s["partner_left"], s.get("reimb_partner", 0)),
+    ):
+        if left >= 0.01:
+            left = round(left, 2)
+            payout_id = await db.add_payout(recipient, left, comment, u.id, name, paid_at=paid_at)
+            request_expense_append(f"payout-{payout_id}", now_msk.strftime("%d.%m.%Y %H:%M"),
+                                   left, f"Выплата {recipient}: {comment}")
+            note = f", в т.ч. возмещение личных трат {reimb:,.2f} ₽" if reimb else ""
+            share_lines.append(f"👤 {recipient}: <b>{left:,.2f} ₽</b> — записал выплату{note}")
+        elif left <= -0.01:
+            overpaid.append(f"⚠️ {recipient} за период получил на <b>{-left:,.2f} ₽</b> больше доли")
+        else:
+            share_lines.append(f"👤 {recipient}: уже всё выплачено")
+
     await db.add_settlement(gross=s["gross"], fee=s["fee"], net=s["net"], count=s["count"])
 
-    now_msk = datetime.now(MSK).strftime("%d.%m.%Y %H:%M")
     text = (
-        f"✅ <b>Расчёт зафиксирован</b> — {now_msk} МСК\n\n"
+        f"✅ <b>Расчёт зафиксирован</b> — {now_msk.strftime('%d.%m.%Y %H:%M')} МСК\n\n"
         f"Продаж: <b>{s['count']}</b>  |  Принято: <b>{s['gross']:,.2f} ₽</b>\n"
-        f"Чистыми: <b>{s['net']:,.2f} ₽</b>\n"
-        f"{config.OWNER_NAME}: <b>{s['owner']:,.2f} ₽</b>\n"
-        f"{config.PARTNER_NAME}: <b>{s['partner']:,.2f} ₽</b>"
-        + (f" (печать {s['printed_paid']} шт.)" if s.get("printed_paid") else "")
+        f"Чистыми: <b>{s['net']:,.2f} ₽</b>\n\n"
+        + "\n".join(share_lines + overpaid)
     )
     await callback.message.edit_text(text, parse_mode="HTML",
                                      reply_markup=_settle_menu_keyboard())
@@ -457,12 +458,14 @@ async def cb_npd_delete(callback: CallbackQuery):
         return
     payment_id = int(callback.data.split(":")[1])
     deleted = await db.delete_npd_payment(payment_id)
+    from services.gsheets import request_finance_sync
+    request_finance_sync()
     await callback.answer("Удалено 🗑" if deleted else "Эта запись уже удалена")
     try:
         await callback.message.edit_text(
             "🗑 <s>Оплата НПД удалена</s>", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="💳 Финансы", callback_data="fin_show")
+                InlineKeyboardButton(text="◀️ Назад", callback_data="cash_log")
             ]]),
         )
     except Exception:
@@ -478,7 +481,7 @@ async def cb_payout_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(CashStates.waiting_payout)
     await state.update_data(recipient=recipient)
     await callback.answer()
-    await callback.message.answer(
+    await callback.message.edit_text(
         f"👤 <b>Сколько выплатили {_dative(recipient)}?</b>\n\nНапишите сумму, можно с комментарием:\n"
         "<code>15000 за июль</code>",
         parse_mode="HTML",
@@ -523,7 +526,7 @@ async def on_payout_amount(message: Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"payout_del:{payout_id}")],
-            [InlineKeyboardButton(text="◀️ К взаиморасчёту", callback_data="fin_settle_menu")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="fin_settle_menu")],
         ]),
     )
 
@@ -534,79 +537,97 @@ async def cb_payout_delete(callback: CallbackQuery):
         return
     payout_id = int(callback.data.split(":")[1])
     deleted = await db.delete_payout(payout_id)
+    from services.gsheets import request_finance_sync
+    request_finance_sync()
     await callback.answer("Удалено 🗑" if deleted else "Эта запись уже удалена")
     try:
         await callback.message.edit_text(
             "🗑 <s>Выплата удалена</s>", parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="◀️ К взаиморасчёту", callback_data="fin_settle_menu")
+                InlineKeyboardButton(text="◀️ Назад", callback_data="fin_settle_menu")
             ]]),
         )
     except Exception:
         pass
 
 
-async def _cash_log_render() -> tuple[str, InlineKeyboardMarkup]:
-    npd = await db.get_npd_payments(limit=10)
-    payouts = await db.get_payouts(limit=10)
-    revenue_by_month = await db.get_revenue_by_month(limit=6)
-    npd_paid_by_month = {r["month"]: r for r in await db.get_npd_payments_by_month(limit=12)}
-
-    lines = ["🧾 <b>НПД</b>"]
-    months = []  # (month_key, mm.yyyy, оплачен_ли) — для кнопок ниже
-
-    if revenue_by_month:
-        lines.append("\n<b>По месяцам:</b>")
-        for row in revenue_by_month:
-            month_key = row["month"] or "____-__"
-            year, month = month_key.split("-")
-            accrued = float(row["gross"]) * _NPD_RATE
-            paid_row = npd_paid_by_month.get(month_key)
-            paid = float(paid_row["total"]) if paid_row else 0.0
-            mark = "✅" if paid >= accrued - 0.5 else ("◻️" if paid == 0 else "⏳")
-            lines.append(f"  {mark} {month}.{year}: начислено <b>{accrued:,.2f} ₽</b>, "
-                         f"оплачено {paid:,.2f} ₽")
-            months.append((month_key, f"{month}.{year}", mark == "✅"))
-
-    if npd:
-        lines.append("\n<b>Отдельные платежи:</b>")
-        for p in npd:
-            comment = f" — {p['comment']}" if p.get("comment") else ""
-            who = f" · {p['user_name']}" if p.get("user_name") else ""
-            lines.append(f"  {_msk(p['paid_at'])} 💸 {float(p['amount']):,.2f} ₽{comment}{who}")
-    if payouts:
-        lines.append("\n<b>Выплаты партнёрам:</b>")
-        for p in payouts:
-            comment = f" — {p['comment']}" if p.get("comment") else ""
-            lines.append(f"  {_msk(p['paid_at'])} 👤 {p['recipient']}: "
-                         f"{float(p['amount']):,.2f} ₽{comment}")
-    if not npd and not payouts:
-        lines.append("\nПока пусто.")
-
+async def _cash_log_render(page: int = 0) -> tuple[str, InlineKeyboardMarkup]:
+    months = await tax_account.months()
+    page = max(0, min(page, max(0, (len(months) - 1) // 6)))
+    lines = ["🧾 <b>НПД</b>", "\n<b>По месяцам:</b>"]
     rows = []
-    for key, label, is_paid in months:
-        row = [InlineKeyboardButton(text=f"🔍 Детали {label}", callback_data=f"npd_detail:{key}")]
-        if not is_paid:
-            row.append(InlineKeyboardButton(text=f"✅ {label} оплачен", callback_data=f"npd_markpaid:{key}"))
-        rows.append(row)
-    rows += [[InlineKeyboardButton(
-        text=f"🗑 НПД {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
-        callback_data=f"npd_del:{p['id']}")] for p in npd[:5]]
-    rows += [[InlineKeyboardButton(
-        text=f"🗑 {p['recipient']} {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
-        callback_data=f"payout_del:{p['id']}")] for p in payouts[:5]]
-    rows.append([InlineKeyboardButton(text="◀️ К финансам", callback_data="fin_show")])
-
+    for r in months[page * 6:(page + 1) * 6]:
+        key = r['month']
+        label = f"{key[5:]}.{key[:4]}"
+        paid = r['paid'] > 0 and r['paid'] >= r['accrued'] - 0.005
+        mark = "✅" if paid else "◻️"
+        manual = " · вручную" if r['manual'] else " · авторасчёт"
+        lines.append(f"{mark} {label}: <b>{r['accrued']:,.2f} ₽</b>{manual}\n"
+                     f"Оплачено: {r['paid']:,.2f} ₽")
+        rows.append([InlineKeyboardButton(text=f"{mark} {label} · {r['accrued']:,.2f} ₽", callback_data=f"npd_detail:{key}")])
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton(text="⬅️ Новее", callback_data=f"npd_page:{page-1}"))
+    if (page + 1) * 6 < len(months):
+        nav.append(InlineKeyboardButton(text="Старее ➡️", callback_data=f"npd_page:{page+1}"))
+    if nav:
+        rows.append(nav)
+    if not months:
+        lines.append("Пока нет начислений.")
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="fin_show")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-@router.callback_query(F.data == "cash_log")
-async def cb_cash_log(callback: CallbackQuery):
+@router.callback_query((F.data == "cash_log") | F.data.startswith("npd_page:"))
+async def cb_cash_log(callback: CallbackQuery, state: FSMContext):
     if not await _admin_only(callback):
         return
+    await state.clear()
     await callback.answer()
+    page = int(callback.data.split(":")[1]) if ":" in callback.data else 0
+    text, markup = await _cash_log_render(page)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+@router.callback_query(F.data.startswith("npd_edit:"))
+async def cb_npd_edit(callback: CallbackQuery, state: FSMContext):
+    if not await _admin_only(callback):
+        return
+    month = callback.data.split(":", 1)[1]
+    row = await tax_account.assessment(month)
+    if not row or (row['paid'] > 0 and row['paid'] >= row['accrued'] - 0.005):
+        await callback.answer("Месяц уже оплачен или не найден", show_alert=True)
+        return
+    await state.set_state(CashStates.waiting_npd)
+    await state.update_data(npd_month=month)
+    await callback.answer()
+    await callback.message.edit_text(
+        f"Введите полную сумму НПД за {month[5:]}.{month[:4]} в рублях.\n"
+        f"Сейчас: {row['accrued']:,.2f} ₽. Уже оплачено: {row['paid']:,.2f} ₽.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="Отмена", callback_data="cash_log")]]))
+
+
+@router.message(CashStates.waiting_npd)
+async def on_npd_amount(message: Message, state: FSMContext):
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    try:
+        amount = tax_account.parse_amount(message.text or "")
+    except ValueError as e:
+        await message.answer(str(e))
+        return
+    data = await state.get_data()
+    try:
+        await tax_account.edit(data['npd_month'], amount, message.from_user.id)
+    except ValueError as e:
+        await message.answer(str(e))
+        return
+    from services.gsheets import request_finance_sync
+    request_finance_sync()
+    await state.clear()
     text, markup = await _cash_log_render()
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+    await message.answer("✅ Сумма сохранена.\n\n" + text, parse_mode="HTML", reply_markup=markup)
 
 
 def _msk_dt(ts: str | None) -> str:
@@ -619,6 +640,25 @@ def _msk_dt(ts: str | None) -> str:
         return ""
 
 
+def _npd_detail_lines(month: str, purchases: list[dict], assessment: dict | None) -> list[str]:
+    year, mm = month.split("-", 1) if "-" in month else ("", month)
+    total = sum(float(p["amount"]) for p in purchases)
+    accrued = total * _NPD_RATE
+    current = float(assessment["accrued"]) if assessment else accrued
+    paid = float(assessment["paid"]) if assessment else 0.0
+    source = "вручную" if assessment and assessment["manual"] else "авторасчёт"
+
+    lines = [
+        f"🧾 <b>НПД за {mm}.{year}</b>",
+        f"Продаж: <b>{len(purchases)}</b> на <b>{total:,.2f} ₽</b>",
+        f"Сумма НПД: <b>{current:,.2f} ₽</b> · {source}",
+        f"Оплачено: <b>{paid:,.2f} ₽</b>",
+    ]
+    if assessment and assessment["manual"] and abs(current - accrued) >= 0.005:
+        lines.append(f"Автооценка бота: {accrued:,.2f} ₽")
+    return lines
+
+
 @router.callback_query(F.data.startswith("npd_detail:"))
 async def cb_npd_detail(callback: CallbackQuery):
     """Покупки за месяц по отдельности — сверить с чеками в «Мой налог»,
@@ -627,30 +667,30 @@ async def cb_npd_detail(callback: CallbackQuery):
         return
     month = callback.data.split(":", 1)[1]
     purchases = await db.get_purchases_by_month(month)
-    year, mm = month.split("-", 1) if "-" in month else ("", month)
-    total = sum(float(p["amount"]) for p in purchases)
-    accrued = total * _NPD_RATE
+    assessment = await tax_account.assessment(month)
+    lines = _npd_detail_lines(month, purchases, assessment)
 
-    lines = [
-        f"🔍 <b>Покупки за {mm}.{year}</b> — {len(purchases)} шт. на <b>{total:,.2f} ₽</b>",
-        f"НПД с них (оценка бота): <b>{accrued:,.2f} ₽</b>",
-        "<i>время в МСК — сверяйте с датой чека в «Мой налог», не с датой в интерфейсе Prodamus</i>",
-        "",
-    ]
-    for p in purchases:
-        buyer = (f"@{p['username']}" if p.get("username")
-                else (p.get("first_name") or f"id:{p.get('user_id')}"))
-        name = p.get("product_name") or "—"
-        lines.append(f"  {_msk_dt(p['created_at'])} · {float(p['amount']):,.2f} ₽ · {name} · {buyer}")
-    if not purchases:
-        lines.append("  Пусто.")
+    rows = []
+    if assessment:
+        paid = assessment['paid'] > 0 and assessment['paid'] >= assessment['accrued'] - 0.005
+        if not paid:
+            actions = [InlineKeyboardButton(text="✏️ Исправить сумму", callback_data=f"npd_edit:{month}")]
+            if assessment['accrued'] > assessment['paid']:
+                actions.append(InlineKeyboardButton(text="✅ Отметить оплаченным", callback_data=f"npd_markpaid:{month}"))
+            rows.append(actions)
+        payments = await db.get_npd_payments(limit=20, tax_month=month)
+        if payments:
+            lines.append("\n<b>Оплаты за этот месяц:</b>")
+            for p in payments:
+                lines.append(f"{_msk(p['paid_at'])}: {p['amount']:,.2f} ₽")
+                rows.append([InlineKeyboardButton(text=f"🗑 Удалить оплату {_msk(p['paid_at'])} · {p['amount']:,.2f} ₽",
+                                                  callback_data=f"npd_del:{p['id']}")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="cash_log")])
 
     await callback.answer()
-    await callback.message.answer(
+    await callback.message.edit_text(
         "\n".join(lines), parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="◀️ К истории", callback_data="cash_log")
-        ]]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
 
@@ -661,29 +701,24 @@ async def cb_npd_markpaid(callback: CallbackQuery):
     if not await _admin_only(callback):
         return
     month = callback.data.split(":", 1)[1]
-    revenue = await db.get_revenue_by_month(limit=24)
-    row = next((r for r in revenue if r["month"] == month), None)
-    if not row:
-        await callback.answer("За этот месяц продаж не найдено.", show_alert=True)
-        return
-    accrued = float(row["gross"]) * _NPD_RATE
-    if accrued <= 0:
-        await callback.answer("Начислять нечего.", show_alert=True)
-        return
-
     u = callback.from_user
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
-    year, mm = month.split("-", 1) if "-" in month else ("", month)
-    payment_id = await db.add_npd_payment(
-        accrued, f"начислено за {mm}.{year}, отмечено оплаченным",
-        u.id, name, paid_at=f"{month}-28 12:00:00")
+    try:
+        payment_id, accrued = await tax_account.mark_paid(month, u.id, name)
+    except ValueError as e:
+        await callback.answer(str(e), show_alert=True)
+        return
+    if payment_id is None:
+        await callback.answer("Этот месяц уже закрыт", show_alert=True)
+        return
+    year, mm = month.split("-")
 
     from services.gsheets import request_expense_append
     request_expense_append(f"npd-{payment_id}", datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
                            accrued, f"Налог НПД за {mm}.{year}")
     await callback.answer(f"Отмечено: {mm}.{year} оплачен ✅")
     text, markup = await _cash_log_render()
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 async def _settle_log_render() -> tuple[str, InlineKeyboardMarkup]:
@@ -708,7 +743,7 @@ async def _settle_log_render() -> tuple[str, InlineKeyboardMarkup]:
     rows = [[InlineKeyboardButton(
         text=f"🗑 {p['recipient']} {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
         callback_data=f"payout_del:{p['id']}")] for p in payouts[:5]]
-    rows.append([InlineKeyboardButton(text="◀️ К взаиморасчёту", callback_data="fin_settle_menu")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="fin_settle_menu")])
 
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -719,41 +754,107 @@ async def cb_settle_log(callback: CallbackQuery):
         return
     await callback.answer()
     text, markup = await _settle_log_render()
-    await callback.message.answer(text, parse_mode="HTML", reply_markup=markup)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 @router.message(Command("gsheets_backfill"))
 async def cmd_gsheets_backfill(message: Message):
-    """Разовая команда: переносит уже накопленные операции (приходы —
-    физ- и цифровые товары, расходы — траты и выплаты партнёрам) в
-    финансовый лист Google Таблицы (новые операции туда и так пишутся
-    сами по мере появления, см. prodamus_webhook.py/expenses.py/finance.py).
-    Идемпотентна — можно жать сколько угодно раз, уже перенесённые
-    операции не задвоятся."""
+    """Полная сверка: новые операции, изменения, отмены и сводка."""
     if message.from_user.id not in config.ADMIN_IDS:
         return
     if not config.GSHEETS_ENABLED:
-        await message.answer("Google Таблица не настроена — нет GOOGLE_SHEET_ID в .env.")
+        await message.answer("Google Таблица не настроена.")
         return
-
-    rows = await db.get_cashflow_export_rows(config.ADMIN_IDS, config.PARTNER_ID)
-    if not rows:
-        await message.answer("Операций в базе не нашлось — переносить нечего.")
-        return
-
-    m = await message.answer(f"⏳ Переношу операции в лист «{config.GOOGLE_SHEET_FINANCE_TAB}»…")
+    m = await message.answer("⏳ Сверяю финансовую таблицу с базой…")
     try:
-        from services.gsheets import backfill_finance_rows, SheetsError
-        added, skipped = await asyncio.to_thread(backfill_finance_rows, rows)
-    except SheetsError as e:
-        await m.edit_text(f"❌ Не удалось выгрузить: {e}")
+        from services.finance_sheet import sync_finance
+        stats = await sync_finance()
+    except Exception:
+        logger.exception("gsheets_backfill: сверка не удалась")
+        await m.edit_text("❌ Сверка не завершена. Автоматическая сверка повторит попытку.")
         return
-    except Exception as e:
-        logger.exception("gsheets_backfill: неожиданная ошибка")
-        await m.edit_text(f"❌ Неожиданная ошибка: {type(e).__name__}: {e}")
-        return
+    await m.edit_text(
+        f"✅ Таблица сверена. Добавлено: {stats['added']}, обновлено: {stats['updated']}.\n"
+        f"Исключено из расчёта: отменённых {stats['cancelled']}, дублей {stats['duplicates']}."
+    )
 
-    text = f"✅ Готово. Добавлено новых строк: <b>{added}</b>"
-    if skipped:
-        text += f"\nУже было в листе (пропущено): {skipped}"
-    await m.edit_text(text, parse_mode="HTML")
+
+@router.callback_query(F.data == "fin_revenue")
+async def cb_fin_revenue(callback: CallbackQuery, state: FSMContext):
+    if not await _admin_only(callback):
+        return
+    await state.clear()
+    await callback.answer()
+    await callback.message.edit_text(await _finance_pulse_text(), parse_mode="HTML",
+                                     reply_markup=_back_to_finance_keyboard())
+
+
+@router.callback_query(F.data == "fin_cash")
+async def cb_fin_cash(callback: CallbackQuery, state: FSMContext):
+    if not await _admin_only(callback):
+        return
+    await state.clear()
+    await callback.answer()
+    _, _, start, end, now = await _settle_split()
+    s = await payout.split(start, end)
+    text = await _cash_block_text(s, start, end,
+        await db.get_cdek_payments_summary(start, end),
+        await db.get_npd_payments_summary(start, end),
+        await _pending_gross(start, end, now))
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=_back_to_finance_keyboard())
+
+
+@router.callback_query((F.data == 'fin_reports') | F.data.startswith('fin_reports_page:'))
+async def cb_fin_reports(callback: CallbackQuery, state: FSMContext):
+    if not await _admin_only(callback):
+        return
+    await state.clear()
+    await callback.answer()
+    from services import finance_reports as reports
+    page = int(callback.data.split(':')[1]) if ':' in callback.data else 0
+    saved = await reports.history(page)
+    rows = [[InlineKeyboardButton(text=reports.period_label(data), callback_data=f'fin_report:{rid}')]
+            for rid, data in saved[:10]]
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton(text='⬅️ Новее', callback_data=f'fin_reports_page:{page-1}'))
+    if len(saved) > 10:
+        nav.append(InlineKeyboardButton(text='Старее ➡️', callback_data=f'fin_reports_page:{page+1}'))
+    if nav:
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text='◀️ Назад', callback_data='fin_show')])
+    text = (f'📊 Сводки создаются 15-го и в последний день месяца в {config.DAILY_REPORT_HOUR_MSK:02d}:00 МСК.\n'
+            'Каждая — за период после предыдущей сводки.')
+    if not saved:
+        text += '\n\nСохранённых сводок пока нет.'
+    await callback.message.edit_text(text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data.startswith('fin_report:'))
+async def cb_fin_report(callback: CallbackQuery):
+    if not await _admin_only(callback):
+        return
+    from services import finance_reports as reports
+    rid = int(callback.data.split(':')[1])
+    data = await reports.get(rid)
+    if not data:
+        await callback.answer('Сводка не найдена', show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.edit_text(reports.render(data), parse_mode='HTML', reply_markup=reports.keyboard(rid))
+
+
+@router.callback_query(F.data.startswith('fin_xlsx:'))
+async def cb_fin_xlsx(callback: CallbackQuery):
+    if not await _admin_only(callback):
+        return
+    from aiogram.types import BufferedInputFile
+    from services import finance_reports as reports
+    rid = int(callback.data.split(':')[1])
+    data = await reports.get(rid)
+    if not data:
+        await callback.answer('Сводка не найдена', show_alert=True)
+        return
+    await callback.answer()
+    content = await asyncio.to_thread(reports.xlsx, data)
+    await callback.message.answer_document(BufferedInputFile(content, filename=f'finance-{data["end"][:10]}-{rid}.xlsx'))

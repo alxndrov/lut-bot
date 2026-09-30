@@ -418,22 +418,26 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
     adopt_existing — сперва поискать заявку по номеру заказа: на таймауте
                      она могла создаться, и второй такой же делать нельзя.
     """
-    from handlers.delivery import CDEK_CLIENT
+    from services.cdek_accounts import CURRENT_CONTRACT, client_for_order
+
+    # Сохраняем выбор даже при таймауте создания: повтор проверит тот же договор.
+    order = await db.bind_order_cdek_contract(order_row_id, CURRENT_CONTRACT)
+    client = client_for_order(order)
 
     pvz_code = (pending or {}).get("pvz_code")
     name = (pending or {}).get("recipient_name")
     phone = (pending or {}).get("recipient_phone")
 
     missing = [n for n, v in (("ПВЗ", pvz_code), ("ФИО", name), ("телефон", phone)) if not v]
-    if not CDEK_CLIENT or missing:
-        reason = "СДЭК не настроен" if not CDEK_CLIENT else f"не хватает данных: {', '.join(missing)}"
+    if not client or missing:
+        reason = "СДЭК не настроен для договора заказа" if not client else f"не хватает данных: {', '.join(missing)}"
         logger.warning(f"CDEK order {order_number}: пропускаю — {reason}")
         if notify_fail:
             await _send_notify(None, (
                 f"⚠️ Заказ <code>{order_number}</code>: накладная СДЭК не создана "
                 f"({reason}). Заведите отправление вручную."
             ))
-        return True              # не хватает данных — повторять бессмысленно
+        return bool(client)     # отсутствие ключей оставляем для повторной попытки
 
     items, packages = [], []
     for pid in round_products:
@@ -454,12 +458,12 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
 
     uuid = None
     if adopt_existing:
-        found = await CDEK_CLIENT.find_order_by_number(order_number)
+        found = await client.find_order_by_number(order_number)
         if found:
             uuid = found["uuid"]
             logger.info(f"CDEK order {order_number}: заявка уже есть ({uuid}), "
                         f"новую не создаём")
-    uuid = uuid or await CDEK_CLIENT.create_order(
+    uuid = uuid or await client.create_order(
         number=order_number,
         shipment_point=config.CDEK_SHIPMENT_POINT,
         delivery_point=pvz_code,
@@ -482,7 +486,7 @@ async def _create_cdek_order(order_row_id: int, pending: dict, round_products: l
     # Создание асинхронное — ждём результат, но недолго
     for _ in range(6):
         await asyncio.sleep(5)
-        info = await CDEK_CLIENT.get_order_info(uuid)
+        info = await client.get_order_info(uuid)
         if not info:
             continue
         if info["state"] == "SUCCESSFUL":

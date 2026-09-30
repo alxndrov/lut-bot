@@ -14,7 +14,7 @@ from aiogram.types import (BufferedInputFile, CallbackQuery, InlineKeyboardButto
 
 import config
 import database as db
-from handlers.expenses import MSK, _nav_row
+from handlers.expenses import MSK
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -94,7 +94,6 @@ def _keyboard(offset: int, total: int, rows: list[dict]) -> InlineKeyboardMarkup
                                         callback_data=f"rev_page:{offset + PAGE}"))
     if nav:
         kb.append(nav)
-    kb += _nav_row("rev")
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 

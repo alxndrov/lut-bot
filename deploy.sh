@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Обновление бота на сервере: забрать код с GitHub и перезапустить.
-# Запускается автодеплоем из GitHub Actions и вручную: ./deploy.sh
+# Перезапуск бота после правок. Код правится прямо на сервере и отсюда
+# пушится на GitHub, поэтому с GitHub ничего не забираем — иначе
+# незакоммиченные правки затёрлись бы. Запуск: bash deploy.sh
 set -euo pipefail
 
 cd /home/ubuntu/lut-bot
 
-echo "▸ Текущая версия: $(git log --oneline -1)"
-git fetch origin main
-git reset --hard origin/main          # сервер — копия GitHub, локальных правок тут нет
-echo "▸ Новая версия:   $(git log --oneline -1)"
+echo "▸ Версия: $(git log --oneline -1)"
+if [ -n "$(git status --porcelain)" ]; then
+    echo "⚠ Есть незакоммиченные правки — бот запустится с ними"
+fi
 
 # Зависимости могли добавиться вместе с кодом
 venv/bin/pip install -q -r requirements.txt

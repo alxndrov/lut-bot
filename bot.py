@@ -10,13 +10,16 @@ import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
-from handlers import support, support_admin, logo, reviews
+from handlers import support, support_admin, logo, reviews, operations_menu
 from handlers.prodamus_webhook import create_app as create_webhook_app
-from services.daily_report import daily_report_loop, monthly_report_loop
+from services.daily_report import daily_report_loop
+from services.finance_reports import report_loop
+from services.finance_sheet import finance_sync_loop
 from services.funnel import funnel_worker
 from services.review_push import review_push_worker
 from services.cdek_tracker import cdek_tracking_worker
 from services.cdek_retry import cdek_retry_worker
+from services.cdek_accounts import OLD_CONTRACT, CURRENT_CONTRACT
 from services.message_log import MessageLogMiddleware
 
 logging.basicConfig(
@@ -26,7 +29,7 @@ logging.basicConfig(
 
 
 async def main():
-    await db.init_db()
+    await db.init_db(existing_cdek_contract=OLD_CONTRACT or CURRENT_CONTRACT)
 
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
@@ -58,8 +61,8 @@ async def main():
         BotCommand(command="help",        description="🆘 Поддержка"),
     ])
 
+    asyncio.create_task(finance_sync_loop())
     asyncio.create_task(daily_report_loop(bot))
-    asyncio.create_task(monthly_report_loop(bot))
     asyncio.create_task(funnel_worker(bot))
     asyncio.create_task(review_push_worker(bot))
     asyncio.create_task(cdek_tracking_worker(bot))
@@ -78,6 +81,7 @@ async def main():
         admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
         admin_dp = Dispatcher(storage=MemoryStorage())
         admin_dp.update.outer_middleware(MessageLogMiddleware("админ"))
+        admin_dp.include_router(operations_menu.router)
         admin_dp.include_router(order_actions.router)
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)
@@ -92,6 +96,7 @@ async def main():
             admin_dp.start_polling(admin_bot,
                                    allowed_updates=["callback_query", "message"])
         )
+        asyncio.create_task(report_loop(admin_bot))
         # Догоняем кнопки у заказов, созданных до появления новых статусов
         asyncio.create_task(order_actions.refresh_open_orders(admin_bot))
         # Команда видна в меню бота
@@ -99,7 +104,7 @@ async def main():
             await admin_bot.set_my_commands([
                 BotCommand(command="orders", description="📋 Заказы в работе"),
                 BotCommand(command="sentorders", description="📦 Отправленные заказы"),
-                BotCommand(command="finance", description="💳 Финансы: выручка, расчёт, касса"),
+                BotCommand(command="finance", description="💳 Финансы"),
                 BotCommand(command="stock", description="📦 Расходники"),
                 BotCommand(command="reviews", description="⭐️ Отзывы клиентов"),
                 # Остальные команды работают, но в меню не выносятся, чтобы

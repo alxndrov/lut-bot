@@ -13,6 +13,9 @@ ADMIN_IDS: list[int] = [
 # собирается по-старому — свободным текстом.
 CDEK_ACCOUNT: str = os.getenv("CDEK_ACCOUNT", "")
 CDEK_SECURE_PASSWORD: str = os.getenv("CDEK_SECURE_PASSWORD", "")
+# Прежний договор нужен до завершения старых отправлений и для их наклеек.
+CDEK_ACCOUNT_OLD: str = os.getenv("CDEK_ACCOUNT_OLD", "")
+CDEK_SECURE_PASSWORD_OLD: str = os.getenv("CDEK_SECURE_PASSWORD_OLD", "")
 CDEK_FROM_CITY: str = os.getenv("CDEK_FROM_CITY", "Москва")
 CDEK_TEST_MODE: bool = os.getenv("CDEK_TEST_MODE", "false").lower() in ("1", "true", "yes")
 # Доставка только до пункта выдачи. 136 — склад-склад, тариф «интернет-магазин».

@@ -197,7 +197,7 @@ async def cb_cdek_pay(callback: CallbackQuery, state: FSMContext):
 
     hint = (f"Всего отложено <b>{_rub(a['due'])} ₽</b> — "
             f"внесённая сумма спишется из них.\n\n" if a["due"] > 0 else "")
-    await callback.message.answer(
+    await callback.message.edit_text(
         f"💸 <b>Сколько внесли?</b>\n\n{hint}"
         "Напишите сумму из счёта СДЭК, можно с комментарием:\n"
         "<code>2350 счёт за июль</code>",
@@ -269,6 +269,8 @@ async def cb_cdek_delete(callback: CallbackQuery):
         return
     payment_id = int(callback.data.split(":")[1])
     deleted = await db.delete_cdek_payment(payment_id)
+    from services.gsheets import request_finance_sync
+    request_finance_sync()
     await callback.answer("Удалено 🗑" if deleted else "Эта оплата уже удалена")
     try:
         await callback.message.edit_text(
@@ -312,8 +314,8 @@ async def cb_cdek_log(callback: CallbackQuery):
     rows = [[InlineKeyboardButton(
         text=f"🗑 {_msk(p['paid_at'])} {float(p['amount']):,.0f} ₽",
         callback_data=f"cdek_del:{p['id']}")] for p in payments[:10]]
-    rows.append([InlineKeyboardButton(text="◀️ К счёту", callback_data="cdek_show")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="cdek_show")])
 
     await callback.answer()
-    await callback.message.answer("\n".join(lines), parse_mode="HTML",
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.message.edit_text("\n".join(lines), parse_mode="HTML",
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))

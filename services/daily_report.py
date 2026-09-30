@@ -121,6 +121,10 @@ async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
     fee_pct = config.PRODAMUS_FEE_PERCENT
     m = _money(gross, delivery, fee_pct,
                delivery_cost=delivery_cost, delivery_legacy=delivery_legacy)
+    from services.tax_account import accrued_for_period
+    tax = await accrued_for_period(dt_from, dt_to)
+    m["net"] += m["npd"] - tax
+    m["npd"] = tax
     return {
         "count": count,
         "gross": gross,
@@ -155,6 +159,9 @@ def _build_report(date_str: str, data: dict) -> str:
 
     from services import payout
     share = data.get("share")
+    if share:
+        money["npd"] = share["npd"]
+        money["net"] = share["net"]
     share_lines = (payout.format_shares(share) if share else [
         f"  {name} ({int(pct * 100)}%): <b>{money['net'] * pct:,.2f} ₽</b>"
         for name, pct in _SHARES
@@ -171,7 +178,7 @@ def _build_report(date_str: str, data: dict) -> str:
         f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
         "",
         f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
-        f"📋 НПД {config.NPD_PERCENT:g}% со всей суммы: −{money['npd']:,.2f} ₽",
+        f"📋 НПД с учётом исправлений: −{money['npd']:,.2f} ₽",
         *delivery_lines,
         "─" * 30,
         f"💵 Чистыми: <b>{money['net']:,.2f} ₽</b>",
@@ -193,8 +200,38 @@ def _build_report(date_str: str, data: dict) -> str:
     return "\n".join(lines)
 
 
+async def _weekly_cdek_reminder(now: datetime) -> str | None:
+    now = now.astimezone(MSK)
+    if now.weekday() != 0:
+        return None
+    end = now.date() - timedelta(days=1)
+    start = end - timedelta(days=6)
+    lines = [
+        "🚚 <b>Напоминание: оплатить счёт СДЭК</b>",
+        f"За прошлую неделю: {start:%d.%m.%Y}–{end:%d.%m.%Y} (МСК).",
+        "",
+    ]
+    try:
+        accrued = await db.get_cdek_accrued(start.isoformat(), end.isoformat())
+        lines += [
+            f"Расчётная сумма: <b>{accrued['total']:,.2f} ₽</b>",
+            f"Накладных в учёте: {accrued['count']}.",
+        ]
+    except Exception:
+        logger.exception("weekly_cdek_reminder: failed to calculate amount")
+        lines.append("Расчётная сумма сейчас недоступна.")
+    lines += [
+        "",
+        "Сверьте сумму с выставленным счётом СДЭК и оплатите его. "
+        "После оплаты внесите платёж через /cdek.",
+    ]
+    return "\n".join(lines)
+
+
 async def send_daily_report(bot: Bot):
-    yesterday = (datetime.now(MSK) - timedelta(days=1)).strftime("%Y-%m-%d")
+    now = datetime.now(MSK)
+    yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    reminder = await _weekly_cdek_reminder(now)
 
     try:
         data = await db.get_purchases_report(yesterday)
@@ -217,6 +254,11 @@ async def send_daily_report(bot: Bot):
                 await notify_bot.send_message(admin_id, text, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"daily_report: send to admin {admin_id} failed: {e}")
+            if reminder:
+                try:
+                    await notify_bot.send_message(admin_id, reminder, parse_mode="HTML")
+                except Exception:
+                    logger.exception("weekly_cdek_reminder: send to admin %s failed", admin_id)
     finally:
         await notify_bot.session.close()
 
@@ -256,6 +298,10 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
     money = _money(total_gross, delivery, fee_pct, float(expenses.get("total") or 0),
                    delivery_cost=float(data.get("delivery_cost") or 0),
                    delivery_legacy=float(data.get("delivery_legacy") or delivery))
+    share = data.get("share")
+    if share:
+        money["npd"] = share["npd"]
+        money["net"] = share["net"]
     net_after_tax = money["net"]
 
     lines = [
@@ -276,7 +322,7 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
         "",
         f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
         f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
-        f"📋 НПД {config.NPD_PERCENT:g}% со всей суммы: −{money['npd']:,.2f} ₽",
+        f"📋 НПД с учётом исправлений: −{money['npd']:,.2f} ₽",
     ]
     if delivery:
         lines.append(f"🚚 Доставка в СДЭК (транзит): −{money['delivery_out']:,.2f} ₽")
@@ -288,7 +334,6 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
 
     # Доли
     from services import payout
-    share = data.get("share")
     if share:
         lines += payout.format_shares(share)
     else:

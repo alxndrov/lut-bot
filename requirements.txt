@@ -3,3 +3,4 @@ aiosqlite==0.20.0
 python-dotenv==1.0.1
 gspread==6.2.1
 google-auth==2.56.2
+openpyxl==3.1.5

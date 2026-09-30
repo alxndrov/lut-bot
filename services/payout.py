@@ -94,7 +94,8 @@ async def era_totals(dt_from: str, dt_to: str, fee_rate: float, fee_pct: float) 
     gross = physical + digital + delivery
     expenses = (await db.get_expenses_summary(dt_from, dt_to))["total"]
     fee = gross * fee_rate
-    npd = gross * NPD_RATE
+    from services.tax_account import accrued_for_period
+    npd = await accrued_for_period(dt_from, dt_to)
     out = delivery_out(float(goods["delivery_cost"]), legacy, fee_pct)
     return {"gross": gross, "physical": physical, "digital": digital,
             "delivery": delivery, "count": int(goods["count"]),
@@ -141,9 +142,13 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     # себя, кроме старых заказов (до точного счёта СДЭК), где наценка на
     # доставку не покрывала налог — оттуда и поправка на legacy.
     # Материалы в этой эпохе целиком на Мише: они уменьшают его остаток.
-    physical_net_was = (was["physical"] * (1 - fee_rate - NPD_RATE)
-                        - was["legacy"] * NPD_RATE)
-    digital_net_was = was["digital"] * (1 - fee_rate - NPD_RATE)
+    from services.tax_account import accrued_for_period
+    old_end = min(dt_to, _before(cut))
+    physical_tax = await accrued_for_period(dt_from, old_end, "physical")
+    digital_tax = await accrued_for_period(dt_from, old_end, "digital")
+    legacy_tax = await accrued_for_period(dt_from, old_end, "legacy")
+    physical_net_was = was["physical"] * (1 - fee_rate) - physical_tax - legacy_tax
+    digital_net_was = was["digital"] * (1 - fee_rate) - digital_tax
 
     partner_goods = physical_net_was * config.PARTNER_GOODS_PERCENT / 100
     partner_print = printed_paid * config.PARTNER_PRINT_FEE
@@ -159,6 +164,11 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     paid = (await db.get_payouts_summary(dt_from, dt_to))["by_recipient"]
     paid_partner = float(paid.get(config.PARTNER_NAME, 0))
     paid_owner = float(paid.get(config.OWNER_NAME, 0))
+    # Траты личными деньгами уже вычтены из общей прибыли как расход, а
+    # вернуть их надо тому, кто платил, — поверх его доли
+    personal = await db.get_personal_expenses(dt_from, dt_to)
+    reimb_partner = float(personal.get(config.PARTNER_NAME, 0))
+    reimb_owner = float(personal.get(config.OWNER_NAME, 0))
 
     return {
         "gross": gross, "physical": physical, "digital": digital,
@@ -173,8 +183,9 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
         "expenses_was": was["expenses"], "expenses_now": now["expenses"],
         "partner": partner, "owner": net - partner,
         "paid_partner": paid_partner, "paid_owner": paid_owner,
-        "partner_left": partner - paid_partner,
-        "owner_left": net - partner - paid_owner,
+        "reimb_partner": reimb_partner, "reimb_owner": reimb_owner,
+        "partner_left": partner + reimb_partner - paid_partner,
+        "owner_left": net - partner + reimb_owner - paid_owner,
         "partner_goods": partner_goods,
         "partner_new": partner_new,
         "partner_print": partner_print,

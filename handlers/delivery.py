@@ -16,21 +16,11 @@ import config
 import database as db
 from services.prodamus import build_payment_url
 from services.geocode import geocode
+from services.cdek_accounts import CDEK_CLIENT
 from keyboards.user import back_to_catalog_keyboard
 
 router = Router()
 logger = logging.getLogger(__name__)
-
-CDEK_CLIENT = None
-if config.CDEK_ACCOUNT and config.CDEK_SECURE_PASSWORD:
-    from services.cdek import CDEKClient
-    CDEK_CLIENT = CDEKClient(
-        client_id=config.CDEK_ACCOUNT,
-        client_secret=config.CDEK_SECURE_PASSWORD,
-        from_city=config.CDEK_FROM_CITY,
-        test_mode=config.CDEK_TEST_MODE,
-    )
-
 
 PVZ_PAGE_SIZE = 5
 # Сколько пунктов оставляем клиенту на выбор после сортировки по расстоянию

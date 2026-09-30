@@ -27,7 +27,7 @@ def question_photos(q: dict) -> list:
     return [q["photo_id"]] if q.get("photo_id") else []
 
 
-async def init_db():
+async def init_db(existing_cdek_contract: str | None = None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS products (
@@ -309,6 +309,10 @@ async def init_db():
                 user_name  TEXT
             )
         """)
+        async with db.execute("PRAGMA table_info(expenses)") as cur:
+            expense_columns = {r[1] for r in await cur.fetchall()}
+        if "paid_by" not in expense_columns:
+            await db.execute("ALTER TABLE expenses ADD COLUMN paid_by TEXT")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS expense_categories (
                 name     TEXT PRIMARY KEY,
@@ -373,6 +377,16 @@ async def init_db():
                 PRIMARY KEY (chat_id, message_id)
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS admin_command_messages (
+                command    TEXT NOT NULL,
+                chat_id    INTEGER NOT NULL,
+                user_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (command, chat_id, user_id, message_id)
+            )
+        """)
         # Оплаченные счета СДЭК. СДЭК работает постоплатой: сначала возит,
         # потом выставляет счёт — его и записываем. Стоимость самих
         # накладных сюда НЕ пишется, она считается из заказов.
@@ -399,6 +413,40 @@ async def init_db():
                 user_name TEXT
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS npd_assessments (
+                month TEXT PRIMARY KEY,
+                amount REAL NOT NULL CHECK(amount >= 0),
+                updated_by INTEGER,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        async with db.execute("PRAGMA table_info(npd_payments)") as cur:
+            npd_columns = {row[1] for row in await cur.fetchall()}
+        if "tax_month" not in npd_columns:
+            await db.execute("ALTER TABLE npd_payments ADD COLUMN tax_month TEXT")
+        # Старые отметки хранили налоговый месяц в дате платежа.
+        await db.execute("""UPDATE npd_payments
+            SET tax_month = strftime('%Y-%m', datetime(paid_at, '+3 hours'))
+            WHERE tax_month IS NULL""")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS finance_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scheduled_at TEXT NOT NULL UNIQUE,
+                data_json TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS finance_report_deliveries (
+                report_id INTEGER NOT NULL,
+                admin_id INTEGER NOT NULL,
+                PRIMARY KEY(report_id, admin_id)
+            )
+        """)
+        await db.execute("""CREATE TABLE IF NOT EXISTS finance_report_schedule (
+            id INTEGER PRIMARY KEY CHECK(id=1), next_at TEXT NOT NULL
+        )""")
         # Фактические выплаты Мише/Дане с общего счёта — без этого «Кассовый
         # остаток» не знает, что часть уже посчитанной прибыли реально
         # забрали, и посчитает остаток завышенным.
@@ -557,6 +605,33 @@ async def init_db():
                 await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except Exception:
                 pass
+        # Однократная привязка старых заказов, включая попытки без UUID:
+        # СДЭК мог принять запрос до таймаута, повтор ищет его на том же договоре.
+        async with db.execute("PRAGMA table_info(orders)") as cur:
+            order_columns = {row[1] for row in await cur.fetchall()}
+        if "cdek_contract" not in order_columns:
+            await db.execute("ALTER TABLE orders ADD COLUMN cdek_contract TEXT")
+            if existing_cdek_contract:
+                await db.execute("UPDATE orders SET cdek_contract = ?",
+                                 (existing_cdek_contract,))
+        # Повторный заказ по решению администратора: клиент ничего не
+        # оплачивает и товар не возвращает, а новую доставку оплачиваем мы.
+        # Отдельные поля не смешивают такой заказ с покупками/выручкой.
+        for col in ("repeat_of_order_id INTEGER DEFAULT NULL",
+                    "repeat_created_by_id INTEGER DEFAULT NULL",
+                    "repeat_created_by_name TEXT DEFAULT NULL",
+                    "covered_delivery_cost REAL DEFAULT 0"):
+            try:
+                await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
+            except Exception:
+                pass
+        # У одного экземпляра заказа может быть только один прямой повтор:
+        # это защищает от двойного нажатия. Если повтор тоже оказался плохим,
+        # повторяют уже его — получается понятная цепочка.
+        await db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_repeat_of "
+            "ON orders(repeat_of_order_id) WHERE repeat_of_order_id IS NOT NULL"
+        )
         # Migration: вопрос-«распределитель» (по ответу определяется, кто печатает)
         try:
             await db.execute("ALTER TABLE product_questions ADD COLUMN is_router INTEGER DEFAULT 0")
@@ -1059,6 +1134,41 @@ async def get_support_user(chat_id: int, message_id: int) -> int | None:
         )
         row = await cur.fetchone()
         return row[0] if row else None
+
+
+async def replace_admin_command_messages(command: str, chat_id: int, user_id: int,
+                                         message_ids: list[int]) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM admin_command_messages WHERE command = ? AND chat_id = ? AND user_id = ?",
+            (command, chat_id, user_id),
+        )
+        await db.executemany(
+            "INSERT OR IGNORE INTO admin_command_messages(command, chat_id, user_id, message_id) "
+            "VALUES (?, ?, ?, ?)",
+            [(command, chat_id, user_id, int(mid)) for mid in message_ids],
+        )
+        await db.commit()
+
+
+async def get_admin_command_messages(command: str, chat_id: int, user_id: int) -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT message_id FROM admin_command_messages
+               WHERE command = ? AND chat_id = ? AND user_id = ?
+               ORDER BY message_id""",
+            (command, chat_id, user_id),
+        ) as cur:
+            return [int(r[0]) for r in await cur.fetchall()]
+
+
+async def clear_admin_command_messages(command: str, chat_id: int, user_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "DELETE FROM admin_command_messages WHERE command = ? AND chat_id = ? AND user_id = ?",
+            (command, chat_id, user_id),
+        )
+        await db.commit()
 
 
 async def recent_support_contact(user_id: int, days: int = 14) -> str | None:
@@ -1819,6 +1929,22 @@ async def set_order_arrived(order_id: int):
         await db.commit()
 
 
+async def bind_order_cdek_contract(order_id: int, contract: str) -> dict:
+    """Фиксирует договор ДО запроса СДЭК; повтор не меняет уже выбранный."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute(
+            "UPDATE orders SET cdek_contract = COALESCE(cdek_contract, ?) WHERE id = ?",
+            (contract, order_id),
+        )
+        async with db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            raise ValueError(f"Order {order_id} does not exist")
+        await db.commit()
+        return dict(row)
+
+
 async def set_order_cdek(order_id: int, cdek_uuid: str, cdek_number: str | None = None):
     """Привязывает к заказу идентификаторы накладной СДЭК."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1861,6 +1987,95 @@ async def create_order(user_id: int, product_id: int, prodamus_order_id: str,
         return cur.lastrowid
 
 
+async def create_replacement_order(source_order_id: int, order_code: str,
+                                   actor_id: int, actor_name: str,
+                                   summary: str, delivery_cost: float) -> tuple[int, bool]:
+    """Создаёт бесплатный повтор заказа атомарно.
+
+    Возвращает (id, created). Повторное нажатие на ту же карточку возвращает
+    уже созданный прямой повтор, а не плодит новые заказы и накладные.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        await db.execute("BEGIN IMMEDIATE")
+        async with db.execute(
+            "SELECT id FROM orders WHERE repeat_of_order_id = ? LIMIT 1",
+            (source_order_id,),
+        ) as cur:
+            existing = await cur.fetchone()
+        if existing:
+            await db.rollback()
+            return int(existing["id"]), False
+
+        async with db.execute(
+            "SELECT * FROM orders WHERE id = ?", (source_order_id,)
+        ) as cur:
+            source = await cur.fetchone()
+        if not source:
+            await db.rollback()
+            raise ValueError("source order not found")
+
+        synthetic_payment_id = f"repeat:{order_code}"
+        try:
+            cur = await db.execute(
+                """INSERT INTO orders
+                       (user_id, product_id, prodamus_order_id, summary, rounds_json,
+                        order_code, recipient_name, recipient_phone, pvz_code,
+                        round_products_json, routing_json, printer_ids,
+                        assignee_id, assignee_name,
+                        repeat_of_order_id, repeat_created_by_id,
+                        repeat_created_by_name, covered_delivery_cost)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (source["user_id"], source["product_id"], synthetic_payment_id,
+                 summary, source["rounds_json"], order_code,
+                 source["recipient_name"], source["recipient_phone"],
+                 source["pvz_code"], source["round_products_json"],
+                 source["routing_json"], source["printer_ids"],
+                 source["assignee_id"], source["assignee_name"], source_order_id,
+                 actor_id, actor_name, max(0.0, float(delivery_cost or 0))),
+            )
+            await db.commit()
+            return int(cur.lastrowid), True
+        except aiosqlite.IntegrityError:
+            await db.rollback()
+            async with db.execute(
+                "SELECT id FROM orders WHERE repeat_of_order_id = ? LIMIT 1",
+                (source_order_id,),
+            ) as cur:
+                existing = await cur.fetchone()
+            if existing:
+                return int(existing["id"]), False
+            raise
+
+
+async def get_order_delivery_cost(order_id: int) -> float:
+    """Стоимость новой доставки для повтора.
+
+    Для обычного заказа берём точный расчёт СДЭК из покупки. Для старого
+    заказа без точного расчёта — принятую с клиента сумму доставки; для
+    повтора повтора — уже сохранённую покрываемую стоимость.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT o.covered_delivery_cost,
+                      COALESCE(SUM(pu.delivery_cost), 0) AS exact_cost,
+                      COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
+                                        THEN pu.delivery_amount ELSE 0 END), 0) AS legacy
+               FROM orders o
+               LEFT JOIN purchases pu ON pu.telegram_payment_id = o.prodamus_order_id
+               WHERE o.id = ? GROUP BY o.id""",
+            (order_id,),
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        return 0.0
+    if row["covered_delivery_cost"] or row["exact_cost"]:
+        return float(row["covered_delivery_cost"] or row["exact_cost"])
+    from config import PRODAMUS_FEE_PERCENT
+    return float(row["legacy"] or 0) * (1 - PRODAMUS_FEE_PERCENT / 100)
+
+
 async def get_orders_for_product(product_id: int) -> list[dict]:
     """Все заказы товара (для аналитики): rounds_json + исполнитель."""
     async with aiosqlite.connect(DB_PATH) as db:
@@ -1886,6 +2101,18 @@ async def get_order(order_id: int) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def get_direct_replacement(order_id: int) -> Optional[dict]:
+    """Прямой повтор этого экземпляра заказа, если уже создан."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM orders WHERE repeat_of_order_id = ? LIMIT 1",
+            (order_id,),
+        ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
 
@@ -2300,6 +2527,16 @@ async def get_period_revenue(dt_from: str, dt_to: str) -> dict:
             (dt_from, dt_to),
         ) as cur:
             row = dict(await cur.fetchone())
+        # Бесплатные повторы не являются покупками, но их доставку всё равно
+        # оплачивает бизнес и она уменьшает чистую прибыль периода.
+        async with db.execute(
+            """SELECT COALESCE(SUM(covered_delivery_cost), 0)
+               FROM orders
+               WHERE repeat_of_order_id IS NOT NULL
+                 AND datetime(created_at) BETWEEN datetime(?) AND datetime(?)""",
+            (dt_from, dt_to),
+        ) as cur:
+            row["delivery_cost"] += float((await cur.fetchone())[0] or 0)
     # Товар без категории считаем цифрой: физику мы всегда помечаем сами
     row["digital"] += row.pop("unknown")
     return row
@@ -2364,7 +2601,7 @@ async def get_npd_payments_by_month(limit: int = 6) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT strftime('%Y-%m', datetime(paid_at, '+3 hours')) AS month,
+            """SELECT COALESCE(tax_month, strftime('%Y-%m', datetime(paid_at, '+3 hours'))) AS month,
                       COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
                FROM npd_payments GROUP BY month ORDER BY month DESC LIMIT ?""",
             (int(limit),),
@@ -2401,13 +2638,13 @@ async def add_expense_category(name: str) -> bool:
 
 
 async def add_expense(category: str, amount: float, comment: str = "",
-                      user_id: int = 0, user_name: str = "") -> int:
+                      user_id: int = 0, user_name: str = "", paid_by: str | None = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO expenses (category, amount, comment, user_id, user_name) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO expenses (category, amount, comment, user_id, user_name, paid_by) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             (category, float(amount), (comment or "").strip() or None,
-             user_id, user_name),
+             user_id, user_name, paid_by),
         )
         await db.commit()
         return cur.lastrowid
@@ -2448,6 +2685,21 @@ async def get_expenses_summary(date_from: str, date_to: str) -> dict:
     return {"total": sum(r["total"] for r in rows), "by_category": rows}
 
 
+
+async def get_personal_expenses(date_from: str, date_to: str) -> dict[str, float]:
+    """Расходы, оплаченные кем-то лично, за период: {имя: сумма}. Эти деньги
+    проект должен вернуть тому, кто платил, — при расчёте они прибавляются к
+    его остатку. «Проект» и неуточнённые сюда не входят."""
+    date_from, date_to = period_bounds(date_from, date_to)
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT paid_by, COALESCE(SUM(amount), 0) FROM expenses "
+            "WHERE datetime(spent_at) BETWEEN datetime(?) AND datetime(?) "
+            "AND paid_by IS NOT NULL AND paid_by != 'Проект' GROUP BY paid_by",
+            (date_from, date_to),
+        ) as cur:
+            return {name: float(total) for name, total in await cur.fetchall()}
+
 # ── Счёт СДЭК ──────────────────────────────────────────────────────────
 #
 # СДЭК работает постоплатой: мы отправляем посылки, а счёт за них приходит
@@ -2465,7 +2717,8 @@ _CDEK_ACCRUED_FROM = """
                LEFT JOIN purchases pu
                       ON pu.telegram_payment_id = o.prodamus_order_id
                WHERE (o.cdek_uuid IS NOT NULL OR o.shipped_at IS NOT NULL)
-                 AND (COALESCE(pu.delivery_cost, 0) > 0
+                 AND (COALESCE(o.covered_delivery_cost, 0) > 0
+                      OR COALESCE(pu.delivery_cost, 0) > 0
                       OR COALESCE(pu.delivery_amount, 0) > 0)"""
 
 # Две суммы, как в отчётах: по новым заказам счёт СДЭК сохранён
@@ -2474,8 +2727,11 @@ _CDEK_ACCRUED_FROM = """
 # комиссии Prodamus. Сводит их services.payout.delivery_out.
 _CDEK_ACCRUED_SUMS = """
                       COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) > 0
-                                        THEN pu.delivery_cost ELSE 0 END), 0) AS cost,
+                                        THEN pu.delivery_cost
+                                        ELSE COALESCE(o.covered_delivery_cost, 0)
+                                   END), 0) AS cost,
                       COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
+                                        AND COALESCE(o.covered_delivery_cost, 0) = 0
                                         THEN COALESCE(pu.delivery_amount, 0)
                                         ELSE 0 END), 0) AS legacy"""
 
@@ -2640,13 +2896,20 @@ async def delete_npd_payment(payment_id: int) -> bool:
         return cur.rowcount > 0
 
 
-async def get_npd_payments(limit: int = 20) -> list[dict]:
+async def get_npd_payments(limit: int = 20, tax_month: str | None = None) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT * FROM npd_payments ORDER BY paid_at DESC, id DESC LIMIT ?",
-            (int(limit),),
-        ) as cur:
+        if tax_month:
+            sql = """
+                SELECT * FROM npd_payments
+                WHERE COALESCE(tax_month, substr(datetime(paid_at, '+3 hours'), 1, 7)) = ?
+                ORDER BY paid_at DESC, id DESC LIMIT ?
+            """
+            params = (tax_month, int(limit))
+        else:
+            sql = "SELECT * FROM npd_payments ORDER BY paid_at DESC, id DESC LIMIT ?"
+            params = (int(limit),)
+        async with db.execute(sql, params) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
 
@@ -2664,13 +2927,33 @@ async def get_npd_payments_summary(date_from: str | None = None,
             return dict(await cur.fetchone())
 
 
+async def get_npd_payments_summary_by_tax_month(date_from: str, date_to: str) -> dict:
+    """Payments tied to tax months inside a sales period, for reserve tracking."""
+    date_from, date_to = period_bounds(date_from, date_to)
+    sql = """
+        SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS count
+        FROM npd_payments
+        WHERE tax_month IS NOT NULL
+          AND datetime(tax_month || '-01') BETWEEN
+              datetime(strftime('%Y-%m-01', datetime(?, '+3 hours'))) AND
+              datetime(strftime('%Y-%m-01', datetime(?, '+3 hours')))
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, (date_from, date_to)) as cur:
+            return dict(await cur.fetchone())
+
+
 async def add_payout(recipient: str, amount: float, comment: str = "",
-                     user_id: int = 0, user_name: str = "") -> int:
+                     user_id: int = 0, user_name: str = "",
+                     paid_at: str | None = None) -> int:
+    """paid_at — UTC 'YYYY-MM-DD HH:MM:SS'; по умолчанию текущее время."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO payouts (recipient, amount, comment, user_id, user_name) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (recipient, float(amount), (comment or "").strip() or None, user_id, user_name),
+            "INSERT INTO payouts (recipient, amount, comment, user_id, user_name, paid_at) "
+            "VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))",
+            (recipient, float(amount), (comment or "").strip() or None, user_id, user_name,
+             paid_at),
         )
         await db.commit()
         return cur.lastrowid
@@ -2775,20 +3058,22 @@ async def get_orders_for_finance_export(admin_ids: list[int] | None = None,
             """SELECT o.id, COALESCE(o.order_code, o.prodamus_order_id) AS order_code,
                       o.created_at,
                       COALESCE(SUM(pu.amount), 0) AS amount,
-                      COALESCE(SUM(pu.delivery_cost), 0) AS delivery_cost,
+                      COALESCE(SUM(pu.delivery_cost), 0)
+                          + COALESCE(MAX(o.covered_delivery_cost), 0) AS delivery_cost,
                       COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
                                         THEN pu.delivery_amount ELSE 0 END), 0)
                           AS delivery_legacy,
-                      GROUP_CONCAT(
+                      COALESCE(GROUP_CONCAT(
                           p.name || CASE WHEN pu.quantity > 1
                                          THEN ' ×' || pu.quantity ELSE '' END,
                           ', '
-                      ) AS comment,
+                      ), 'Повтор: ' || op.name) AS comment,
                       (SELECT GROUP_CONCAT(DISTINCT op.user_name)
                          FROM order_prints op WHERE op.order_id = o.id) AS printer
                FROM orders o
                LEFT JOIN purchases pu ON pu.telegram_payment_id = o.prodamus_order_id
                LEFT JOIN products p ON p.id = pu.product_id
+               LEFT JOIN products op ON op.id = o.product_id
                GROUP BY o.id
                ORDER BY o.created_at"""
         ) as cur:
@@ -2834,7 +3119,7 @@ async def get_expenses_for_finance_export() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, spent_at, category, amount, comment FROM expenses ORDER BY spent_at"
+            "SELECT id, spent_at, category, amount, comment, paid_by FROM expenses ORDER BY spent_at"
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
@@ -2912,7 +3197,7 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
         comment = r["category"] if not r["comment"] else f"{r['category']}: {r['comment']}"
         rows.append({
             "code": f"exp-{r['id']}", "created_at": r["spent_at"], "amount": r["amount"],
-            "kind": "Расход", "comment": comment,
+            "kind": "Расход", "comment": comment, "paid_by": r["paid_by"] or "Не уточнено",
             "delivery_cost": None, "delivery_legacy": None,
         })
 

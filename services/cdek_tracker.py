@@ -50,16 +50,17 @@ def _arrived_text(order: dict) -> str:
 
 
 async def _check_once(bot: Bot):
-    from handlers.delivery import CDEK_CLIENT
-    if not CDEK_CLIENT:
-        return
+    from services.cdek_accounts import client_for_order
 
     orders = await db.get_orders_tracking()
     if not orders:
         return
 
     for order in orders:
-        info = await CDEK_CLIENT.get_order_info(order["cdek_uuid"])
+        client = client_for_order(order)
+        if not client:
+            continue
+        info = await client.get_order_info(order["cdek_uuid"])
         if not info:
             continue
         codes = set(info.get("status_codes") or [])

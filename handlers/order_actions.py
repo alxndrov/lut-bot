@@ -4,12 +4,13 @@
 Этот бот слушает только callback_query — отдельным поллингом в bot.py.
 """
 import asyncio
+import html
 import json
 import logging
 import re
 from datetime import datetime, timedelta
 
-from aiogram import Router, F
+from aiogram import Bot, Router, F
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery, Message, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -133,6 +134,8 @@ def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
                               callback_data=f"order_shipped:{oid}")],
         [InlineKeyboardButton(text="🔄 Сменить исполнителя",
                               callback_data=f"order_reassign:{oid}")],
+        [InlineKeyboardButton(text="🔁 Повторить заказ",
+                              callback_data=f"order_repeat:{oid}")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -212,6 +215,9 @@ def _with_routing(summary: str, whos: list) -> str:
 
 def _order_text(order: dict, prints: list | None = None) -> str:
     text = _with_routing(order["summary"], db.order_routing(order))
+    if order.get("repeat_of_order_id") and order.get("repeat_created_by_name"):
+        text += ("\n🔁 <b>Повтор оформил:</b> "
+                 + html.escape(order["repeat_created_by_name"]))
     if order.get("assignee_name"):
         text += f"\n\n🧑‍🔧 <b>Взял в работу:</b> {order['assignee_name']}"
 
@@ -252,10 +258,21 @@ def _order_text(order: dict, prints: list | None = None) -> str:
 
 
 def order_shipped_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    """Заказ отправлен — можно откатить отметку."""
+    """Заказ отправлен — можно откатить отметку или оформить повтор."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Отменить отметку об отправке",
-                              callback_data=f"order_unship:{order_id}")]
+                              callback_data=f"order_unship:{order_id}")],
+        [InlineKeyboardButton(text="🔁 Повторить заказ",
+                              callback_data=f"order_repeat:{order_id}")],
+    ])
+
+
+def order_repeat_confirm_keyboard(order_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, создать бесплатный повтор",
+                              callback_data=f"order_repeat_confirm:{order_id}")],
+        [InlineKeyboardButton(text="◀️ Отмена",
+                              callback_data=f"order_repeat_cancel:{order_id}")],
     ])
 
 
@@ -401,6 +418,8 @@ async def _sync_list_items(bot, order: dict, prints: list | None = None):
             await bot.edit_message_text(
                 _list_item_text(order, index, has_card, chat_id, prints, mode),
                 chat_id=chat_id, message_id=msg_id, parse_mode="HTML",
+                reply_markup=(order_shipped_keyboard(order["id"])
+                              if mode == "sent" else None),
             )
         except Exception as e:
             _log_edit_fail("list item", f"{chat_id}/{msg_id}", e)
@@ -560,6 +579,58 @@ async def _load(callback: CallbackQuery) -> dict | None:
     return order
 
 
+def _replacement_summary(source: dict, new_code: str) -> str:
+    """Карточка повтора: сохраняет ТЗ, но явно убирает новую оплату."""
+    text = source.get("summary") or ""
+    old_code = source.get("order_code") or ""
+    if old_code:
+        text = text.replace(old_code, new_code, 1)
+    text = text.replace("🧾 <b>Новый заказ</b>", "🔁 <b>Повтор заказа</b>", 1)
+    # Если повторяют уже повтор, заголовок остаётся один, без наслоения.
+    if "🔁 <b>Повтор заказа</b>" not in text:
+        text = "🔁 <b>Повтор заказа</b> " + html.escape(new_code) + "\n" + text
+    text = re.sub(r"(?m)^💵[^\n]*$", "💵 0 ₽ — клиент повторно не платит", text, count=1)
+    source_label = html.escape(old_code or f"#{source['id']}")
+    note = (
+        f"\n\n🔗 <b>Повтор заказа:</b> <code>{source_label}</code>\n"
+        "💳 Без повторной оплаты · возврат товара не требуется\n"
+        "🚚 Доставку СДЭК оплачиваем мы"
+    )
+    return text + note
+
+
+async def _replacement_products(order: dict) -> tuple[list, list[int], dict[int, dict]]:
+    try:
+        rounds = json.loads(order.get("rounds_json") or "[]")
+    except Exception:
+        rounds = []
+    round_products = db.unpack_round_products(
+        order.get("round_products_json"), rounds, order.get("product_id"))
+    if not round_products:
+        round_products = [order["product_id"]]
+    products = {}
+    for pid in set(round_products):
+        product = await db.get_product(pid)
+        if product:
+            products[pid] = product
+    return rounds, round_products, products
+
+
+async def _create_replacement_cdek(order_id: int, pending: dict,
+                                   round_products: list[int], products: dict,
+                                   order_code: str, client_id: int):
+    """Держит отдельную сессию клиентского бота до ответа СДЭК."""
+    from handlers.prodamus_webhook import _create_cdek_order
+    main_bot = Bot(token=config.BOT_TOKEN)
+    try:
+        await _create_cdek_order(
+            order_id, pending, round_products, products, order_code,
+            bot=main_bot, client_id=client_id,
+        )
+    finally:
+        await main_bot.session.close()
+
+
 def _stage(order: dict, prints: list | None = None) -> tuple[str, str]:
     """Значок и подпись текущего этапа заказа."""
     if order.get("shipped_at"):
@@ -590,7 +661,8 @@ def _order_line(order: dict, prints: list | None = None) -> str:
     if order.get("product_name"):
         line += f" · {order['product_name']}"
     if when:
-        line += f" · оплачен {when}"
+        line += (f" · повтор создан {when}" if order.get("repeat_of_order_id")
+                 else f" · оплачен {when}")
     if order.get("cdek_number"):
         line += f"\n    📦 СДЭК {order['cdek_number']}"
     return line
@@ -618,21 +690,41 @@ async def _cards_in_chat(orders: list, chat_id: int) -> dict:
 
 
 async def _send_list(message: Message, orders: list, start_index: int,
-                     cards: dict, mode: str) -> int:
-    """Шлёт пункты списка ответами на карточки заказов. Возвращает след. номер."""
+                     cards: dict, mode: str) -> tuple[int, list[int]]:
+    """Шлёт пункты списка ответами на карточки заказов. Возвращает след. номер and message ids."""
     i = start_index
+    sent_ids = []
     for o in orders:
         card_id = cards.get(o["id"])
         prints = await db.get_order_prints(o["id"])
         sent = await message.answer(
             _list_item_text(o, i, bool(card_id), message.from_user.id, prints, mode),
             parse_mode="HTML", reply_to_message_id=card_id,
+            reply_markup=(order_shipped_keyboard(o["id"])
+                          if mode == "sent" else None),
         )
+        sent_ids.append(sent.message_id)
         _LIST_ITEMS.setdefault(o["id"], []).append(
             (message.chat.id, sent.message_id, i, bool(card_id), mode)
         )
         i += 1
-    return i
+    return i, sent_ids
+
+
+async def _delete_previous_command_batch(message: Message, command: str):
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    for msg_id in await db.get_admin_command_messages(command, chat_id, user_id):
+        try:
+            await message.bot.delete_message(chat_id, msg_id)
+        except Exception as e:
+            logger.debug(f"{command}: cannot delete {chat_id}/{msg_id}: {type(e).__name__}: {e}")
+    await db.clear_admin_command_messages(command, chat_id, user_id)
+    _forget_lists(chat_id)
+    try:
+        await message.delete()
+    except Exception as e:
+        logger.debug(f"{command}: cannot delete command message {chat_id}/{message.message_id}: {type(e).__name__}: {e}")
 
 
 @router.message(Command("refresh"))
@@ -689,19 +781,23 @@ async def cmd_orders(message: Message):
     if message.from_user.id not in config.ADMIN_IDS:
         return
 
+    await _delete_previous_command_batch(message, "orders")
     todo = await db.get_orders(only_unshipped=True)
     # Старые сверху — обрабатываем по очереди поступления
     todo.sort(key=lambda o: o.get("created_at") or "")
 
     if not todo:
-        await message.answer("📋 Заказов в работе нет — всё разослано 🎉")
+        sent = await message.answer("📋 Заказов в работе нет — всё разослано 🎉")
+        await db.replace_admin_command_messages("orders", message.chat.id, message.from_user.id,
+                                                [sent.message_id])
         return
 
-    await message.answer(f"📋 <b>Заказы в работе: {len(todo)}</b>", parse_mode="HTML")
+    head = await message.answer(f"📋 <b>Заказы в работе: {len(todo)}</b>", parse_mode="HTML")
 
-    _forget_lists(message.chat.id)
     cards = await _cards_in_chat(todo, message.chat.id)
-    await _send_list(message, todo, 1, cards, mode="my")
+    _, sent_ids = await _send_list(message, todo, 1, cards, mode="my")
+    await db.replace_admin_command_messages("orders", message.chat.id, message.from_user.id,
+                                            [head.message_id, *sent_ids])
 
 
 
@@ -857,9 +953,9 @@ async def cb_order_barcode(callback: CallbackQuery):
         )
         return
 
-    from handlers.delivery import CDEK_CLIENT
-    if not CDEK_CLIENT:
-        await callback.answer("СДЭК не подключён.", show_alert=True)
+    from services.cdek_accounts import client_for_order
+    if not client_for_order(order):
+        await callback.answer("Не подключён договор СДЭК этой накладной.", show_alert=True)
         return
 
     if order["id"] in _BARCODE_BUSY:
@@ -877,12 +973,14 @@ _BARCODE_BUSY: set[int] = set()
 
 
 async def _deliver_barcode(callback: CallbackQuery, order: dict, name: str, caption: str):
-    from handlers.delivery import CDEK_CLIENT
+    from services.cdek_accounts import client_for_order
 
     _BARCODE_BUSY.add(order["id"])
     try:
-        pdf = await CDEK_CLIENT.get_barcode_pdf(order["cdek_uuid"],
-                                                fmt=config.CDEK_BARCODE_FORMAT)
+        client = client_for_order(order)
+        pdf = (await client.get_barcode_pdf(order["cdek_uuid"],
+                                           fmt=config.CDEK_BARCODE_FORMAT)
+               if client else None)
     except Exception as e:
         logger.error(f"barcode {name}: {type(e).__name__}: {e}")
         pdf = None
@@ -903,6 +1001,128 @@ async def _deliver_barcode(callback: CallbackQuery, order: dict, name: str, capt
     )
     if sent.document:
         await db.set_order_barcode_file(order["id"], sent.document.file_id)
+
+
+@router.callback_query(F.data.startswith("order_repeat:"))
+async def cb_order_repeat(callback: CallbackQuery):
+    """Показывает подтверждение — повтор создаёт реальную накладную СДЭК."""
+    order = await _load(callback)
+    if not order:
+        return
+    existing = await db.get_direct_replacement(order["id"])
+    if existing:
+        code = existing.get("order_code") or f"#{existing['id']}"
+        await callback.answer(f"Повтор уже создан: {code}", show_alert=True)
+        return
+    await callback.answer()
+    await callback.message.edit_reply_markup(
+        reply_markup=order_repeat_confirm_keyboard(order["id"])
+    )
+
+
+@router.callback_query(F.data.startswith("order_repeat_cancel:"))
+async def cb_order_repeat_cancel(callback: CallbackQuery):
+    order = await _load(callback)
+    if not order:
+        return
+    await callback.answer("Отменено")
+    prints = await db.get_order_prints(order["id"])
+    await callback.message.edit_reply_markup(
+        reply_markup=_order_keyboard(order, callback.from_user.id, prints)
+    )
+
+
+@router.callback_query(F.data.startswith("order_repeat_confirm:"))
+async def cb_order_repeat_confirm(callback: CallbackQuery):
+    """Создаёт бесплатный заказ-копию и новую доставку за счёт бизнеса."""
+    source = await _load(callback)
+    if not source:
+        return
+
+    existing = await db.get_direct_replacement(source["id"])
+    if existing:
+        code = existing.get("order_code") or f"#{existing['id']}"
+        await callback.answer(f"Повтор уже создан: {code}", show_alert=True)
+        await _sync_order_messages(callback, source)
+        return
+
+    await callback.answer("Создаю повтор…")
+    order_code = await db.next_order_code()
+    delivery_cost = await db.get_order_delivery_cost(source["id"])
+    summary = _replacement_summary(source, order_code)
+    new_id, created = await db.create_replacement_order(
+        source["id"], order_code, callback.from_user.id, _actor_name(callback),
+        summary, delivery_cost,
+    )
+    if not created:
+        replacement = await db.get_order(new_id)
+        code = (replacement or {}).get("order_code") or f"#{new_id}"
+        await callback.message.answer(f"ℹ️ Повтор уже был создан: <code>{code}</code>",
+                                      parse_mode="HTML")
+        await _sync_order_messages(callback, source)
+        return
+
+    replacement = await db.get_order(new_id)
+    rounds, round_products, products = await _replacement_products(replacement)
+
+    # Новая карточка и вложения появляются только в админском боте.
+    from handlers.prodamus_webhook import _send_order_notify
+    main_bot = Bot(token=config.BOT_TOKEN)
+    try:
+        await _send_order_notify(
+            new_id, _order_text(replacement), main_bot=main_bot,
+            rounds=rounds, order_number=order_code,
+        )
+    finally:
+        await main_bot.session.close()
+
+    # Нулевая выручка + стоимость доставки: повтор не выглядит как новая
+    # оплата, но СДЭК уменьшает прибыль и попадает в финансовую таблицу.
+    from services.gsheets import request_finance_append
+    counts = {pid: round_products.count(pid) for pid in dict.fromkeys(round_products)}
+    goods = ", ".join(
+        (products.get(pid) or {}).get("name", f"id:{pid}")
+        + (f" ×{counts[pid]}" if counts[pid] > 1 else "")
+        for pid in counts
+    )
+    credits = await db.order_print_credits(replacement, [], config.ADMIN_IDS)
+    date_msk = (datetime.utcnow() + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+    request_finance_append(
+        order_code, date_msk, 0, delivery_cost,
+        comment=f"Повтор без оплаты: {goods}", goods_type="Физический",
+        printer_positions=credits.get(config.PARTNER_ID, 0),
+    )
+    request_sync()
+
+    missing = [label for label, value in (
+        ("ПВЗ", replacement.get("pvz_code")),
+        ("ФИО", replacement.get("recipient_name")),
+        ("телефон", replacement.get("recipient_phone")),
+    ) if not value]
+    if config.CDEK_AUTO_ORDER and not missing:
+        pending = {
+            "pvz_code": replacement.get("pvz_code"),
+            "recipient_name": replacement.get("recipient_name"),
+            "recipient_phone": replacement.get("recipient_phone"),
+            "delivery_str": replacement.get("summary") or "",
+        }
+        asyncio.create_task(_create_replacement_cdek(
+            new_id, pending, round_products, products, order_code,
+            replacement["user_id"],
+        ))
+        delivery_note = "Новая накладная СДЭК создаётся автоматически."
+    elif missing:
+        delivery_note = ("Накладную нужно создать вручную: не хватает данных — "
+                         + ", ".join(missing) + ".")
+    else:
+        delivery_note = "Автосоздание СДЭК выключено — заведите накладную вручную."
+
+    await callback.message.answer(
+        f"✅ Создан бесплатный повтор <code>{order_code}</code>\n"
+        f"Клиент не платит и не возвращает товар. {delivery_note}",
+        parse_mode="HTML",
+    )
+    await _sync_order_messages(callback, source)
 
 
 @router.callback_query(F.data.startswith("order_shipped:"))

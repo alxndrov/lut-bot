@@ -23,30 +23,14 @@ logger = logging.getLogger(__name__)
 
 MSK = timezone(timedelta(hours=3))
 
-# Единая навигация между разделами — одни и те же кнопки внизу каждого
-# экрана, чтобы из /finance (выручка + взаиморасчёт + касса одним текстом)
-# можно было в один тап уйти в «Расходы» или «СДЭК» и вернуться обратно.
-_NAV_SECTIONS = [
-    ("show", "💳 Финансы", "fin_show"),
-    ("exp", "🧾 Расходы", "exp_show"),
-    ("cdek", "🚚 СДЭК", "cdek_show"),
-    ("stk", "📦 Расходники", "stk_show"),
-    ("rev", "⭐️ Отзывы", "rev_show"),
-]
-
-
 def _nav_row(current: str) -> list[list[InlineKeyboardButton]]:
-    """Строка кнопок навигации — добавлять через rows += _nav_row(...)."""
-    buttons = [
-        InlineKeyboardButton(text=label if key != current else f"· {label} ·",
-                             callback_data=cb)
-        for key, label, cb in _NAV_SECTIONS
-    ]
-    return [buttons]
+    """Back navigation for screens opened from the finance menu."""
+    return [[InlineKeyboardButton(text="◀️ Назад", callback_data="fin_show")]]
 
 
 class ExpenseStates(StatesGroup):
     waiting_amount = State()
+    waiting_payer = State()
     waiting_category_name = State()
 
 
@@ -120,7 +104,7 @@ async def cb_expense_cancel(callback: CallbackQuery, state: FSMContext):
 async def cb_expense_new_category(callback: CallbackQuery, state: FSMContext):
     await state.set_state(ExpenseStates.waiting_category_name)
     await callback.answer()
-    await callback.message.answer("Как назвать статью расходов?")
+    await callback.message.edit_text("Как назвать статью расходов?")
 
 
 @router.message(ExpenseStates.waiting_category_name)
@@ -146,11 +130,8 @@ async def cb_expense_category(callback: CallbackQuery, state: FSMContext):
     await state.update_data(category=category)
     await state.set_state(ExpenseStates.waiting_amount)
     await callback.answer()
-    try:
-        await callback.message.edit_text(f"🧾 <b>{category}</b>", parse_mode="HTML")
-    except Exception:
-        pass
-    await callback.message.answer(
+    await callback.message.edit_text(
+        f"🧾 <b>{category}</b>\n\n"
         "Сколько потратили? Напишите сумму, можно с комментарием:\n"
         "<code>1500 катушка PLA</code>",
         parse_mode="HTML",
@@ -165,11 +146,35 @@ async def on_expense_amount(message: Message, state: FSMContext):
                              "или <code>1500 катушка PLA</code>.", parse_mode="HTML")
         return
 
+    await state.update_data(amount=amount, comment=comment)
+    await state.set_state(ExpenseStates.waiting_payer)
+    await message.answer("Кто оплатил расход?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Со счёта проекта", callback_data="exp_payer:project")],
+        [InlineKeyboardButton(text=f"{config.OWNER_NAME} — личными деньгами", callback_data="exp_payer:owner")],
+        [InlineKeyboardButton(text=f"{config.PARTNER_NAME} — личными деньгами", callback_data="exp_payer:partner")],
+        [InlineKeyboardButton(text="Отмена", callback_data="exp_cancel")],
+    ]))
+
+
+@router.callback_query(ExpenseStates.waiting_payer, F.data.startswith("exp_payer:"))
+async def on_expense_payer(callback: CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+    payers = {"project": "Проект", "owner": config.OWNER_NAME, "partner": config.PARTNER_NAME}
+    paid_by = payers.get(callback.data.split(":", 1)[1])
+    if paid_by is None:
+        await callback.answer("Неизвестный плательщик", show_alert=True)
+        return
     data = await state.get_data()
+    amount, comment = data["amount"], data["comment"]
     category = data.get("category") or "Прочее"
-    u = message.from_user
+    u = callback.from_user
+    message = callback.message
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
-    expense_id = await db.add_expense(category, amount, comment, u.id, name)
+    expense_id = await db.add_expense(category, amount, comment, u.id, name, paid_by=paid_by)
+    await callback.answer("Записано")
+    await message.edit_reply_markup(reply_markup=None)
     await state.clear()
 
     from services.gsheets import request_expense_append
@@ -179,7 +184,7 @@ async def on_expense_amount(message: Message, state: FSMContext):
 
     tail = f"\n💬 {comment}" if comment else ""
     await message.answer(
-        f"✅ Записал расход\n\n🧾 <b>{category}</b> — <b>{amount:,.2f} ₽</b>{tail}",
+        f"✅ Записал расход\n\n🧾 <b>{category}</b> — <b>{amount:,.2f} ₽</b>{tail}\nОплатил: {paid_by}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"exp_del:{expense_id}")
@@ -194,6 +199,8 @@ async def cb_expense_delete(callback: CallbackQuery):
         return
     expense_id = int(callback.data.split(":")[1])
     deleted = await db.delete_expense(expense_id)
+    from services.gsheets import request_finance_sync
+    request_finance_sync()
     await callback.answer("Удалено 🗑" if deleted else "Этот расход уже удалён")
     try:
         await callback.message.edit_text("🗑 <s>Расход удалён</s>", parse_mode="HTML")
@@ -270,8 +277,8 @@ async def cb_expense_add(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.answer()
-    await callback.message.answer("🧾 <b>Куда потратили?</b>", parse_mode="HTML",
-                                  reply_markup=await _categories_keyboard())
+    await callback.message.edit_text("🧾 <b>Куда потратили?</b>", parse_mode="HTML",
+                                     reply_markup=await _categories_keyboard())
 
 
 @router.callback_query(F.data == "exp_dellist")
@@ -289,5 +296,5 @@ async def cb_expense_delete_list(callback: CallbackQuery):
         callback_data=f"exp_del:{e['id']}")] for e in items]
     rows.append([InlineKeyboardButton(text="◀️ Отмена", callback_data="exp_cancel")])
     await callback.answer()
-    await callback.message.answer("Что удалить?",
-                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await callback.message.edit_text("Что удалить?",
+                                     reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))

@@ -205,7 +205,7 @@ async def cb_stock_add(callback: CallbackQuery, state: FSMContext):
     await state.update_data(key=key)
     await state.set_state(StockStates.waiting_qty)
     await callback.answer()
-    await callback.message.answer(
+    await callback.message.edit_text(
         f"Сколько «{name}» привезли/добавить к вашему остатку? Напишите числом.")
 
 
