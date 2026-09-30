@@ -91,14 +91,32 @@ class SurveyForm(StatesGroup):
 VARIANT_Q = "Вариант из наличия"
 
 
-def _repeat_keyboard(has_delivery: bool = False, has_other: bool = False) -> InlineKeyboardMarkup:
+def _repeat_keyboard(has_delivery: bool = False, has_other: bool = False,
+                     same: str | None = "same") -> InlineKeyboardMarkup:
+    """same: "same" — «Ещё один такой же»; "stock" — у товара «в наличии»
+    ещё есть что выбрать; None — повторить нечего (всё уже выбрано)."""
     # Следующий шаг после «Достаточно»: доставка (если настроена) или сразу оплата
     done_text = "✅ Достаточно, к доставке" if has_delivery else "✅ Достаточно, к оплате"
-    rows = [[InlineKeyboardButton(text="➕ Ещё один такой же", callback_data="survey_more:add")]]
+    rows = []
+    if same == "stock":
+        rows.append([InlineKeyboardButton(text="➕ Ещё один из наличия", callback_data="survey_more:add")])
+    elif same:
+        rows.append([InlineKeyboardButton(text="➕ Ещё один такой же", callback_data="survey_more:add")])
     if has_other:
         rows.append([InlineKeyboardButton(text="🆕 Добавить другой товар", callback_data="survey_more:other")])
     rows.append([InlineKeyboardButton(text=done_text, callback_data="survey_more:done")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _same_mode(state: FSMContext) -> str | None:
+    """Какую кнопку повтора показать — по товару последней позиции заказа."""
+    data = await state.get_data()
+    rounds = data.get("rounds") or [[]]
+    round_products = data.get("round_products") or [data["product_id"]]
+    cur_id = round_products[-1] if round_products else data["product_id"]
+    if not await _is_stock(cur_id):
+        return "same"
+    return "stock" if await _available_variants(cur_id, rounds) else None
 
 
 async def _other_physical_products(exclude_ids) -> list[dict]:
@@ -283,7 +301,7 @@ async def _round_done(target: Message, state: FSMContext, bot: Bot, user):
         has_delivery = bool(anchor_product.get("survey_delivery_text")) if anchor_product else False
         round_products = data.get("round_products") or [anchor_id] * len(rounds)
         has_other = bool(await _other_physical_products(round_products))
-        await target.answer(repeat_text, reply_markup=_repeat_keyboard(has_delivery, has_other))
+        await target.answer(repeat_text, reply_markup=_repeat_keyboard(has_delivery, has_other, await _same_mode(state)))
         return
 
     await _finish_survey(target, state, bot, user, anchor_id, rounds)
@@ -354,7 +372,7 @@ async def _sold_out_back(target: Message, state: FSMContext):
     await state.update_data(rounds=rounds, round_products=round_products,
                             cur_product_id=round_products[-1])
     await target.answer("😔 Больше вариантов в наличии не осталось.",
-                        reply_markup=_repeat_keyboard(has_delivery, has_other))
+                        reply_markup=_repeat_keyboard(has_delivery, has_other, await _same_mode(state)))
 
 
 @router.callback_query(SurveyForm.repeat_choice, F.data.startswith("survey_more:"))
@@ -414,7 +432,7 @@ async def cb_survey_pick_product(callback: CallbackQuery, state: FSMContext):
         has_other = bool(await _other_physical_products(round_products))
         await state.set_state(SurveyForm.repeat_choice)
         await callback.message.answer("Хорошо, остаёмся здесь 👇",
-                                      reply_markup=_repeat_keyboard(has_delivery, has_other))
+                                      reply_markup=_repeat_keyboard(has_delivery, has_other, await _same_mode(state)))
         return
 
     new_id = int(choice)
@@ -456,7 +474,7 @@ async def cb_survey_pick_product(callback: CallbackQuery, state: FSMContext):
     await state.update_data(rounds=rounds, round_products=round_products)
     await callback.message.answer(
         f"У «{new_product['name']}» не настроен опрос — добавил без вопросов.",
-        reply_markup=_repeat_keyboard(has_delivery, has_other),
+        reply_markup=_repeat_keyboard(has_delivery, has_other, await _same_mode(state)),
     )
 
 
@@ -491,7 +509,7 @@ async def fsm_repeat_freetext(message: Message, state: FSMContext, bot: Bot):
         anchor_product = await db.get_product(anchor_id)
         has_delivery = bool(anchor_product.get("survey_delivery_text")) if anchor_product else False
         has_other = bool(await _other_physical_products(round_products))
-        await message.answer("Выбери кнопкой 👇", reply_markup=_repeat_keyboard(has_delivery, has_other))
+        await message.answer("Выбери кнопкой 👇", reply_markup=_repeat_keyboard(has_delivery, has_other, await _same_mode(state)))
 
 
 async def _finish_survey(target: Message, state: FSMContext, bot: Bot,
