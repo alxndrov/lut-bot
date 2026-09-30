@@ -107,6 +107,10 @@ GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "google-serv
 # Отдельный лист той же таблицы — финансовая книга по заказам (по строке на
 # заказ, с формулами комиссии/налога/к выплате). Лист создаётся сам при
 # первой записи, если его ещё нет.
+# Выплаты партнёрам до того, как их начали записывать в бот, — та же
+# константа, что в строке «Ранние выплаты Дане с Мишей» листа «Финансы».
+# Нужна, чтобы бот считал свободные деньги на счету так же, как таблица.
+EARLY_PAYOUTS: float = float(os.getenv("EARLY_PAYOUTS", "8967.44"))
 GOOGLE_SHEET_FINANCE_TAB: str = os.getenv("GOOGLE_SHEET_FINANCE_TAB", "Финансы")
 GSHEETS_ENABLED: bool = bool(GOOGLE_SHEET_ID)
 DAILY_REPORT_HOUR_MSK: int = int(os.getenv("DAILY_REPORT_HOUR_MSK", "9"))

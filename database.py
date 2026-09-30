@@ -313,6 +313,13 @@ async def init_db(existing_cdek_contract: str | None = None):
             expense_columns = {r[1] for r in await cur.fetchall()}
         if "paid_by" not in expense_columns:
             await db.execute("ALTER TABLE expenses ADD COLUMN paid_by TEXT")
+        # Недоплаченное при расчёте (не хватило свободных денег) переносится
+        # в следующий период — храним его в самой записи расчёта
+        async with db.execute("PRAGMA table_info(settlements)") as cur:
+            settlement_columns = {r[1] for r in await cur.fetchall()}
+        for column in ("carry_owner", "carry_partner"):
+            if column not in settlement_columns:
+                await db.execute(f"ALTER TABLE settlements ADD COLUMN {column} REAL NOT NULL DEFAULT 0")
         await db.execute("""
             CREATE TABLE IF NOT EXISTS expense_categories (
                 name     TEXT PRIMARY KEY,
@@ -3337,11 +3344,13 @@ async def get_user_ref(user_id: int) -> Optional[str]:
             return row[0] if row else None
 
 
-async def add_settlement(gross: float, fee: float, net: float, count: int):
+async def add_settlement(gross: float, fee: float, net: float, count: int,
+                         carry_owner: float = 0.0, carry_partner: float = 0.0):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            "INSERT INTO settlements (gross, fee, net, count) VALUES (?, ?, ?, ?)",
-            (gross, fee, net, count),
+            "INSERT INTO settlements (gross, fee, net, count, carry_owner, carry_partner) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (gross, fee, net, count, carry_owner, carry_partner),
         )
         await db.commit()
 

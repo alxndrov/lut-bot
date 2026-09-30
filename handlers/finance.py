@@ -57,7 +57,7 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
     else:
         period_text = "за <b>всё время</b>"
 
-    if not s or s["count"] == 0:
+    if not s or (s["count"] == 0 and not s.get("owner_left") and not s.get("partner_left")):
         return (
             f"🤝 <b>Взаиморасчёт</b>\n\n"
             f"Продаж {period_text} не было.\n"
@@ -88,15 +88,17 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
     ]
     # Если часть доли уже отдали внутри периода — показываем остаток, иначе
     # цифра выглядит как долг, которого на самом деле уже нет
-    for name, share, reimb, paid, left in (
-        (config.OWNER_NAME, s["owner"], s.get("reimb_owner", 0), s.get("paid_owner", 0),
-         s.get("owner_left", s["owner"])),
-        (config.PARTNER_NAME, s["partner"], s.get("reimb_partner", 0), s.get("paid_partner", 0),
-         s.get("partner_left", s["partner"])),
+    for name, share, reimb, carry, paid, left in (
+        (config.OWNER_NAME, s["owner"], s.get("reimb_owner", 0), s.get("carry_owner", 0),
+         s.get("paid_owner", 0), s.get("owner_left", s["owner"])),
+        (config.PARTNER_NAME, s["partner"], s.get("reimb_partner", 0), s.get("carry_partner", 0),
+         s.get("paid_partner", 0), s.get("partner_left", s["partner"])),
     ):
-        if paid or reimb:
+        if paid or reimb or carry:
             lines.append(f"👤 {name}: <b>{left:,.2f} ₽</b>  ← осталось выплатить")
             detail = f"доля {share:,.2f}"
+            if carry:
+                detail += f" + долг с прошлого расчёта {carry:,.2f}"
             if reimb:
                 detail += f" + возместить личные траты {reimb:,.2f}"
             if paid:
@@ -183,46 +185,72 @@ async def _debt_block(s: dict | None, last_settlement: dict | None,
         caveats = await _debt_caveats(s, pending_gross, cdek_paid, npd_paid)
         if caveats:
             text += "\n" + caveats
+    if s and (s["owner_left"] > 0 or s["partner_left"] > 0):
+        text += "\n\n" + await _payable_text(s)
     return text, cdek_paid, npd_paid, pending_gross
 
 
+async def _free_cash() -> dict | None:
+    try:
+        from services.finance_sheet import free_cash
+        return await free_cash()
+    except Exception:
+        logger.exception("free_cash: не удалось посчитать свободные деньги")
+        return None
+
+
+def _payable(s: dict, free: float) -> tuple[float, float]:
+    """Сколько каждому можно выплатить прямо сейчас. Отложенное на СДЭК и
+    НПД и ещё не пришедшее от Prodamus в выплаты не идёт: если свободных
+    денег меньше, чем долги, оба получают одинаковую долю от своего долга,
+    а остаток ждёт следующего расчёта."""
+    owner_left, partner_left = max(0.0, s["owner_left"]), max(0.0, s["partner_left"])
+    total = owner_left + partner_left
+    if total <= 0:
+        return 0.0, 0.0
+    k = min(1.0, max(0.0, free) / total)
+    return round(owner_left * k, 2), round(partner_left * k, 2)
+
+
+async def _payable_text(s: dict) -> str:
+    cash = await _free_cash()
+    if cash is None:
+        return "<i>⚠️ Не удалось проверить свободные деньги на счету — перед выплатой сверьтесь с таблицей.</i>"
+    pay_owner, pay_partner = _payable(s, cash["free"])
+    head = (f"🏦 На счету после резервов (СДЭК {cash['cdek_reserve']:,.2f} · "
+            f"НПД {cash['tax_reserve']:,.2f}"
+            + (f" · ещё не пришло от Prodamus {cash['pending']:,.2f}" if cash["pending"] else "")
+            + f"): <b>{cash['free']:,.2f} ₽</b>")
+    if pay_owner >= s["owner_left"] - 0.005 and pay_partner >= s["partner_left"] - 0.005:
+        return head + "\n✅ Хватает, чтобы выплатить всё."
+    return (head + f"\n⚠️ Сейчас можно выплатить только: {config.OWNER_NAME} <b>{pay_owner:,.2f} ₽</b>"
+            f" · {config.PARTNER_NAME} <b>{pay_partner:,.2f} ₽</b>. Остальное останется долгом "
+            f"и перейдёт в следующий расчёт.")
+
+
 async def _free_to_payout(dt_from: str, dt_to: str, now_utc: datetime) -> tuple[float, float, float, float]:
-    """Сколько можно выплатить прямо сейчас, ничего не сломав.
+    """Сколько можно выплатить прямо сейчас, ничего не сломав: остаток на
+    счету минус отложенное на СДЭК и НПД — как в листе «Финансы».
 
-    Резерв на СДЭК и начисленный НПД физически лежат на том же счету, что и
-    прибыль, — их легко выплатить как долю и потом не найти денег на счёт
-    СДЭК (так и вышло в августе 2026). Поэтому «свободно» — это ожидаемый
-    остаток на счету МИНУС то, что уже начислено, но ещё не оплачено.
-
-    Возвращает (свободно, остаток_на_счету, долг_СДЭК, долг_НПД).
+    Возвращает (свободно, остаток_на_счету, резерв_СДЭК, резерв_НПД).
     """
-    from services import payout as payout_svc
-    s = await payout_svc.split(dt_from, dt_to)
-    if not s or not s["count"]:
+    cash = await _free_cash()
+    if cash is None:
         return 0.0, 0.0, 0.0, 0.0
-    npd_paid_for_period = await db.get_npd_payments_summary_by_tax_month(dt_from, dt_to)
-    payouts = await db.get_payouts_summary(dt_from, dt_to)
-    pending_net = (await _pending_gross(dt_from, dt_to, now_utc)) * (1 - s["fee_pct"] / 100)
-
-    cash = (s["gross"] - s["fee"] - s["expenses"]
-            - payouts["total"] - pending_net)
-    owe_cdek = max(0.0, s["delivery_out"])
-    owe_npd = max(0.0, s["npd"] - float(npd_paid_for_period["total"]))
-    return cash - owe_cdek - owe_npd, cash, owe_cdek, owe_npd
+    return cash["free"], cash["on_account"], cash["cdek_reserve"], cash["tax_reserve"]
 
 
 async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
                            npd_paid: dict, pending_gross: float) -> str:
     """«Взаиморасчёт» выше — начисление: сколько ДОЛЖНО уйти на налог, СДЭК
     и доли партнёров. Здесь — сколько реально ушло (по вашим отметкам),
-    сколько Prodamus реально перевёл (см. pending_gross) и сколько поэтому
-    сколько свободно по текущему периоду после резервов."""
+    сколько Prodamus реально перевёл (см. pending_gross) и сколько свободно
+    на всём счету после резервов."""
     payouts = await db.get_payouts_summary(dt_from, dt_to)
     # Комиссия с ещё не переведённой части — плоская оценка по общей ставке
     # периода, точнее взять неоткуда (Prodamus не отдаёт комиссию по заказу)
     pending_net = pending_gross * (1 - s["fee_pct"] / 100)
 
-    npd_paid_for_period = await db.get_npd_payments_summary_by_tax_month(dt_from, dt_to)
     cash = (s["gross"] - s["fee"] - s["expenses"] - payouts["total"] - pending_net)
 
     lines = [
@@ -240,18 +268,21 @@ async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
     if payouts["total"]:
         by = " · ".join(f"{name} {amt:,.2f} ₽" for name, amt in payouts["by_recipient"].items())
         lines.append(f"Выплачено партнёрам: −{payouts['total']:,.2f} ₽ ({by})")
-    owe_cdek = max(0.0, s["delivery_out"])
-    owe_npd = max(0.0, s["npd"] - float(npd_paid_for_period["total"]))
-    free = cash - owe_cdek - owe_npd
-    lines += [
-        "─" * 30,
-        f"💰 <b>Деньги периода до резервов: {cash:,.2f} ₽</b>",
-        "",
-        f"🔒 Из них зарезервировано: СДЭК {owe_cdek:,.2f} ₽ · НПД {owe_npd:,.2f} ₽",
-        f"✅ <b>Свободно к выплате: {free:,.2f} ₽</b>" if free > 0
-        else f"⛔️ <b>Свободных денег нет: {free:,.2f} ₽</b> — на счету не хватает "
-             f"даже на СДЭК и налог, выплаты лучше приостановить",
-    ]
+    lines += ["─" * 30, f"💰 <b>Деньги периода: {cash:,.2f} ₽</b>", ""]
+    # Свободное к выплате — по всему счёту, а не по периоду: резервы СДЭК и
+    # НПД прошлых периодов лежат там же
+    acc = await _free_cash()
+    if acc is None:
+        lines.append("⚠️ Не удалось посчитать свободные деньги на счету")
+    else:
+        free = acc["free"]
+        lines += [
+            f"🏦 На счету по учёту: {acc['on_account']:,.2f} ₽",
+            f"🔒 Отложено: СДЭК {acc['cdek_reserve']:,.2f} ₽ · НПД {acc['tax_reserve']:,.2f} ₽",
+            f"✅ <b>Свободно к выплате: {free:,.2f} ₽</b>" if free > 0
+            else f"⛔️ <b>Свободных денег нет: {free:,.2f} ₽</b> — на счету не хватает "
+                 f"даже на СДЭК и налог, выплаты лучше приостановить",
+        ]
     return "\n".join(lines)
 
 
@@ -309,6 +340,14 @@ async def _settle_split() -> tuple[dict | None, dict | None, str, str, datetime]
     except Exception as e:
         logger.error(f"settle split fetch error: {e}")
         s = None
+
+    # Долг, который прошлый расчёт не смог выплатить (не хватило свободных
+    # денег), добавляется к остатку этого периода
+    if s and last_settlement:
+        for who in ("owner", "partner"):
+            carry = float(last_settlement.get(f"carry_{who}") or 0)
+            s[f"carry_{who}"] = carry
+            s[f"{who}_left"] += carry
 
     return s, last_settlement, dt_from, dt_to, now_utc
 
@@ -398,49 +437,48 @@ async def cb_fin_settle(callback: CallbackQuery):
     await callback.answer()
     await callback.message.edit_text("⏳ Фиксирую расчёт…")
 
-    last = await db.get_last_settlement()
-    dt_from = last["settled_at"] if last else "2020-01-01T00:00:00.000Z"
-    now_utc = datetime.now(timezone.utc)
-    dt_to = now_utc.strftime("%Y-%m-%dT%H:%M:%S.999Z")
-
-    try:
-        from services import payout
-        s = await payout.split(dt_from[:19].replace("T", " "), dt_to[:19].replace("T", " "))
-    except Exception as e:
-        logger.error(f"settle error: {e}")
+    s, _last, _start, _end, now_utc = await _settle_split()
+    cash = await _free_cash()
+    if s is None or cash is None:
         await callback.message.edit_text(
             "❌ Не удалось получить данные.", reply_markup=_settle_menu_keyboard()
         )
         return
+    pay = dict(zip(("owner", "partner"), _payable(s, cash["free"])))
 
-    # «Мы в расчёте» = обоим перевели их остаток за период. Записываем эти
-    # переводы выплатами — иначе они есть только в банковской выписке, и
-    # сверка счёта не сходится. Время ставим на секунду раньше расчёта,
-    # чтобы выплата попала в закрываемый период, а не в следующий.
+    # «Мы в расчёте» = обоим перевели то, что можно выплатить сейчас: их
+    # остаток, но не больше свободных денег (отложенное на СДЭК и НПД и ещё
+    # не пришедшее от Prodamus не трогаем). Записываем эти переводы
+    # выплатами, а недоплаченное переносим долгом в следующий период.
+    # Время выплаты — на секунду раньше расчёта, чтобы она попала в
+    # закрываемый период, а не в следующий.
     u = callback.from_user
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
     paid_at = (now_utc - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
     now_msk = datetime.now(MSK)
     comment = f"Мы в расчёте {now_msk.strftime('%d.%m.%Y')}"
     from services.gsheets import request_expense_append
-    share_lines, overpaid = [], []
-    for recipient, left, reimb in (
-        (config.OWNER_NAME, s["owner_left"], s.get("reimb_owner", 0)),
-        (config.PARTNER_NAME, s["partner_left"], s.get("reimb_partner", 0)),
-    ):
-        if left >= 0.01:
-            left = round(left, 2)
-            payout_id = await db.add_payout(recipient, left, comment, u.id, name, paid_at=paid_at)
-            request_expense_append(f"payout-{payout_id}", now_msk.strftime("%d.%m.%Y %H:%M"),
-                                   left, f"Выплата {recipient}: {comment}")
-            note = f", в т.ч. возмещение личных трат {reimb:,.2f} ₽" if reimb else ""
-            share_lines.append(f"👤 {recipient}: <b>{left:,.2f} ₽</b> — записал выплату{note}")
-        elif left <= -0.01:
+    share_lines, overpaid, carry = [], [], {"owner": 0.0, "partner": 0.0}
+    for who, recipient in (("owner", config.OWNER_NAME), ("partner", config.PARTNER_NAME)):
+        left, reimb, amount = s[f"{who}_left"], s.get(f"reimb_{who}", 0), pay[who]
+        if left <= -0.01:
             overpaid.append(f"⚠️ {recipient} за период получил на <b>{-left:,.2f} ₽</b> больше доли")
-        else:
+            continue
+        if left < 0.01:
             share_lines.append(f"👤 {recipient}: уже всё выплачено")
+            continue
+        carry[who] = round(left - amount, 2)
+        if amount >= 0.01:
+            payout_id = await db.add_payout(recipient, amount, comment, u.id, name, paid_at=paid_at)
+            request_expense_append(f"payout-{payout_id}", now_msk.strftime("%d.%m.%Y %H:%M"),
+                                   amount, f"Выплата {recipient}: {comment}")
+            note = f", в т.ч. возмещение личных трат {reimb:,.2f} ₽" if reimb else ""
+            share_lines.append(f"👤 {recipient}: <b>{amount:,.2f} ₽</b> — записал выплату{note}")
+        if carry[who] >= 0.01:
+            share_lines.append(f"    ⏳ ещё {carry[who]:,.2f} ₽ — долг, перейдёт в следующий расчёт")
 
-    await db.add_settlement(gross=s["gross"], fee=s["fee"], net=s["net"], count=s["count"])
+    await db.add_settlement(gross=s["gross"], fee=s["fee"], net=s["net"], count=s["count"],
+                            carry_owner=carry["owner"], carry_partner=carry["partner"])
 
     text = (
         f"✅ <b>Расчёт зафиксирован</b> — {now_msk.strftime('%d.%m.%Y %H:%M')} МСК\n\n"

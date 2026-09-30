@@ -99,7 +99,7 @@ def allocate_tax(rows, months):
                                     - sum(r['tax'] for r in group))
 
 
-async def _build_snapshot(year, now):
+async def _build_snapshot(year, now, monthly_split=True):
     rows = await db.get_cashflow_export_rows(config.ADMIN_IDS, config.PARTNER_ID)
     counts = Counter(str(r['code']) for r in rows)
     if any(not r['code'] for r in rows) or any(n != 1 for n in counts.values()):
@@ -148,7 +148,7 @@ async def _build_snapshot(year, now):
                      if msk_date(r['created_at']).year == year}
     monthly = []
     for month in range(1, 13):
-        if month in active_months:
+        if monthly_split and month in active_months:
             s = await payout.split(*payout.month_bounds(year, month))
             monthly.append([MONTHS[month - 1], *[money(s[k]) for k in
                 ('gross', 'fee', 'npd', 'delivery_out')],
@@ -171,7 +171,7 @@ async def _build_snapshot(year, now):
     }
 
 
-async def build_snapshot(year, now=None):
+async def build_snapshot(year, now=None, monthly_split=True):
     now = now or datetime.now(timezone.utc)
     # A connection kept open observes commits made by any other connection.
     # Retry if any source changed while the helpers were reading it.
@@ -181,10 +181,25 @@ async def build_snapshot(year, now=None):
                 return (await cur.fetchone())[0]
         for _ in range(3):
             before = await version()
-            snapshot = await _build_snapshot(year, now)
+            snapshot = await _build_snapshot(year, now, monthly_split)
             if await version() == before:
                 return snapshot
         raise SheetsError('база менялась во время сверки; повторю автоматически')
+
+
+async def free_cash(now=None) -> dict:
+    """Сколько денег на счету свободно после всех резервов — по той же
+    формуле, что строка «После резервов на счету» листа «Финансы»: всё
+    принятое минус комиссия, то, что Prodamus ещё не перевёл, оплаченные
+    СДЭК/НПД/расходы, все выплаты (включая ранние) и минус ещё не
+    оплаченные СДЭК и НПД. Из этого и только из этого можно платить доли."""
+    now = now or datetime.now(timezone.utc)
+    snap = await build_snapshot(now.year, now, monthly_split=False)
+    on_account = money(snap['arrived'] - snap['cdek_paid'] - snap['tax_paid']
+                       - snap['expenses'] - snap['payouts']['total'] - config.EARLY_PAYOUTS)
+    return {'on_account': on_account, 'pending': snap['pending'],
+            'cdek_reserve': snap['cdek_reserve'], 'tax_reserve': snap['tax_reserve'],
+            'free': money(on_account - snap['cdek_reserve'] - snap['tax_reserve'])}
 
 
 @dataclass(frozen=True)
