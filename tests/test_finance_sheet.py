@@ -167,8 +167,8 @@ class SnapshotTests(unittest.IsolatedAsyncioTestCase):
     async def test_source_change_during_read_retries(self):
         original = fs._build_snapshot
         calls = []
-        async def mutate_once(year, now):
-            result = await original(year, now)
+        async def mutate_once(year, now, *args):
+            result = await original(year, now, *args)
             if not calls:
                 await db.add_expense('Материалы', 10)
             calls.append(1)
@@ -177,6 +177,16 @@ class SnapshotTests(unittest.IsolatedAsyncioTestCase):
             result = await fs.build_snapshot(2026, self.now)
         self.assertEqual(len(calls), 2)
         self.assertEqual(result['expenses'], 110)
+
+    async def test_free_cash_matches_summary_formula(self):
+        snapshot = await fs.build_snapshot(2026, self.now)
+        with patch.object(config, 'EARLY_PAYOUTS', 50):
+            cash = await fs.free_cash(self.now)
+        on_account = (snapshot['arrived'] - snapshot['cdek_paid'] - snapshot['tax_paid']
+                      - snapshot['expenses'] - snapshot['payouts']['total'] - 50)
+        self.assertAlmostEqual(cash['on_account'], on_account, places=2)
+        self.assertAlmostEqual(cash['free'], on_account - snapshot['cdek_reserve']
+                               - snapshot['tax_reserve'], places=2)
 
     async def test_expense_payer_is_separate_from_record_author(self):
         expense_id = await db.add_expense('Пластик', 1184, 'PLA', 999, 'author', paid_by='Миша')

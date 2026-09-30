@@ -152,15 +152,27 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
             'gross': 22591, 'fee': 858.458, 'expenses': 3803,
             'delivery_out': 5165.33, 'npd': 903.64, 'fee_pct': config.PRODAMUS_FEE_PERCENT,
         }
-        text = await finance._cash_block_text(
-            s, '2026-09-02 08:47:58', '2026-09-14 06:39:21',
-            {'total': 13123.47, 'count': 3},
-            await db.get_npd_payments_summary('2026-09-02 08:47:58', '2026-09-14 06:39:21'),
-            0,
-        )
+        # Резервы и «свободно» — по всему счёту (как в листе «Финансы»),
+        # а не по периоду
+        account = {'on_account': 17929.54, 'pending': 0, 'cdek_reserve': 5165.33,
+                   'tax_reserve': 903.64, 'free': 11860.57}
+        with patch.object(finance, '_free_cash', AsyncMock(return_value=account)):
+            text = await finance._cash_block_text(
+                s, '2026-09-02 08:47:58', '2026-09-14 06:39:21',
+                {'total': 13123.47, 'count': 3},
+                await db.get_npd_payments_summary('2026-09-02 08:47:58', '2026-09-14 06:39:21'),
+                0,
+            )
         self.assertIn('Оплачено НПД по факту: −4,867.00 ₽', text)
         self.assertIn('СДЭК 5,165.33 ₽ · НПД 903.64 ₽', text)
         self.assertIn('Свободно к выплате: 11,860.57 ₽', text)
+
+    def test_payable_never_exceeds_free_cash(self):
+        s = {'owner_left': 600, 'partner_left': 400}
+        self.assertEqual(finance._payable(s, 5000), (600, 400))
+        self.assertEqual(finance._payable(s, 500), (300, 200))
+        self.assertEqual(finance._payable(s, -323.2), (0, 0))
+        self.assertEqual(finance._payable({'owner_left': -50, 'partner_left': 400}, 1000), (0, 400))
 
     async def test_tax_ui_old_months_and_no_payouts(self):
         for month in range(1, 9):
