@@ -429,22 +429,11 @@ def stats_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🚚 Отправка заказов", callback_data="admin:shipping")],
         [InlineKeyboardButton(text="📅 Заработок по месяцам", callback_data="admin:stats_monthly")],
     ]
-    if config.GSHEETS_ENABLED:
-        rows.append([InlineKeyboardButton(text="📊 Заказы в Google Таблице",
-                                          callback_data="admin:gsheet_open")])
     rows += [
         [InlineKeyboardButton(text="📥 Выгрузить в файл", callback_data="admin:stats_export")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def gsheet_keyboard(url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Открыть таблицу", url=url)],
-        [InlineKeyboardButton(text="🔄 Обновить сейчас", callback_data="admin:gsheet_sync")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin:stats")],
-    ])
 
 
 def order_analytics_products_keyboard(products: list[dict]) -> InlineKeyboardMarkup:
@@ -462,9 +451,6 @@ def shipping_keyboard(mode: str = "unshipped") -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=other[0], callback_data=other[1])],
         [InlineKeyboardButton(text="🔄 Обновить", callback_data=f"admin:shipping:{mode}")],
     ]
-    if config.GSHEETS_ENABLED:
-        rows.append([InlineKeyboardButton(text="📊 Обновить Google Таблицу",
-                                          callback_data="admin:gsheet_sync")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:stats")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

@@ -101,10 +101,9 @@ PRIVACY_POLICY_URL: str = os.getenv("PRIVACY_POLICY_URL", "")
 OFFER_URL: str = os.getenv("OFFER_URL", "")
 POLICY_REQUIRED: bool = bool(PRIVACY_POLICY_URL)
 
-# Google Таблица с заказами. Пока не заданы — кнопка выгрузки не показывается.
+# Google Таблица (финансовый лист). Пока не заданы — выгрузка выключена.
 GOOGLE_SHEET_ID: str = os.getenv("GOOGLE_SHEET_ID", "")
 GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "google-service-account.json")
-GOOGLE_SHEET_TAB: str = os.getenv("GOOGLE_SHEET_TAB", "Заказы")
 # Отдельный лист той же таблицы — финансовая книга по заказам (по строке на
 # заказ, с формулами комиссии/налога/к выплате). Лист создаётся сам при
 # первой записи, если его ещё нет.

@@ -275,63 +275,6 @@ async def cb_pending_del(callback: CallbackQuery):
     await cb_pending_orders(callback)
 
 
-# --- Выгрузка заказов в Google Таблицу ---
-
-@router.callback_query(F.data == "admin:gsheet_open")
-async def cb_gsheet_open(callback: CallbackQuery):
-    if not await admin_only(callback):
-        return
-    from keyboards.admin import gsheet_keyboard
-    from services.gsheets import SYNC_DELAY
-
-    url = f"https://docs.google.com/spreadsheets/d/{config.GOOGLE_SHEET_ID}"
-    orders = await db.get_orders_export()
-    await callback.message.edit_text(
-        "📊 <b>Заказы в Google Таблице</b>\n\n"
-        f"Лист «{config.GOOGLE_SHEET_TAB}», заказов: <b>{len(orders)}</b>.\n\n"
-        "Таблица обновляется сама: после каждой оплаты, когда приходит трек СДЭК "
-        f"и когда заказ берут в работу или отправляют (через ~{int(SYNC_DELAY)} сек).\n\n"
-        "Кнопка ниже нужна, только если хочется обновить прямо сейчас.",
-        parse_mode="HTML",
-        reply_markup=gsheet_keyboard(url),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "admin:gsheet_sync")
-async def cb_gsheet_sync(callback: CallbackQuery):
-    if not await admin_only(callback):
-        return
-    from services.gsheets import sync_orders, SheetsError
-
-    await callback.answer("Выгружаю…")
-    orders = await db.get_orders_export()
-    if not orders:
-        await callback.message.answer("Заказов пока нет — выгружать нечего.")
-        return
-
-    try:
-        # gspread синхронный, в отдельном потоке — иначе подвиснет весь бот
-        url = await asyncio.to_thread(sync_orders, orders)
-    except SheetsError as e:
-        logger.error(f"gsheet_sync: {e}")
-        await callback.message.answer(
-            f"❌ Не удалось обновить таблицу: {e}", parse_mode="HTML"
-        )
-        return
-    except Exception as e:
-        logger.exception("gsheet_sync: неожиданная ошибка")
-        await callback.message.answer(f"❌ Ошибка выгрузки: {type(e).__name__}: {e}")
-        return
-
-    await callback.message.answer(
-        f"✅ Таблица обновлена — заказов: <b>{len(orders)}</b>\n\n"
-        f'<a href="{url}">Открыть таблицу</a>',
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-    )
-
-
 # --- Габариты посылки (влияют на тариф СДЭК и накладную) ---
 
 # Шаги мастера: состояние, подпись, единица, разумный предел

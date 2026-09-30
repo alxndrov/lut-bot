@@ -3034,24 +3034,6 @@ async def get_payouts_summary(date_from: str | None = None,
     }
 
 
-async def get_orders_export() -> list[dict]:
-    """Все заказы для выгрузки в таблицу: заказ + товар + клиент + оплата."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT o.*, pr.name AS product_name, pr.price AS product_price,
-                      u.username, u.first_name,
-                      pu.amount AS paid_amount, pu.delivery_amount
-               FROM orders o
-               LEFT JOIN products pr ON o.product_id = pr.id
-               LEFT JOIN users u ON o.user_id = u.user_id
-               LEFT JOIN purchases pu
-                      ON pu.telegram_payment_id = o.prodamus_order_id
-               ORDER BY o.id"""
-        ) as cur:
-            return [dict(r) for r in await cur.fetchall()]
-
-
 async def get_orders_for_finance_export(admin_ids: list[int] | None = None,
                                         partner_id: int | None = None) -> list[dict]:
     """Заказы для (пере)выгрузки в финансовый лист: order_code, дата, и
