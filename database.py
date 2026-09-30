@@ -676,6 +676,13 @@ async def init_db(existing_cdek_contract: str | None = None):
                 stock INTEGER NOT NULL DEFAULT 0
             )
         """)
+        # Вид товара «Физический в наличии»: для финансов это обычный
+        # физтовар (category='physical'), но вместо опроса клиент выбирает
+        # позицию из наличия
+        try:
+            await db.execute("ALTER TABLE products ADD COLUMN in_stock INTEGER DEFAULT 0")
+        except Exception:
+            pass
         await db.commit()
 
 
@@ -697,7 +704,7 @@ async def get_catalog_products(include_hidden: bool = False) -> list[dict]:
     if include_hidden:
         return products
     return [p for p in products
-            if not await get_product_variants(p["id"])
+            if not is_stock_product(p)
             or await get_product_variants(p["id"], in_stock_only=True)]
 
 
@@ -774,6 +781,11 @@ async def delete_product(product_id: int):
 
 # --- Варианты товара в наличии ---
 
+def is_stock_product(product: dict | None) -> bool:
+    """Товар вида «Физический в наличии»."""
+    return bool(product and product.get("category") == "physical" and product.get("in_stock"))
+
+
 async def get_product_variants(product_id: int, in_stock_only: bool = False) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -808,6 +820,25 @@ async def add_product_variant(product_id: int, name: str, stock: int = 1) -> int
         )
         await db.commit()
         return cursor.lastrowid
+
+
+async def set_variant_stock(variant_id: int, stock: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE product_variants SET stock = ? WHERE id = ?",
+                         (max(0, stock), variant_id))
+        await db.commit()
+
+
+async def rename_product_variant(variant_id: int, name: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE product_variants SET name = ? WHERE id = ?", (name, variant_id))
+        await db.commit()
+
+
+async def delete_product_variant(variant_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM product_variants WHERE id = ?", (variant_id,))
+        await db.commit()
 
 
 async def take_variant_stock(variant_id: int) -> bool:
@@ -1210,8 +1241,13 @@ def unpack_round_products(raw: str | None, rounds: list, fallback_product_id: in
 
 
 async def update_product_category(product_id: int, category: str):
+    """category='stock' — «Физический в наличии»: physical + флаг in_stock."""
+    in_stock = 1 if category == "stock" else 0
+    if category == "stock":
+        category = "physical"
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE products SET category = ? WHERE id = ?", (category, product_id))
+        await db.execute("UPDATE products SET category = ?, in_stock = ? WHERE id = ?",
+                         (category, in_stock, product_id))
         await db.commit()
 
 

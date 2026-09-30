@@ -182,6 +182,8 @@ def admin_product_keyboard(product: dict, purchase_count: int = 0) -> InlineKeyb
         toggle_text = "Скрыт от каталога"
 
     rp = "✅" if product.get("review_push_delay") else "—"
+    # «Физический в наличии»: вместо опроса — список позиций с количеством
+    in_stock = category == "physical" and bool(product.get("in_stock"))
 
     buttons = [
         [InlineKeyboardButton(text="✏️ Контент", callback_data=f"admin:psub:content:{pid}")],
@@ -189,8 +191,10 @@ def admin_product_keyboard(product: dict, purchase_count: int = 0) -> InlineKeyb
                               callback_data=f"admin:psub:media:{pid}")],
         *([[InlineKeyboardButton(text="📚 Инфобиз", callback_data=f"admin:psub:infobiz:{pid}")]]
           if category == "infobiz" else []),
+        *([[InlineKeyboardButton(text="📦 Наличие и количество", callback_data=f"admin:stock:{pid}")]]
+          if in_stock else []),
         *([[InlineKeyboardButton(text="📋 Опрос", callback_data=f"admin:psub:survey:{pid}")]]
-          if category == "physical" else []),
+          if category == "physical" and not in_stock else []),
         *([[InlineKeyboardButton(text=_package_label(product),
                                  callback_data=f"admin:pkg:{pid}")]]
           if category == "physical" else []),
@@ -258,6 +262,8 @@ def product_submenu_content(product: dict) -> InlineKeyboardMarkup:
                  "infobiz": "Инфобиз", "digital": "Цифровой"}
     cat = product.get("category", "digital")
     cat_text = f"{cat_icons.get(cat, '📦')} {cat_names.get(cat, 'Цифровой')}"
+    if cat == "physical" and product.get("in_stock"):
+        cat_text = "📦 Физический в наличии"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=name_label, callback_data=f"admin:edit_name:{pid}"),
          InlineKeyboardButton(text="✏️ Описание", callback_data=f"admin:edit_desc:{pid}")],
@@ -376,10 +382,35 @@ def product_submenu_survey(product: dict, questions: list[dict]) -> InlineKeyboa
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def stock_keyboard(product_id: int, variants: list[dict]) -> InlineKeyboardMarkup:
+    """Экран «Наличие»: позиции с количеством + добавление."""
+    rows = [[InlineKeyboardButton(text=f"{v['name']} — {v['stock']} шт",
+                                  callback_data=f"admin:stockv:{v['id']}")]
+            for v in variants]
+    rows.append([InlineKeyboardButton(text="➕ Добавить позицию",
+                                      callback_data=f"admin:stock_add:{product_id}")])
+    rows.append([_back_to_product(product_id)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def stock_variant_keyboard(variant: dict) -> InlineKeyboardMarkup:
+    vid, pid = variant["id"], variant["product_id"]
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➖", callback_data=f"admin:stockv_dec:{vid}"),
+         InlineKeyboardButton(text=f"{variant['stock']} шт", callback_data=f"admin:stockv_qty:{vid}"),
+         InlineKeyboardButton(text="➕", callback_data=f"admin:stockv_inc:{vid}")],
+        [InlineKeyboardButton(text="🔢 Ввести количество", callback_data=f"admin:stockv_qty:{vid}")],
+        [InlineKeyboardButton(text="✏️ Название", callback_data=f"admin:stockv_name:{vid}"),
+         InlineKeyboardButton(text="🗑 Удалить", callback_data=f"admin:stockv_del:{vid}")],
+        [InlineKeyboardButton(text="◀️ К наличию", callback_data=f"admin:stock:{pid}")],
+    ])
+
+
 def category_keyboard(product_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📦 Цифровой", callback_data=f"admin:category:digital:{product_id}")],
         [InlineKeyboardButton(text="🚚 Физический", callback_data=f"admin:category:physical:{product_id}")],
+        [InlineKeyboardButton(text="📦 Физический в наличии", callback_data=f"admin:category:stock:{product_id}")],
         [InlineKeyboardButton(text="📋 Список ожидания", callback_data=f"admin:category:waitlist:{product_id}")],
         [InlineKeyboardButton(text="📚 Инфобиз", callback_data=f"admin:category:infobiz:{product_id}")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin:product:{product_id}")],

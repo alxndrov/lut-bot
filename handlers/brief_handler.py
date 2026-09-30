@@ -109,7 +109,7 @@ async def _other_physical_products(exclude_ids) -> list[dict]:
     for p in products:
         if p.get("category") != "physical" or p["id"] in exclude_ids:
             continue
-        if await db.get_product_variants(p["id"]) and not await db.get_product_variants(
+        if db.is_stock_product(p) and not await db.get_product_variants(
                 p["id"], in_stock_only=True):
             continue
         result.append(p)
@@ -134,10 +134,14 @@ def _variant_keyboard(variants: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+async def _is_stock(product_id: int) -> bool:
+    return db.is_stock_product(await db.get_product(product_id))
+
+
 async def _start_round(target: Message, state: FSMContext, product_id: int) -> bool:
-    """Первый шаг раунда: выбор варианта из наличия (если у товара они есть),
-    иначе первый вопрос. False — у товара есть варианты, но все разобраны."""
-    if await db.get_product_variants(product_id):
+    """Первый шаг раунда: у товара «в наличии» — выбор позиции (опроса у него
+    нет), иначе первый вопрос. False — товар «в наличии», но всё разобрали."""
+    if await _is_stock(product_id):
         data = await state.get_data()
         variants = await _available_variants(product_id, data.get("rounds") or [])
         if not variants:
@@ -183,11 +187,11 @@ async def start_order_flow(target: Message, state: FSMContext, product: dict):
     """
     product_id = product["id"]
     questions = await db.get_product_questions(product_id)
-    has_variants = bool(await db.get_product_variants(product_id))
+    stock = db.is_stock_product(product)
     await state.clear()
 
     # Настроен опрос (или выбор из наличия) — задаём вопросы по одному
-    if questions or has_variants:
+    if questions or stock:
         await state.update_data(product_id=product_id, q_index=0, rounds=[[]],
                                 round_products=[product_id], cur_product_id=product_id)
         if not await _start_round(target, state, product_id):
@@ -272,6 +276,8 @@ async def _round_done(target: Message, state: FSMContext, bot: Bot, user):
     rounds = data.get("rounds") or [[]]
     anchor_product = await db.get_product(anchor_id)
     repeat_text = anchor_product.get("survey_repeat_text") if anchor_product else None
+    if not repeat_text and db.is_stock_product(anchor_product):
+        repeat_text = "Добавим ещё что-нибудь в заказ?"
     if repeat_text:
         await state.set_state(SurveyForm.repeat_choice)
         has_delivery = bool(anchor_product.get("survey_delivery_text")) if anchor_product else False
@@ -313,7 +319,7 @@ async def cb_survey_variant(callback: CallbackQuery, state: FSMContext, bot: Bot
     rounds[-1].append({"q": VARIANT_Q, "text": variant["name"], "variant_id": variant["id"],
                        "photo": None, "doc": None})
     await state.update_data(rounds=rounds, q_index=0)
-    questions = await db.get_product_questions(product_id)
+    questions = [] if await _is_stock(product_id) else await db.get_product_questions(product_id)
     if questions:
         await state.set_state(SurveyForm.answering)
         await _ask_question(callback.message, questions[0], 1, len(questions))
@@ -367,7 +373,7 @@ async def cb_survey_more(callback: CallbackQuery, state: FSMContext, bot: Bot):
         round_products.append(cur_id)
         await state.update_data(rounds=rounds, round_products=round_products,
                                 q_index=0, cur_product_id=cur_id)
-        if not await _available_variants(cur_id, rounds) and await db.get_product_variants(cur_id):
+        if await _is_stock(cur_id) and not await _available_variants(cur_id, rounds):
             await _sold_out_back(callback.message, state)
             return
         await callback.message.answer(
@@ -422,7 +428,7 @@ async def cb_survey_pick_product(callback: CallbackQuery, state: FSMContext):
     await state.update_data(rounds=rounds, round_products=round_products,
                             q_index=0, cur_product_id=new_id)
     questions = await db.get_product_questions(new_id)
-    if await db.get_product_variants(new_id):
+    if db.is_stock_product(new_product):
         if not await _available_variants(new_id, rounds):
             await _sold_out_back(callback.message, state)
             return
@@ -471,7 +477,7 @@ async def fsm_repeat_freetext(message: Message, state: FSMContext, bot: Bot):
         round_products.append(cur_id)
         await state.update_data(rounds=rounds, round_products=round_products,
                                 q_index=0, cur_product_id=cur_id)
-        if not await _available_variants(cur_id, rounds) and await db.get_product_variants(cur_id):
+        if await _is_stock(cur_id) and not await _available_variants(cur_id, rounds):
             await _sold_out_back(message, state)
             return
         await message.answer(

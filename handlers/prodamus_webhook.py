@@ -224,7 +224,7 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
                         f"Свяжитесь с клиентом: замена или возврат."
                     ))
         for pid in set(round_products):
-            if (await db.get_product_variants(pid)
+            if (db.is_stock_product(products_by_id[pid])
                     and not await db.get_product_variants(pid, in_stock_only=True)):
                 await _send_notify(bot, (
                     f"📦 «{products_by_id[pid]['name']}» — всё распродано, "
@@ -575,7 +575,7 @@ async def _routing_whos(round_products: list[int], products_by_id: dict, rounds:
             questions_cache[pid] = await db.get_product_questions(pid)
         router_q = next((q for q in questions_cache[pid] if q.get("is_router")), None)
         # Товару без распределителя (например, «из наличия») достаётся «*»
-        if not router_q and not await db.get_product_variants(pid):
+        if not router_q and not db.is_stock_product(product):
             return None
         if pid not in rmap_cache:
             rmap_cache[pid] = _parse_routing(routing)

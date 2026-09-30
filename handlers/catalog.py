@@ -37,8 +37,8 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
 
     # Товар «из наличия»: показываем, что осталось; распроданный — не продаём
     stock_line = ""
-    variants = await db.get_product_variants(product_id)
-    if variants:
+    variants = await db.get_product_variants(product_id) if db.is_stock_product(product) else []
+    if db.is_stock_product(product):
         in_stock = [v for v in variants if v["stock"] > 0]
         if not in_stock and not admin:
             await callback.answer("😔 Всё разобрали — в наличии ничего не осталось.",
@@ -46,7 +46,8 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
             return
         if in_stock:
             stock_line = (f"📦 В наличии: <b>{sum(v['stock'] for v in in_stock)} шт</b>\n"
-                          + "\n".join(f"• {v['name']}" for v in in_stock) + "\n\n")
+                          + "\n".join(f"• {v['name']}" + (f" — {v['stock']} шт" if v["stock"] > 1 else "")
+                                      for v in in_stock) + "\n\n")
         else:
             stock_line = "📦 В наличии: <b>0 шт</b> — всё разобрали\n\n"
 
@@ -59,7 +60,7 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
     elif category == "physical":
         category_label = ""
         # Заказ оформляется прямо здесь — сразу объясняем, что будет дальше
-        if variants:
+        if db.is_stock_product(product):
             file_status = "🛒 Для оформления заказа выберите вариант ниже 👇"
         elif await db.get_product_questions(product_id):
             file_status = (

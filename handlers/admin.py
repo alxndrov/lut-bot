@@ -16,7 +16,7 @@ from keyboards.admin import (
     admin_product_keyboard, admin_back_keyboard,
     product_back_keyboard,
     catalog_menu_back_keyboard, funnel_back_keyboard,
-    confirm_delete_keyboard, category_keyboard,
+    confirm_delete_keyboard, category_keyboard, stock_keyboard, stock_variant_keyboard,
     stats_keyboard, stats_back_keyboard,
     order_analytics_products_keyboard, order_analytics_back_keyboard, shipping_keyboard,
     funnels_keyboard, funnel_keyboard,
@@ -141,6 +141,13 @@ class SurveyRouting(StatesGroup):
 
 class SurveyPaid(StatesGroup):
     waiting_text = State()
+
+
+class StockForm(StatesGroup):
+    add_name = State()
+    add_qty = State()
+    set_qty = State()
+    rename = State()
 
 
 # --- Фильтр: только для админов ---
@@ -753,7 +760,9 @@ async def _product_card_text(product: dict, purchase_count: int = 0) -> str:
     photo_info = "🖼 Фото есть" if product.get("photo_id") else "🖼 Фото нет"
     status = "✅ Активен" if product["active"] else "❌ Скрыт"
     cat = product.get("category", "digital")
-    if cat == "physical":
+    if db.is_stock_product(product):
+        cat_label = "📦 Физический в наличии"
+    elif cat == "physical":
         cat_label = "🚚 Физический"
     elif cat == "waitlist":
         cat_label = "📋 Список ожидания"
@@ -770,6 +779,8 @@ async def _product_card_text(product: dict, purchase_count: int = 0) -> str:
         f"{file_info}\n"
         f"{photo_info}\n"
     )
+    if db.is_stock_product(product):
+        text += "\n" + await _stock_summary(product["id"]) + "\n"
 
     if cat == "infobiz":
         trigger = product.get("price_trigger")
@@ -1241,7 +1252,8 @@ async def cb_category_select(callback: CallbackQuery):
     product = await db.get_product(product_id)
 
     labels = {"physical": "🚚 Физический", "waitlist": "📋 Список ожидания",
-              "infobiz": "📚 Инфобиз", "digital": "📦 Цифровой"}
+              "infobiz": "📚 Инфобиз", "digital": "📦 Цифровой",
+              "stock": "📦 Физический в наличии"}
     cat_label = labels.get(category, "📦 Цифровой")
 
     purchase_count = await db.get_product_purchase_count(product_id)
@@ -1254,6 +1266,191 @@ async def cb_category_select(callback: CallbackQuery):
     except Exception:
         pass
     await callback.answer(f"Категория изменена на {cat_label}")
+
+
+# --- Наличие («Физический в наличии»): позиции и их количество ---
+
+async def _stock_summary(product_id: int) -> str:
+    variants = await db.get_product_variants(product_id)
+    if not variants:
+        return "📦 В наличии: <b>ничего</b> — добавьте позиции в «Наличие»"
+    total = sum(v["stock"] for v in variants)
+    lines = [f"📦 В наличии: <b>{total} шт</b>"]
+    lines += [f"• {v['name']} — {v['stock']} шт" for v in variants]
+    return "\n".join(lines)
+
+
+async def _show_stock(message: Message, product_id: int, edit: bool = True):
+    product = await db.get_product(product_id)
+    variants = await db.get_product_variants(product_id)
+    text = (f"📦 <b>Наличие</b> — {product['name']}\n\n"
+            + await _stock_summary(product_id)
+            + "\n\nКлиент выбирает позицию кнопкой, после оплаты количество "
+              "уменьшается само. Позиции с 0 шт клиенту не показываются, а когда "
+              "закончится всё — товар пропадёт из каталога.")
+    kb = stock_keyboard(product_id, variants)
+    if edit:
+        try:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+async def _show_variant(message: Message, variant_id: int, edit: bool = True):
+    v = await db.get_product_variant(variant_id)
+    if not v:
+        await message.answer("Позиция не найдена.")
+        return
+    text = f"📦 <b>{v['name']}</b>\nВ наличии: <b>{v['stock']} шт</b>"
+    kb = stock_variant_keyboard(v)
+    if edit:
+        try:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("admin:stock:"))
+async def cb_stock(callback: CallbackQuery, state: FSMContext):
+    if not await admin_only(callback):
+        return
+    await state.clear()
+    await _show_stock(callback.message, int(callback.data.split(":")[2]))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:stockv:"))
+async def cb_stock_variant(callback: CallbackQuery, state: FSMContext):
+    if not await admin_only(callback):
+        return
+    await state.clear()
+    await _show_variant(callback.message, int(callback.data.split(":")[2]))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:stockv_inc:") | F.data.startswith("admin:stockv_dec:"))
+async def cb_stock_variant_step(callback: CallbackQuery):
+    if not await admin_only(callback):
+        return
+    action, vid = callback.data.split(":")[1:3]
+    v = await db.get_product_variant(int(vid))
+    if not v:
+        await callback.answer("Позиция не найдена.", show_alert=True)
+        return
+    new = v["stock"] + (1 if action == "stockv_inc" else -1)
+    if new < 0:
+        await callback.answer("Уже 0 шт.")
+        return
+    await db.set_variant_stock(v["id"], new)
+    await _show_variant(callback.message, v["id"])
+    await callback.answer(f"{new} шт")
+
+
+@router.callback_query(F.data.startswith("admin:stockv_qty:"))
+async def cb_stock_variant_qty(callback: CallbackQuery, state: FSMContext):
+    if not await admin_only(callback):
+        return
+    vid = int(callback.data.split(":")[2])
+    await state.set_state(StockForm.set_qty)
+    await state.update_data(variant_id=vid)
+    await callback.message.answer("🔢 Сколько штук в наличии? Пришли число (0 — нет в наличии).")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:stockv_name:"))
+async def cb_stock_variant_name(callback: CallbackQuery, state: FSMContext):
+    if not await admin_only(callback):
+        return
+    vid = int(callback.data.split(":")[2])
+    await state.set_state(StockForm.rename)
+    await state.update_data(variant_id=vid)
+    await callback.message.answer("✏️ Новое название позиции (так её увидит клиент на кнопке):")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:stockv_del:"))
+async def cb_stock_variant_del(callback: CallbackQuery):
+    if not await admin_only(callback):
+        return
+    v = await db.get_product_variant(int(callback.data.split(":")[2]))
+    if not v:
+        await callback.answer("Позиция не найдена.", show_alert=True)
+        return
+    await db.delete_product_variant(v["id"])
+    await _show_stock(callback.message, v["product_id"])
+    await callback.answer("Позиция удалена")
+
+
+@router.callback_query(F.data.startswith("admin:stock_add:"))
+async def cb_stock_add(callback: CallbackQuery, state: FSMContext):
+    if not await admin_only(callback):
+        return
+    pid = int(callback.data.split(":")[2])
+    await state.set_state(StockForm.add_name)
+    await state.update_data(product_id=pid)
+    await callback.message.answer(
+        "✍️ Название позиции — так её увидит клиент на кнопке.\n"
+        "Например: <i>Синий гладкий — Hollyland</i>",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.message(StockForm.add_name)
+async def fsm_stock_add_name(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Пришли название текстом.")
+        return
+    await state.update_data(name=name[:60])
+    await state.set_state(StockForm.add_qty)
+    await message.answer("🔢 Сколько штук в наличии? Пришли число.")
+
+
+def _parse_qty(message: Message) -> int | None:
+    t = (message.text or "").strip()
+    return int(t) if t.isdigit() else None
+
+
+@router.message(StockForm.add_qty)
+async def fsm_stock_add_qty(message: Message, state: FSMContext):
+    qty = _parse_qty(message)
+    if qty is None:
+        await message.answer("Нужно целое число, например 3.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    await db.add_product_variant(data["product_id"], data["name"], qty)
+    await message.answer(f"✅ Добавлено: {data['name']} — {qty} шт")
+    await _show_stock(message, data["product_id"], edit=False)
+
+
+@router.message(StockForm.set_qty)
+async def fsm_stock_set_qty(message: Message, state: FSMContext):
+    qty = _parse_qty(message)
+    if qty is None:
+        await message.answer("Нужно целое число, например 3.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    await db.set_variant_stock(data["variant_id"], qty)
+    await _show_variant(message, data["variant_id"], edit=False)
+
+
+@router.message(StockForm.rename)
+async def fsm_stock_rename(message: Message, state: FSMContext):
+    name = (message.text or "").strip()
+    if not name:
+        await message.answer("Пришли название текстом.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    await db.rename_product_variant(data["variant_id"], name[:60])
+    await _show_variant(message, data["variant_id"], edit=False)
 
 
 # --- Баннер каталога ---
