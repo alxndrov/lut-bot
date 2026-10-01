@@ -18,7 +18,7 @@ import config
 import database as db
 from services.prodamus import verify_webhook
 from services.logo_svg import to_svg, is_logo_question, is_vector
-from services.answer_labels import annotate
+from services.answer_labels import annotate, is_old_palette
 
 logger = logging.getLogger(__name__)
 
@@ -269,6 +269,8 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             first_name, username_str, product["name"], amount,
             delivery_info, rounds, now, order_number=order_code,
             round_products=round_products, products_by_id=products_by_id,
+            # Анкета заполнена до смены палитры — номер цвета старый
+            old_palette=is_old_palette(pending.get("created_at")),
         )
         order_row_id = await db.create_order(
             user_id, product_id, prodamus_order_id, summary,
@@ -541,7 +543,7 @@ async def _printer_admins(whos: list) -> list[dict]:
 def _format_order(first_name: str, username_str: str, product_name: str, amount: int,
                   delivery_info: str, rounds: list, now: str, order_number: str = "",
                   round_products: list[int] | None = None,
-                  products_by_id: dict | None = None) -> str:
+                  products_by_id: dict | None = None, old_palette: bool = False) -> str:
     """Уведомление о заказе: номер, покупатель, товар, ответы, доставка."""
     multi = len(rounds) > 1
     mixed = bool(round_products) and len(set(round_products)) > 1
@@ -574,7 +576,7 @@ def _format_order(first_name: str, username_str: str, product_name: str, amount:
             lines.append("")
         for i, a in enumerate(answers, 1):
             # Цифра клиента → цифра с расшифровкой: «2 (розовый)»
-            ans = (annotate(a.get("q", ""), a.get("text"))
+            ans = (annotate(a.get("q", ""), a.get("text"), old_palette)
                    or ("📷 фото" if a.get("photo")
                        else ("📎 файл" if a.get("doc") else "—")))
             lines.append(f"<b>{i}. {a.get('q', '')}</b>\n{ans}")

@@ -291,7 +291,10 @@ async def init_db(existing_cdek_contract: str | None = None):
         # Migration: получатель для накладной СДЭК — ФИО и телефон
         for col in ("recipient_name TEXT DEFAULT NULL",
                     "recipient_phone TEXT DEFAULT NULL",
-                    "pvz_code TEXT DEFAULT NULL"):
+                    "pvz_code TEXT DEFAULT NULL",
+                    # Когда спросили клиента, почему не оплатил (см.
+                    # handlers/pending_nudge.py) — чтобы не спросить дважды
+                    "nudged_at TIMESTAMP DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE pending_deliveries ADD COLUMN {col}")
             except Exception:
@@ -1907,7 +1910,8 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                    delivery_amount = excluded.delivery_amount,
                    delivery_cost = excluded.delivery_cost,
                    round_products_json = excluded.round_products_json,
-                   created_at = CURRENT_TIMESTAMP""",
+                   created_at = CURRENT_TIMESTAMP,
+                   nudged_at = NULL""",
             (user_id, product_id, delivery_str, survey_json, amount,
              recipient_name, recipient_phone, pvz_code, delivery_amount,
              delivery_cost, round_products_json),
@@ -3276,6 +3280,34 @@ async def get_pending_delivery(user_id: int, product_id: int) -> Optional[str]:
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
+
+
+async def mark_pending_nudged(user_id: int, product_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE pending_deliveries SET nudged_at = CURRENT_TIMESTAMP "
+            "WHERE user_id = ? AND product_id = ?", (user_id, product_id))
+        await db.commit()
+
+
+async def recently_nudged_pending(user_id: int, days: int = 14) -> Optional[dict]:
+    """Незавершённый заказ, про который клиента недавно спрашивали.
+
+    Нужен, чтобы его ответ обычным текстом дошёл до админов: заказа у
+    человека нет, просьбы об отзыве тоже — без этого сообщение бы пропало.
+    """
+    from datetime import datetime, timezone, timedelta
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT pd.*, pr.name AS product_name FROM pending_deliveries pd
+               LEFT JOIN products pr ON pr.id = pd.product_id
+               WHERE pd.user_id = ? AND pd.nudged_at >= ?
+               ORDER BY pd.nudged_at DESC LIMIT 1""", (user_id, since),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 async def delete_pending_delivery(user_id: int, product_id: int):

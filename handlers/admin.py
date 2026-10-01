@@ -244,6 +244,7 @@ async def cb_pending_view(callback: CallbackQuery):
     first_name = (user_row["first_name"] if user_row else None) or "—"
 
     from handlers.prodamus_webhook import _format_order
+    from services.answer_labels import is_old_palette
     # Сумма, посчитанная при оформлении (товар + доставка). У старых заказов
     # её нет — считаем по цене товара, как раньше.
     price = _pending_amount(order, product)
@@ -252,12 +253,80 @@ async def cb_pending_view(callback: CallbackQuery):
     text = _format_order(
         first_name, username_str, (product or {}).get("name", "—"),
         price, order.get("delivery_str") or "не указан", rounds, when,
+        old_palette=is_old_palette(order.get("created_at")),
     ).replace("🧾 <b>Новый заказ</b>", "🛒 <b>Незавершённый заказ</b> (не оплачен)")
 
     await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=pending_order_keyboard(uid, pid)
+        text, parse_mode="HTML",
+        reply_markup=pending_order_keyboard(uid, pid, order.get("nudged_at"))
     )
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:nudge:"))
+async def cb_pending_nudge(callback: CallbackQuery):
+    """Показывает, что уйдёт клиенту, — отправка только по второму нажатию.
+
+    Сообщение уходит живому человеку, поэтому одно случайное касание не
+    должно ничего отправлять. Если уже спрашивали — предупреждаем.
+    """
+    if not await admin_only(callback):
+        return
+    parts = callback.data.split(":")
+    uid, pid = int(parts[2]), int(parts[3])
+    order = await db.get_pending_order(uid, pid)
+    if not order:
+        await callback.answer("Заказ уже не в списке.", show_alert=True)
+        return
+    from handlers.pending_nudge import nudge_text
+    product = await db.get_product(pid)
+    warn = ""
+    if order.get("nudged_at"):
+        ts = order["nudged_at"]
+        warn = f"⚠️ <b>Этого клиента уже спрашивали {ts[8:10]}.{ts[5:7]}.</b>\n\n"
+    buttons = "«Продолжить оформление», «Есть вопрос»"
+    await callback.message.edit_text(
+        f"{warn}Клиенту уйдёт:\n\n"
+        f"<blockquote>{nudge_text((product or {}).get('name') or 'заказ')}</blockquote>\n"
+        f"Кнопки: {buttons}.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📨 Отправить", callback_data=f"admin:nudge_send:{uid}:{pid}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data=f"admin:pending_view:{uid}:{pid}")],
+        ]))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:nudge_send:"))
+async def cb_pending_nudge_send(callback: CallbackQuery, bot: Bot):
+    if not await admin_only(callback):
+        return
+    parts = callback.data.split(":")
+    uid, pid = int(parts[2]), int(parts[3])
+    order = await db.get_pending_order(uid, pid)
+    if not order:
+        await callback.answer("Заказ уже не в списке.", show_alert=True)
+        return
+    from handlers.pending_nudge import nudge_text, nudge_keyboard
+    product = await db.get_product(pid)
+    back = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀️ К заказу", callback_data=f"admin:pending_view:{uid}:{pid}")]])
+    try:
+        await bot.send_message(uid, nudge_text((product or {}).get("name") or "заказ"),
+                               parse_mode="HTML", reply_markup=nudge_keyboard(pid))
+    except Exception as e:
+        logger.warning(f"nudge: не отправил клиенту {uid}: {e}")
+        await callback.answer()
+        await callback.message.edit_text(
+            "⚠️ Не удалось отправить — скорее всего, клиент заблокировал бота.",
+            reply_markup=back)
+        return
+    await db.mark_pending_nudged(uid, pid)
+    logger.info(f"nudge: спросили {uid} про незавершённый заказ (товар {pid})")
+    await callback.answer("Отправлено ✅")
+    await callback.message.edit_text(
+        "✅ Вопрос отправлен клиенту. Его ответ придёт в админский бот.",
+        reply_markup=back)
 
 
 @router.callback_query(F.data.startswith("admin:pending_del:"))

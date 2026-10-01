@@ -15,7 +15,12 @@
 """
 import re
 
-# Палитра с 01.10.2026 — 10 цветов (до этого было 23, см. память проекта)
+# Палитра с 01.10.2026 — 10 цветов (до этого было 23, см. память проекта).
+# Момент, с которого клиенты выбирают по новой картинке, в UTC — как
+# хранится created_at. Ответы, данные раньше, — номера старой палитры, и
+# подписывать их новыми названиями нельзя: старый «3» — розовый
+# блестящий, а новый — красный.
+PALETTE_SINCE_UTC = "2026-10-01 09:10:00"
 COLORS = {
     1: "черный", 2: "розовый", 3: "красный", 4: "оливковый", 5: "синий",
     6: "розовый блестящий", 7: "фиолетовый", 8: "белый", 9: "голубой",
@@ -30,6 +35,7 @@ _RULES = (
     ("модел", MODELS),
     ("текстур", TEXTURES),
 )
+_OLD_PALETTE = "старая палитра"
 
 _LEADING_NUMBER = re.compile(r"^\s*(\d{1,3})(?!\d)")
 
@@ -39,7 +45,12 @@ def labels_for(question: str) -> dict | None:
     return next((labels for word, labels in _RULES if word in q), None)
 
 
-def annotate(question: str, answer: str | None) -> str | None:
+def is_old_palette(filled_at: str | None) -> bool:
+    """Ответ дан до смены палитры? Без даты считаем новым."""
+    return bool(filled_at) and str(filled_at)[:19] < PALETTE_SINCE_UTC
+
+
+def annotate(question: str, answer: str | None, old_palette: bool = False) -> str | None:
     """'2' → '2 (розовый)'. Ответ не цифрой — возвращаем как есть.
 
     Подписываем, только если ответ НАЧИНАЕТСЯ с числа: «1» или «1 hollyland»
@@ -55,5 +66,8 @@ def annotate(question: str, answer: str | None) -> str | None:
     if not m:
         return answer
     num = int(m.group(1))
+    if labels is COLORS and old_palette:
+        # Модель и текстура не менялись — их подписываем как обычно
+        return answer[:m.end()] + f" ({_OLD_PALETTE})" + answer[m.end():]
     label = labels.get(num, "⚠️ нет такого варианта")
     return answer[:m.end()] + f" ({label})" + answer[m.end():]

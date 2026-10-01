@@ -28,8 +28,9 @@ def pending_orders_keyboard(orders: list[dict]) -> InlineKeyboardMarkup:
         who = f"@{o['username']}" if o.get("username") else (o.get("first_name") or f"id:{o['user_id']}")
         ts = o.get("created_at") or ""            # "YYYY-MM-DD HH:MM:SS"
         day = f"{ts[8:10]}.{ts[5:7]} {ts[11:16]}" if len(ts) >= 16 else ts
+        mark = "📨 " if o.get("nudged_at") else ""       # уже спрашивали
         rows.append([InlineKeyboardButton(
-            text=f"{day} · {who} · {o.get('product_name') or '—'}",
+            text=f"{mark}{day} · {who} · {o.get('product_name') or '—'}",
             callback_data=f"admin:pending_view:{o['user_id']}:{o['product_id']}",
         )])
     rows.append([InlineKeyboardButton(text="🔁 Проверить пропущенные оплаты",
@@ -57,8 +58,13 @@ def missed_orders_keyboard(orders: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def pending_order_keyboard(user_id: int, product_id: int) -> InlineKeyboardMarkup:
+def pending_order_keyboard(user_id: int, product_id: int,
+                           nudged_at: str | None = None) -> InlineKeyboardMarkup:
+    ask = "💬 Спросить, почему не завершили"
+    if nudged_at:
+        ask += f" (уже: {nudged_at[8:10]}.{nudged_at[5:7]})"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=ask, callback_data=f"admin:nudge:{user_id}:{product_id}")],
         [InlineKeyboardButton(text="🔗 Сгенерировать новую ссылку для оплаты",
                               callback_data=f"admin:paylink:{user_id}:{product_id}")],
         [InlineKeyboardButton(text="✅ Оплата пришла — провести заказ",

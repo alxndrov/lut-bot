@@ -3,6 +3,7 @@
 в malimadmins, ответ приходит обратно сюда же (см. handlers/support_admin.py).
 """
 import logging
+from html import escape
 import re
 
 from aiogram import Router, Bot, F
@@ -127,6 +128,39 @@ def order_line(order: dict | None) -> str:
     return line
 
 
+def pending_line(p: dict | None) -> str:
+    """Строка о незавершённом (неоплаченном) заказе для шапки."""
+    if not p:
+        return ""
+    amount = f" · {int(p['amount'])} ₽" if p.get("amount") else ""
+    name = escape(p.get("product_name") or "—")
+    return f"🛒 Незавершённый заказ · {name}{amount} (не оплачен)"
+
+
+async def notify_admins_text(text: str, user_id: int) -> bool:
+    """Короткое уведомление админам о действии клиента (нажал кнопку).
+
+    С кнопкой «Ответить» и записью в переписку: ответить клиенту можно
+    сразу, а его следующее сообщение текстом тоже дойдёт до админов.
+    """
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✍️ Ответить", callback_data=f"sup_reply:{user_id}")
+    ]])
+    ok = False
+    bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+    try:
+        for admin_id in config.ADMIN_IDS:
+            try:
+                sent = await bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=kb)
+                await db.add_support_message(admin_id, sent.message_id, user_id)
+                ok = True
+            except Exception as e:
+                logger.error(f"notify_admins_text → {admin_id}: {e}")
+    finally:
+        await bot.session.close()
+    return ok
+
+
 async def order_hint(user_id: int) -> tuple[dict | None, str]:
     """Последний заказ клиента и строка о нём для шапки вопроса."""
     order = await db.last_order_of_user(user_id)
@@ -167,8 +201,15 @@ async def cmd_support_cancel(message: Message, state: FSMContext):
 # Команду не считаем вопросом в поддержку — см. тот же случай в feedback.py
 @router.message(SupportState.waiting_text, ~(F.text & F.text.startswith("/")))
 async def on_support_message(message: Message, state: FSMContext):
+    data = await state.get_data()
     await state.clear()
     order, hint = await order_hint(message.from_user.id)
+    # Вопрос задан из-под незавершённого заказа — показываем, про какой
+    if data.get("pending_pid"):
+        p = await db.get_pending_order(message.from_user.id, data["pending_pid"])
+        if p:
+            p["product_name"] = (await db.get_product(p["product_id"]) or {}).get("name")
+            hint = "\n".join(x for x in (pending_line(p), hint) if x)
     ok = await notify_admins(
         message, client_header(message, "🆘 <b>Вопрос в поддержку</b>", hint),
         message.from_user.id, order=order)
@@ -232,6 +273,9 @@ async def on_free_message(message: Message, state: FSMContext):
         support_at = None
 
     order, hint = await order_hint(user_id)
+    # Клиента спросили, почему он не оплатил, — он отвечает просто текстом.
+    # Оплаченного заказа у него может не быть вовсе: без этого ответ пропал бы
+    nudged = await db.recently_nudged_pending(user_id)
     # Отзыв пишут и не дожидаясь просьбы: заказ уже пришёл, человеку есть
     # что сказать. Раньше такое сообщение не подхватывал никто.
     early = None
@@ -239,8 +283,13 @@ async def on_free_message(message: Message, state: FSMContext):
         early = await db.pending_review_push(user_id)
 
     if support_at:
-        header = client_header(message, "🆘 <b>Сообщение в поддержку</b>", hint)
+        extra = "\n".join(x for x in (pending_line(nudged), hint) if x)
+        header = client_header(message, "🆘 <b>Сообщение в поддержку</b>", extra)
         reply_text = "✅ Передал команде — ответят здесь же."
+    elif nudged:
+        header = client_header(message, "💬 <b>Ответ про незавершённый заказ</b>",
+                               pending_line(nudged))
+        reply_text = "Спасибо, что ответили! 🙏 Передал команде — ответят здесь же."
     elif push or early:
         p = push or early
         # Отзыв — про тот заказ, по которому просили, а не про самый свежий:
