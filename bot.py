@@ -14,6 +14,7 @@ from handlers import support, support_admin, logo, reviews, pending_nudge, opera
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
 from services.finance_reports import report_loop
+from services.pending_report import pending_report_loop
 from services.finance_sheet import finance_sync_loop
 from services.funnel import funnel_worker
 from services.review_push import review_push_worker
@@ -98,6 +99,7 @@ async def main():
                                    allowed_updates=["callback_query", "message"])
         )
         asyncio.create_task(report_loop(admin_bot))
+        asyncio.create_task(pending_report_loop(admin_bot))
         # Догоняем кнопки у заказов, созданных до появления новых статусов
         asyncio.create_task(order_actions.refresh_open_orders(admin_bot))
         # Команда видна в меню бота

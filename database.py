@@ -457,6 +457,11 @@ async def init_db(existing_cdek_contract: str | None = None):
         await db.execute("""CREATE TABLE IF NOT EXISTS finance_report_schedule (
             id INTEGER PRIMARY KEY CHECK(id=1), next_at TEXT NOT NULL
         )""")
+        # Еженедельная сводка по незавершённым заказам (services/pending_report.py):
+        # когда отправили последнюю — чтобы после перезапуска не прислать дважды
+        await db.execute("""CREATE TABLE IF NOT EXISTS pending_report_schedule (
+            id INTEGER PRIMARY KEY CHECK(id=1), last_at TEXT NOT NULL
+        )""")
         # Фактические выплаты Мише/Дане с общего счёта — без этого «Кассовый
         # остаток» не знает, что часть уже посчитанной прибыли реально
         # забрали, и посчитает остаток завышенным.
