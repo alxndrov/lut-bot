@@ -18,6 +18,7 @@ import config
 import database as db
 from services.prodamus import verify_webhook
 from services.logo_svg import to_svg, is_logo_question, is_vector
+from services.answer_labels import annotate
 
 logger = logging.getLogger(__name__)
 
@@ -572,8 +573,10 @@ def _format_order(first_name: str, username_str: str, product_name: str, amount:
         elif answers:
             lines.append("")
         for i, a in enumerate(answers, 1):
-            ans = a.get("text") or ("📷 фото" if a.get("photo")
-                                    else ("📎 файл" if a.get("doc") else "—"))
+            # Цифра клиента → цифра с расшифровкой: «2 (розовый)»
+            ans = (annotate(a.get("q", ""), a.get("text"))
+                   or ("📷 фото" if a.get("photo")
+                       else ("📎 файл" if a.get("doc") else "—")))
             lines.append(f"<b>{i}. {a.get('q', '')}</b>\n{ans}")
     lines.append(f"\n🚚 <b>Доставка:</b>\n{delivery_info}")
     return "\n".join(lines)
