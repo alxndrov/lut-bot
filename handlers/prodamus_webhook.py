@@ -613,6 +613,20 @@ async def _send_order_notify(order_id: int, summary: str, main_bot: Bot = None,
             await _send_order_media(main_bot, notify_bot, rounds, order_number)
         except Exception as e:
             logger.error(f"order media failed: {e}")
+    # Расходники — сразу, как пришёл заказ: если на очередь уже не хватает
+    # коробок или поп-фильтров, заказывать надо сейчас, а не при отправке.
+    # Ответом на карточку этого заказа — видно, что именно его «не хватило»
+    try:
+        from handlers import consumables
+        fresh = await db.get_order(order_id)
+        uid, notes = await consumables.order_alerts(fresh)
+        if notes and uid in config.ADMIN_IDS:
+            await notify_bot.send_message(
+                uid, "📦 <b>Расходники</b>\n" + "\n".join(notes), parse_mode="HTML",
+                reply_to_message_id=await db.order_card_in_chat(order_id, uid),
+                allow_sending_without_reply=True)
+    except Exception as e:
+        logger.error(f"stock alert for order {order_id}: {type(e).__name__}: {e}")
     try:
         await notify_bot.session.close()
     except Exception:

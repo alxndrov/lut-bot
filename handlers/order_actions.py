@@ -1129,15 +1129,13 @@ async def cb_order_shipped(callback: CallbackQuery):
 
     # Расходники (коробка/поп-фильтр) списываем в момент отправки — именно
     # тогда товар реально уходит в коробку, а не когда его напечатали.
-    # Со счёта того, кто нажал кнопку — он и паковал своими запасами
+    # Со счёта того, кто нажал кнопку — он и паковал своими запасами.
+    # Предупреждать о нехватке здесь уже поздно — это делается при приходе
+    # заказа (consumables.order_alerts из _send_order_notify)
     from handlers import consumables
     total = _order_positions(order)
-    touched = await consumables.apply_stock_delta(
+    await consumables.apply_stock_delta(
         callback.from_user.id, order, set(range(1, total + 1)), -1)
-    for key in touched:
-        note = await consumables.stock_note(callback.from_user.id, key)
-        if note:
-            await callback.message.answer(note, parse_mode="HTML")
 
     # Пуш с просьбой оставить отзыв — отсчёт от отправки, не от оплаты:
     # заказ может ждать печати неделями, и «через 5 дней» должно значить

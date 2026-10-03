@@ -102,7 +102,12 @@ async def apply_stock_delta(user_id: int, order: dict, positions: set[int], sign
 
 
 async def stock_note(user_id: int, key: str) -> str | None:
-    """Текст предупреждения по одному расходнику этого админа, если остаток низкий/недостаточный."""
+    """Предупреждение по расходнику этого админа — с учётом очереди.
+
+    Смотрим не на голый остаток, а на то, что останется после всех
+    неотправленных заказов: 5 поп-фильтров при 6 заказах в очереди —
+    это уже нехватка, хотя на полке они ещё лежат.
+    """
     items = {c["key"]: c for c in await db.get_consumables(user_id)}
     c = items.get(key)
     if not c:
@@ -110,12 +115,36 @@ async def stock_note(user_id: int, key: str) -> str | None:
     need_by_admin, _ = await _queue_need_by_admin()
     need = need_by_admin.get(user_id, {}).get(key, 0)
     qty = c["qty"]
-    if qty < need:
-        return (f"🚨 <b>{c['name']}</b> у вас: осталось {qty} шт., а на вашу очередь нужно "
-                f"{need} — не хватает {need - qty}! Закажите срочно.")
-    if qty <= LOW_THRESHOLD:
-        return f"⚠️ <b>{c['name']}</b> у вас: осталось {qty} шт. — пора заказать ещё."
+    left = qty - need
+    if left < 0:
+        return (f"🚨 <b>{c['name']}</b>: на складе {qty} шт., а заказов в очереди на {need} — "
+                f"не хватает {-left}! Закажите срочно.")
+    if left <= LOW_THRESHOLD:
+        return (f"⚠️ <b>{c['name']}</b>: на складе {qty} шт., в очереди {need} — после них "
+                f"останется {left}. Пора заказать ещё.")
     return None
+
+
+async def order_alerts(order: dict) -> tuple[int, list[str]]:
+    """Предупреждения по расходникам, которые тратит этот заказ.
+
+    Проверяем в момент прихода заказа, а не отправки: к отправке нехватка
+    уже наступила, а заказать коробки и поп-фильтры нужно заранее.
+    Кому — тому, за кем заказ числится (он и пакует), иначе партнёру,
+    который сейчас печатает всё.
+    """
+    from handlers.order_actions import _order_positions
+    user_id = order.get("assignee_id") or config.PARTNER_ID
+    total = _order_positions(order)
+    round_products = _positions_products(order, total)
+    keys: list[str] = []
+    for pos in range(1, total + 1):
+        pid = round_products[pos - 1] if pos - 1 < len(round_products) else order["product_id"]
+        for key in CONSUMABLE_RULES.get(pid, []):
+            if key not in keys:
+                keys.append(key)
+    notes = [n for n in [await stock_note(user_id, k) for k in keys] if n]
+    return user_id, notes
 
 
 async def _stock_text() -> str:
