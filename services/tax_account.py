@@ -23,12 +23,21 @@ def validate_month(month: str):
         raise ValueError('Некорректный месяц')
 
 
+# Доход для НПД: оплаты плюс возвраты с минусом. Возврат уменьшает доход
+# месяца, когда деньги вернули (чек в «Мой налог» аннулируют/исправляют).
+RECEIPTS = """
+    SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, amount
+    FROM purchases
+    UNION ALL
+    SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, -amount
+    FROM refunds"""
+
+
 async def _months(conn):
     conn.row_factory = aiosqlite.Row
-    async with conn.execute("""
+    async with conn.execute(f"""
         WITH revenue AS (
-            SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month,
-                   SUM(amount) gross FROM purchases GROUP BY month
+            SELECT month, SUM(amount) gross FROM ({RECEIPTS}) GROUP BY month
         ), paid AS (
             SELECT COALESCE(tax_month, strftime('%Y-%m', datetime(paid_at, '+3 hours'))) month,
                    SUM(amount) paid FROM npd_payments GROUP BY month
@@ -42,7 +51,7 @@ async def _months(conn):
         FROM months LEFT JOIN revenue USING(month) LEFT JOIN paid USING(month)
         LEFT JOIN npd_assessments a USING(month)
         WHERE months.month IS NOT NULL ORDER BY months.month DESC
-    """, (config.NPD_PERCENT / 100,)) as cur:
+    """.replace("{RECEIPTS}", RECEIPTS), (config.NPD_PERCENT / 100,)) as cur:
         return [dict(row) for row in await cur.fetchall()]
 
 
@@ -104,21 +113,27 @@ async def accrued_for_period(dt_from: str, dt_to: str, component: str = "total")
     # Fixed expressions only; no user-provided SQL.
     base = {
         "total": "p.amount",
-        "physical": "CASE WHEN pr.category='physical' THEN p.amount-COALESCE(p.delivery_amount, 0) ELSE 0 END",
-        "digital": "CASE WHEN pr.category='physical' THEN 0 ELSE p.amount-COALESCE(p.delivery_amount, 0) END",
+        "physical": "CASE WHEN p.category='physical' THEN p.amount-COALESCE(p.delivery_amount, 0) ELSE 0 END",
+        "digital": "CASE WHEN p.category='physical' THEN 0 ELSE p.amount-COALESCE(p.delivery_amount, 0) END",
         "legacy": "CASE WHEN COALESCE(p.delivery_cost, 0)=0 THEN COALESCE(p.delivery_amount, 0) ELSE 0 END",
     }[component]
     async with aiosqlite.connect(db.DB_PATH) as conn:
+        # Возврат — строка с минусом, как физтовар без доставки: так он
+        # уменьшает и общий налог, и физическую составляющую
         async with conn.execute(f'''
             WITH monthly AS (
-                SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month,
-                       SUM(amount) gross FROM purchases GROUP BY month
+                SELECT month, SUM(amount) gross FROM ({RECEIPTS}) GROUP BY month
+            ), p AS (
+                SELECT p.created_at, p.amount, p.delivery_amount, p.delivery_cost,
+                       pr.category
+                FROM purchases p LEFT JOIN products pr ON pr.id=p.product_id
+                UNION ALL
+                SELECT created_at, -amount, 0, 0, 'physical' FROM refunds
             )
             SELECT COALESCE(SUM(({base}) * CASE
                 WHEN a.amount IS NOT NULL AND m.gross > 0 THEN a.amount / m.gross
                 ELSE ? END), 0)
-            FROM purchases p
-            LEFT JOIN products pr ON pr.id=p.product_id
+            FROM p
             JOIN monthly m ON m.month = strftime('%Y-%m', datetime(p.created_at, '+3 hours'))
             LEFT JOIN npd_assessments a ON a.month = m.month
             WHERE datetime(p.created_at) BETWEEN datetime(?) AND datetime(?)

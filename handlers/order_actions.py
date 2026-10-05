@@ -137,6 +137,8 @@ def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
         [InlineKeyboardButton(text="🔁 Повторить заказ",
                               callback_data=f"order_repeat:{oid}")],
     ]
+    from handlers.refunds import refund_rows
+    rows += refund_rows(order)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -231,16 +233,20 @@ def _order_text(order: dict, prints: list | None = None) -> str:
             text += f" · {when}"
     if order.get("cdek_number"):
         text += f"\n📦 <b>Трек-номер СДЭК:</b> <code>{order['cdek_number']}</code>"
+    from handlers.refunds import refund_line
+    text += refund_line(order)
     return text
 
 
-def order_shipped_keyboard(order_id: int) -> InlineKeyboardMarkup:
-    """Заказ отправлен — можно откатить отметку или оформить повтор."""
+def order_shipped_keyboard(order_id: int, order: dict | None = None) -> InlineKeyboardMarkup:
+    """Заказ отправлен — можно откатить отметку, оформить повтор или возврат."""
+    from handlers.refunds import refund_rows
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="↩️ Отменить отметку об отправке",
                               callback_data=f"order_unship:{order_id}")],
         [InlineKeyboardButton(text="🔁 Повторить заказ",
                               callback_data=f"order_repeat:{order_id}")],
+        *(refund_rows(order) if order else []),
     ])
 
 
@@ -284,7 +290,11 @@ def _order_keyboard(order: dict, viewer_id: int | None = None,
     позицию могли отпечатать, а другую ещё нет.
     """
     if order.get("shipped_at"):
-        return order_shipped_keyboard(order["id"])
+        return order_shipped_keyboard(order["id"], order)
+    if order.get("refund_full"):
+        # Полный возврат до отправки — заказ отменён, печатать нечего
+        from handlers.refunds import refund_rows
+        return InlineKeyboardMarkup(inline_keyboard=refund_rows(order))
     return order_assigned_keyboard(order, viewer_id, prints)
 
 
@@ -371,6 +381,9 @@ def _list_item_text(order: dict, index: int, has_card: bool,
             f"Напечатать {_pos_list(ps)}{_products_label(order, ps, total)} — {who}"
             for who, ps in by_who.items())
 
+    if order.get("refunded_at"):
+        from handlers.refunds import _rub
+        action += f" · 💸 возврат {_rub(order['refund_amount'])}"
     text = f"<b>{index}.</b> №{_order_num(order)} · {action}"
     if not has_card:
         text += f"\n{_order_line(order, prints)}"
@@ -395,7 +408,7 @@ async def _sync_list_items(bot, order: dict, prints: list | None = None):
             await bot.edit_message_text(
                 _list_item_text(order, index, has_card, chat_id, prints, mode),
                 chat_id=chat_id, message_id=msg_id, parse_mode="HTML",
-                reply_markup=(order_shipped_keyboard(order["id"])
+                reply_markup=(order_shipped_keyboard(order["id"], order)
                               if mode == "sent" else None),
             )
         except Exception as e:
@@ -677,7 +690,7 @@ async def _send_list(message: Message, orders: list, start_index: int,
         sent = await message.answer(
             _list_item_text(o, i, bool(card_id), message.from_user.id, prints, mode),
             parse_mode="HTML", reply_to_message_id=card_id,
-            reply_markup=(order_shipped_keyboard(o["id"])
+            reply_markup=(order_shipped_keyboard(o["id"], o)
                           if mode == "sent" else None),
         )
         sent_ids.append(sent.message_id)

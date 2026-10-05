@@ -120,7 +120,7 @@ async def _build_snapshot(year, now, monthly_split=True):
     assessment = {m['month']: m for m in months}
     for row in rows:
         row['tax_month'] = tax_months.get(row['code'], '')
-        if row['kind'] == 'Приход':
+        if row['kind'] == 'Приход' and not row.get('refund'):
             m = assessment.get(msk_date(row['created_at']).strftime('%Y-%m'), {})
             rate = m.get('accrued', 0) / m['gross'] if m.get('gross') else 0
             goods = float(row['amount']) - delivery_customer.get(row['code'], 0)
@@ -137,8 +137,11 @@ async def _build_snapshot(year, now, monthly_split=True):
     cdek = await db.get_cdek_account()
     tax_paid = await db.get_npd_payments_summary()
     expenses = await db.get_expenses_summary('1900-01-01', '2100-12-31')
+    # Возвраты — приходы с минусом: уменьшают принятое, но не комиссию —
+    # Prodamus её при возврате не отдаёт
     gross = sum(float(r['amount']) for r in rows if r['kind'] == 'Приход')
-    fee = gross * config.PRODAMUS_FEE_PERCENT / 100
+    fee = sum(float(r['amount']) for r in rows
+              if r['kind'] == 'Приход' and not r.get('refund')) * config.PRODAMUS_FEE_PERCENT / 100
     # Share the bot's remittance calendar, including its documented limitations.
     from handlers.finance import _pending_gross
     pending_gross = await _pending_gross('1900-01-01 00:00:00',
@@ -150,8 +153,8 @@ async def _build_snapshot(year, now, monthly_split=True):
     for month in range(1, 13):
         if monthly_split and month in active_months:
             s = await payout.split(*payout.month_bounds(year, month))
-            monthly.append([MONTHS[month - 1], *[money(s[k]) for k in
-                ('gross', 'fee', 'npd', 'delivery_out')],
+            monthly.append([MONTHS[month - 1], money(s['gross'] - s['refunds']),
+                *[money(s[k]) for k in ('fee', 'npd', 'delivery_out')],
                 money(s['net'] + s['expenses']), money(s['expenses']),
                 money(s['net']), money(s['partner']),
                 money(money(s['net']) - money(s['partner']))])
@@ -168,6 +171,7 @@ async def _build_snapshot(year, now, monthly_split=True):
         'tax_reserve': money(sum(max(0, m['accrued'] - m['paid']) for m in months)),
         'tax_overpaid': money(sum(max(0, m['paid'] - m['accrued']) for m in months)),
         'expenses': money(expenses['total']), 'payouts': payouts,
+        'refunds': await db.get_refunds(),
     }
 
 
@@ -243,6 +247,8 @@ def operation_values(row):
     income = row['kind'] == 'Приход'
     amount = float(row['amount'])
     fee = amount * config.PRODAMUS_FEE_PERCENT / 100 if income else None
+    if row.get('refund'):
+        fee = 0.0
     tax = row.get('tax', 0) if income else None
     delivery = row.get('delivery', 0) if income else None
     return dict(zip(HEADERS, [
@@ -252,7 +258,8 @@ def operation_values(row):
         row.get('partner_positions') if income else None,
         row.get('recipient', ''), 'Сверено',
         'Взаимозачёт — без движения денег' if row.get('noncash') else 'Денежная операция',
-        row.get('tax_month', ''), row.get('partner_base') if income else None, row.get('paid_by', ''),
+        row.get('tax_month', ''), row.get('partner_base') if income and not row.get('refund') else None,
+        row.get('paid_by', ''),
     ]))
 
 
@@ -288,7 +295,7 @@ def cashflow_plan(sheet_id, existing, rows):
         if code in expected and code not in seen:
             stats['updated'] += bool(changes(index, current, operation_values(expected[code])))
             seen.add(code)
-        elif code in expected or re.fullmatch(r'(exp|payout|cdek|npd)-\d+', code) or at(current, 'Статус синхронизации') in ('Сверено', 'Отменено', 'Дубликат'):
+        elif code in expected or re.fullmatch(r'(exp|payout|cdek|npd|refund)-\d+', code) or at(current, 'Статус синхронизации') in ('Сверено', 'Отменено', 'Дубликат'):
             duplicate = code in expected
             desired = {h: None for h in HEADERS if h not in
                        ('Номер операции', 'Дата операции', 'Комментарий')}
@@ -467,6 +474,69 @@ def formula_dashboard(snapshot, legacy, stats, cols):
     return values
 
 
+REFUNDS_TAB = 'Возвраты'
+REFUND_HEADERS = ['Дата возврата', 'Заказ', 'Дата заказа', 'Получатель', 'Telegram',
+                  'Оплачено', 'Возвращено', 'Возврат', 'Причина', 'Обратная доставка',
+                  'Расходники на склад', 'Чек в «Мой налог»', 'Оформил']
+
+
+def refunds_values(refunds):
+    """Лист «Возвраты» целиком: итоги сверху, ниже по строке на возврат.
+
+    Лист принадлежит боту и переписывается при каждой сверке — правки руками
+    в нём не живут, для заметок есть «Комментарий» на листе операций.
+    """
+    def when(value):
+        return msk_date(value).strftime('%d.%m.%Y %H:%M') if value else ''
+
+    def yes_no(value, unknown):
+        return unknown if value is None else ('Да' if value else 'Нет')
+
+    lines = []
+    for r in refunds:
+        num = (re.findall(r'\d+', r['order_code'] or '') or [str(r['order_id'])])[-1]
+        lines.append([
+            when(r['created_at']), '№' + num, when(r['order_created_at']),
+            r.get('recipient_name') or '', '@' + r['username'] if r.get('username') else str(r['user_id']),
+            money(r['paid']), money(r['amount']), 'Полный' if r['full'] else 'Частичный',
+            r.get('reason') or '',
+            '' if r['return_delivery'] is None else money(r['return_delivery']),
+            yes_no(r['stock_returned'], 'Не решено') if r.get('shipped_at') else '—',
+            'Отменён ' + when(r['receipt_cancelled_at']) if r.get('receipt_cancelled_at') else 'Не отменён',
+            r.get('created_by_name') or '',
+        ])
+    total = money(sum(float(r['amount']) for r in refunds))
+    back = money(sum(float(r['return_delivery'] or 0) for r in refunds))
+    head = [
+        ['ВОЗВРАТЫ ПОКУПАТЕЛЯМ'],
+        ['Всего возвратов', len(refunds)],
+        ['Возвращено денег', total, 'Уже вычтено из выручки и прибыли — строки refund-… на листе операций'],
+        ['Обратная доставка', back, 'Входит в начисленное СДЭК'],
+        [],
+        REFUND_HEADERS,
+    ]
+    width = len(REFUND_HEADERS)
+    return [row + [''] * (width - len(row)) for row in head + lines[::-1]]
+
+
+def refunds_requests(sheet_id, refunds):
+    values = refunds_values(refunds)
+    return [
+        # Сначала стираем старое: возврат могли удалить, строк станет меньше
+        {'updateCells': {'range': {'sheetId': sheet_id}, 'fields': 'userEnteredValue'}},
+        write_cells(sheet_id, 0, 0, values),
+        {'repeatCell': {'range': {'sheetId': sheet_id, 'startRowIndex': 0, 'endRowIndex': 1},
+                        'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
+                        'fields': 'userEnteredFormat.textFormat.bold'}},
+        {'repeatCell': {'range': {'sheetId': sheet_id, 'startRowIndex': 5, 'endRowIndex': 6},
+                        'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
+                        'fields': 'userEnteredFormat.textFormat.bold'}},
+        {'updateSheetProperties': {'properties': {'sheetId': sheet_id,
+                                   'gridProperties': {'frozenRowCount': 6}},
+                                   'fields': 'gridProperties.frozenRowCount'}},
+    ]
+
+
 def load_workbook():
     """Only cashflow is bot-owned; the user owns summary formulas and layout.
 
@@ -598,6 +668,28 @@ def publish(book, props, values, snapshot, legacy, modern, *, preserve_summary=T
     return stats
 
 
+def publish_refunds(book, props, refunds):
+    """Лист «Возвраты» — отдельным запросом: сбой в нём не должен
+    останавливать сверку операций, от которой зависят деньги."""
+    if not refunds and REFUNDS_TAB not in props:
+        return
+    requests = []
+    if REFUNDS_TAB in props:
+        sid = props[REFUNDS_TAB]['sheetId']
+        rows = props[REFUNDS_TAB]['gridProperties']['rowCount']
+        if rows < len(refunds) + 7:
+            requests.append({'updateSheetProperties': {'properties': {'sheetId': sid,
+                'gridProperties': {'rowCount': len(refunds) + 57}},
+                'fields': 'gridProperties.rowCount'}})
+    else:
+        sid = max((p['sheetId'] for p in props.values()), default=0) + 1
+        requests.append({'addSheet': {'properties': {'title': REFUNDS_TAB, 'sheetId': sid,
+                         'gridProperties': {'rowCount': max(200, len(refunds) + 57),
+                                            'columnCount': len(REFUND_HEADERS)}}}})
+    requests += refunds_requests(sid, refunds)
+    book.batch_update({'requests': requests})
+
+
 async def sync_finance():
     async with _lock:
         with process_lock():
@@ -614,6 +706,10 @@ async def sync_finance():
                     await write
                 finally:
                     raise
+            try:
+                await asyncio.to_thread(publish_refunds, book, props, snapshot.get('refunds') or [])
+            except Exception:
+                logger.exception('finance_sheet: лист «Возвраты» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)
             return stats
 

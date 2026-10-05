@@ -57,7 +57,7 @@ async def build(end: datetime) -> dict:
         'start': start.isoformat(), 'end': end.isoformat(),
         'gross': share['gross'], 'count': share['count'],
         'cdek': float(cdek['total']), 'tax': share['npd'],
-        'expenses': share['expenses'],
+        'expenses': share['expenses'], 'refunds': share.get('refunds', 0),
         'pending': pending * (1 - share['fee_pct'] / 100),
         'net': share['net'], 'partner': share['partner'], 'owner': share['owner'],
         'partner_name': config.PARTNER_NAME, 'owner_name': config.OWNER_NAME,
@@ -72,6 +72,7 @@ def _genitive(name):
 def rows(data):
     return [
         ('Принято платежей', data['gross']),
+        *([('Возвращено покупателям', data['refunds'])] if data.get('refunds') else []),
         ('Потрачено на СДЭК', data['cdek']),
         ('Отложено на налог', data['tax']),
         ('Потрачено на расходники', data['expenses']),
@@ -87,7 +88,9 @@ def period_label(data):
 
 
 def note(data):
-    return (f"Прибыль = платежи − комиссия Prodamus ({data['fee']:,.2f} ₽) "
+    return (f"Прибыль = платежи − "
+            + ("возвраты − " if data.get('refunds') else "")
+            + f"комиссия Prodamus ({data['fee']:,.2f} ₽) "
             f"− налог − начисленная доставка ({data['delivery_accrued']:,.2f} ₽) − расходы. "
             'Оплаченный СДЭК показан по факту; начисленная доставка вычтена из прибыли, '
             'даже если счёт ещё не оплачен. Расходники — все внесённые расходы. '

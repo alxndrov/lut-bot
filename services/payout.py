@@ -73,7 +73,7 @@ def _before(moment: str) -> str:
 
 
 _EMPTY_ERA = {"gross": 0.0, "physical": 0.0, "digital": 0.0, "delivery": 0.0,
-              "count": 0, "fee": 0.0, "npd": 0.0, "out": 0.0, "expenses": 0.0,
+              "count": 0, "fee": 0.0, "refunds": 0.0, "npd": 0.0, "out": 0.0, "expenses": 0.0,
               "net": 0.0, "legacy": 0.0}
 
 
@@ -92,6 +92,9 @@ async def era_totals(dt_from: str, dt_to: str, fee_rate: float, fee_pct: float) 
     delivery = float(goods["delivery"])
     legacy = float(goods["delivery_legacy"])
     gross = physical + digital + delivery
+    # Возвращённое покупателю. Комиссия Prodamus при возврате не
+    # возвращается — поэтому считается с принятого, а не с остатка
+    refunds = float(goods.get("refunds", 0))
     expenses = (await db.get_expenses_summary(dt_from, dt_to))["total"]
     fee = gross * fee_rate
     from services.tax_account import accrued_for_period
@@ -100,7 +103,8 @@ async def era_totals(dt_from: str, dt_to: str, fee_rate: float, fee_pct: float) 
     return {"gross": gross, "physical": physical, "digital": digital,
             "delivery": delivery, "count": int(goods["count"]),
             "fee": fee, "npd": npd, "out": out, "expenses": expenses,
-            "net": gross - fee - npd - out - expenses, "legacy": legacy}
+            "refunds": refunds,
+            "net": gross - refunds - fee - npd - out - expenses, "legacy": legacy}
 
 
 async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
@@ -125,6 +129,7 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     npd = was["npd"] + now["npd"]
     out = was["out"] + now["out"]
     expenses = was["expenses"] + now["expenses"]
+    refunds = was["refunds"] + now["refunds"]
     net = was["net"] + now["net"]
 
     credits = await _print_credits(await _orders_in_period(dt_from, dt_to))
@@ -174,7 +179,7 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
         "gross": gross, "physical": physical, "digital": digital,
         "delivery": delivery, "count": was["count"] + now["count"],
         "fee": fee, "fee_pct": fee_pct, "npd": npd,
-        "delivery_out": out, "expenses": expenses,
+        "delivery_out": out, "expenses": expenses, "refunds": refunds,
         "net": net,
         "printed": printed, "print_credits": credits,
         "printed_paid": printed_paid,

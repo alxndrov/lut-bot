@@ -1,4 +1,5 @@
 import json
+import re
 import aiosqlite
 from typing import Optional
 
@@ -371,6 +372,33 @@ async def init_db(existing_cdek_contract: str | None = None):
                 media_kind TEXT,
                 file_id    TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Возвраты денег покупателю (кнопка «Провести возврат» в карточке).
+        # Сам возврат проводится в кабинете Prodamus — API для него нет;
+        # строка появляется, когда админ подтвердил, что заявка оформлена.
+        # Один возврат на заказ. created_at — дата возврата: им уменьшается
+        # прибыль того периода, когда вернули, а не периода заказа.
+        # return_delivery NULL — обратная доставка ещё не известна;
+        # stock_returned NULL — ещё не решили, вернулись ли расходники.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS refunds (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id        INTEGER NOT NULL UNIQUE,
+                amount          REAL NOT NULL,
+                paid            REAL NOT NULL,
+                full            INTEGER NOT NULL DEFAULT 1,
+                reason          TEXT,
+                return_delivery REAL,
+                stock_returned  INTEGER,
+                client_notified INTEGER NOT NULL DEFAULT 0,
+                -- чек в «Мой налог» аннулирован/исправлен; пока NULL —
+                -- бот раз в день напоминает (см. handlers.refunds)
+                receipt_cancelled_at TIMESTAMP,
+                receipt_reminded_at  TIMESTAMP,
+                created_by_id   INTEGER,
+                created_by_name TEXT,
+                created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
@@ -2119,12 +2147,104 @@ async def add_order_message(order_id: int, chat_id: int, message_id: int):
         await db.commit()
 
 
+# Возврат приклеиваем к заказу прямо в выборке: карточку перерисовывают из
+# десятка мест, и каждое должно видеть, что деньги уже вернули
+_REFUND_COLS = """r.amount AS refund_amount, r.full AS refund_full,
+                  r.reason AS refund_reason, r.created_at AS refunded_at,
+                  r.return_delivery AS refund_return_delivery,
+                  r.stock_returned AS refund_stock_returned,
+                  r.receipt_cancelled_at AS refund_receipt_cancelled_at"""
+
+
 async def get_order(order_id: int) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM orders WHERE id = ?", (order_id,)) as cur:
+        async with db.execute(
+            f"""SELECT o.*, {_REFUND_COLS}
+                FROM orders o LEFT JOIN refunds r ON r.order_id = o.id
+                WHERE o.id = ?""", (order_id,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+async def order_paid_amount(order: dict) -> float:
+    """Сколько клиент заплатил за заказ — все позиции платежа, с доставкой."""
+    if not order.get("prodamus_order_id"):
+        return 0.0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE telegram_payment_id = ?",
+            (order["prodamus_order_id"],),
+        ) as cur:
+            return float((await cur.fetchone())[0])
+
+
+async def add_refund(order_id: int, amount: float, paid: float, full: bool,
+                     reason: str, return_delivery: float | None,
+                     stock_returned: bool | None, by_id: int, by_name: str) -> int | None:
+    """Записывает возврат. None — по заказу возврат уже есть (двойной клик)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        try:
+            cur = await db.execute(
+                """INSERT INTO refunds (order_id, amount, paid, full, reason,
+                       return_delivery, stock_returned, created_by_id, created_by_name)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (order_id, round(amount, 2), round(paid, 2), int(full), reason,
+                 None if return_delivery is None else round(return_delivery, 2),
+                 None if stock_returned is None else int(stock_returned),
+                 by_id, by_name),
+            )
+        except aiosqlite.IntegrityError:
+            return None
+        await db.commit()
+        return cur.lastrowid
+
+
+async def set_refund_field(order_id: int, field: str, value) -> bool:
+    """Дозаполняет возврат: обратную доставку, расходники, уведомление клиента.
+
+    Пишем только если поле ещё пустое — второй клик ничего не перетрёт.
+    """
+    assert field in ("return_delivery", "stock_returned", "client_notified")
+    empty = "client_notified = 0" if field == "client_notified" else f"{field} IS NULL"
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            f"UPDATE refunds SET {field} = ? WHERE order_id = ? AND {empty}",
+            (value, order_id))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def mark_receipt_cancelled(order_id: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE refunds SET receipt_cancelled_at = CURRENT_TIMESTAMP "
+            "WHERE order_id = ? AND receipt_cancelled_at IS NULL", (order_id,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def mark_receipt_reminded(refund_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE refunds SET receipt_reminded_at = CURRENT_TIMESTAMP "
+                         "WHERE id = ?", (refund_id,))
+        await db.commit()
+
+
+async def get_refunds() -> list[dict]:
+    """Все возвраты с данными заказа — для листа «Возвраты» и операций."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.*, o.order_code, o.prodamus_order_id, o.user_id, o.shipped_at,
+                      o.recipient_name, o.created_at AS order_created_at,
+                      u.username
+               FROM refunds r
+               JOIN orders o ON o.id = r.order_id
+               LEFT JOIN users u ON u.user_id = o.user_id
+               ORDER BY r.created_at"""
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_direct_replacement(order_id: int) -> Optional[dict]:
@@ -2559,6 +2679,17 @@ async def get_period_revenue(dt_from: str, dt_to: str) -> dict:
             (dt_from, dt_to),
         ) as cur:
             row["delivery_cost"] += float((await cur.fetchone())[0] or 0)
+        # Возвраты — по дате возврата: уменьшают прибыль периода, когда
+        # деньги вернули. Обратная доставка, как и прямая, уходит в счёт СДЭК.
+        async with db.execute(
+            """SELECT COALESCE(SUM(amount), 0), COALESCE(SUM(return_delivery), 0)
+               FROM refunds
+               WHERE datetime(created_at) BETWEEN datetime(?) AND datetime(?)""",
+            (dt_from, dt_to),
+        ) as cur:
+            refunds, back = await cur.fetchone()
+        row["refunds"] = float(refunds or 0)
+        row["delivery_cost"] += float(back or 0)
     # Товар без категории считаем цифрой: физику мы всегда помечаем сами
     row["digital"] += row.pop("unknown")
     return row
@@ -2839,7 +2970,17 @@ async def get_cdek_accrued(date_from: str | None = None,
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql, params) as cur:
-            return _cdek_total(await cur.fetchone())
+            row = dict(await cur.fetchone())
+        # Обратная доставка при возврате тоже приходит в счёте СДЭК
+        back_sql = ("SELECT COUNT(*), COALESCE(SUM(return_delivery), 0) FROM refunds "
+                    "WHERE COALESCE(return_delivery, 0) > 0")
+        if params:
+            back_sql += " AND datetime(created_at) BETWEEN datetime(?) AND datetime(?)"
+        async with db.execute(back_sql, params) as cur:
+            n, back = await cur.fetchone()
+        row["count"] += n
+        row["cost"] = float(row["cost"]) + float(back)
+        return _cdek_total(row)
 
 
 async def get_cdek_accrued_by_month(limit: int = 6) -> list[dict]:
@@ -2852,7 +2993,18 @@ async def get_cdek_accrued_by_month(limit: int = 6) -> list[dict]:
             f" GROUP BY month ORDER BY month DESC LIMIT ?",
             (int(limit),),
         ) as cur:
-            return [_cdek_total(r) for r in await cur.fetchall()]
+            rows = {r["month"]: dict(r) for r in await cur.fetchall()}
+        async with db.execute(
+            "SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) AS month, "
+            "COUNT(*), SUM(return_delivery) FROM refunds "
+            "WHERE COALESCE(return_delivery, 0) > 0 GROUP BY month"
+        ) as cur:
+            for month, n, back in await cur.fetchall():
+                r = rows.setdefault(month, {"month": month, "count": 0, "cost": 0.0, "legacy": 0.0})
+                r["count"] += n
+                r["cost"] = float(r["cost"]) + float(back)
+    ordered = sorted(rows.values(), key=lambda r: r["month"], reverse=True)[:int(limit)]
+    return [_cdek_total(r) for r in ordered]
 
 
 async def get_cdek_account(date_from: str | None = None,
@@ -3197,6 +3349,19 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
             "goods_type": "Цифровой", "printer": "",
         })
 
+    # Возврат — приход с минусом: так его сами учитывают формулы сводки
+    # (выручка, налог, СДЭК, доли по месяцам). Комиссию Prodamus при
+    # возврате не возвращают — у строки её нет (см. operation_values).
+    for r in await get_refunds():
+        num = (re.findall(r"\d+", r["order_code"] or "") or [str(r["order_id"])])[-1]
+        comment = f"Возврат по заказу №{num}" + (f": {r['reason']}" if r["reason"] else "")
+        rows.append({
+            "code": f"refund-{r['id']}", "created_at": r["created_at"],
+            "amount": -float(r["amount"]), "kind": "Приход", "comment": comment,
+            "delivery_cost": float(r["return_delivery"] or 0), "delivery_legacy": 0.0,
+            "goods_type": "Возврат", "printer": "", "refund": True,
+        })
+
     for r in await get_expenses_for_finance_export():
         comment = r["category"] if not r["comment"] else f"{r['category']}: {r['comment']}"
         rows.append({
@@ -3235,14 +3400,18 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
 
 async def get_orders(only_unshipped: bool = False) -> list[dict]:
     """Оплаченные заказы (для аналитики отправок), свежие сверху."""
-    where = "WHERE o.shipped_at IS NULL" if only_unshipped else ""
+    # Полный возврат до отправки — заказ отменён: печатать и слать нечего
+    where = ("WHERE o.shipped_at IS NULL AND COALESCE(r.full, 0) = 0"
+             if only_unshipped else "")
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            f"""SELECT o.*, pr.name AS product_name, u.username, u.first_name
+            f"""SELECT o.*, pr.name AS product_name, u.username, u.first_name,
+                       {_REFUND_COLS}
                 FROM orders o
                 LEFT JOIN products pr ON o.product_id = pr.id
                 LEFT JOIN users u ON o.user_id = u.user_id
+                LEFT JOIN refunds r ON r.order_id = o.id
                 {where}
                 ORDER BY o.created_at DESC"""
         ) as cursor:

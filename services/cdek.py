@@ -339,6 +339,40 @@ class CDEKClient:
             logger.error(f"CDEK get_order_info error: {type(e).__name__}: {e}")
         return None
 
+    async def get_return_cost(self, uuid: str) -> Optional[dict]:
+        """Обратная накладная к заказу, если СДЭК её завёл (невыкуп, возврат
+        через пункт выдачи): {'cdek_number', 'total', 'status'} | None.
+
+        Посылку, которую клиент отправил сам отдельной накладной, отсюда не
+        видно — она с нашим заказом не связана.
+        """
+        token = await self.get_token()
+        if not token:
+            return None
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(f"{self.base_url}/orders/{uuid}", headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=20))
+                data = await resp.json()
+                back = next((e for e in data.get("related_entities") or []
+                             if e.get("type") in ("return_order", "reverse_order")), None)
+                if not back:
+                    return None
+                resp = await session.get(f"{self.base_url}/orders/{back['uuid']}",
+                                         headers=headers,
+                                         timeout=aiohttp.ClientTimeout(total=20))
+                entity = (await resp.json()).get("entity") or {}
+        except Exception as e:
+            logger.error(f"CDEK get_return_cost error: {type(e).__name__}: {e}")
+            return None
+        detail = entity.get("delivery_detail") or {}
+        statuses = entity.get("statuses") or []
+        total = detail.get("total_sum")
+        return {"cdek_number": entity.get("cdek_number") or back.get("cdek_number"),
+                "total": float(total) if total is not None else None,
+                "status": statuses[0].get("name") if statuses else None}
+
     async def get_barcode_pdf(self, order_uuid: str, fmt: str = "A6",
                               copy_count: int = 1,
                               wait_seconds: int = BARCODE_WAIT) -> Optional[bytes]:

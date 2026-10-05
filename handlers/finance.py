@@ -75,6 +75,8 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
         lines.append(f"  цифра: {s['digital']:,.2f} ₽")
     if s["delivery"]:
         lines.append(f"  доставка: {s['delivery']:,.2f} ₽")
+    if s.get("refunds"):
+        lines.append(f"Возвраты покупателям: −{s['refunds']:,.2f} ₽")
     lines.append(f"Комиссия {s['fee_pct']}%: −{s['fee']:,.2f} ₽")
     lines.append(f"НПД с учётом исправлений: −{s['npd']:,.2f} ₽")
     if s["delivery"]:
@@ -251,12 +253,16 @@ async def _cash_block_text(s: dict, dt_from: str, dt_to: str, cdek_paid: dict,
     # периода, точнее взять неоткуда (Prodamus не отдаёт комиссию по заказу)
     pending_net = pending_gross * (1 - s["fee_pct"] / 100)
 
-    cash = (s["gross"] - s["fee"] - s["expenses"] - payouts["total"] - pending_net)
+    # Возврат Prodamus удерживает из следующих переводов — денег приходит меньше
+    cash = (s["gross"] - s.get("refunds", 0) - s["fee"] - s["expenses"]
+            - payouts["total"] - pending_net)
 
     lines = [
         "💰 <b>Касса</b> — деньги периода после фактических расходов",
         "─" * 30,
     ]
+    if s.get("refunds"):
+        lines.append(f"Возвраты покупателям: −{s['refunds']:,.2f} ₽")
     if pending_net:
         lines.append(f"Ещё не перевёл Prodamus: −{pending_net:,.2f} ₽")
     lines += [

@@ -10,7 +10,7 @@ import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
-from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu
+from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
 from services.finance_reports import report_loop
@@ -85,6 +85,7 @@ async def main():
         admin_dp.update.outer_middleware(MessageLogMiddleware("админ"))
         admin_dp.include_router(operations_menu.router)
         admin_dp.include_router(order_actions.router)
+        admin_dp.include_router(refunds.router)
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)
         admin_dp.include_router(finance.router)
@@ -100,6 +101,7 @@ async def main():
         )
         asyncio.create_task(report_loop(admin_bot))
         asyncio.create_task(pending_report_loop(admin_bot))
+        asyncio.create_task(refunds.receipt_reminder_loop(admin_bot))
         # Догоняем кнопки у заказов, созданных до появления новых статусов
         asyncio.create_task(order_actions.refresh_open_orders(admin_bot))
         # Команда видна в меню бота
