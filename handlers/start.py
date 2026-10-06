@@ -38,6 +38,20 @@ async def ask_policy(message: Message):
     )
 
 
+async def ensure_policy(message: Message, payload: str | None = None) -> bool:
+    """Без согласия на обработку данных дальше не пускаем: спрашиваем его,
+    а payload откроется после «Принимаю». True — согласие уже есть."""
+    await db.upsert_user(user_id=message.from_user.id, username=message.from_user.username,
+                         first_name=message.from_user.first_name or "", ref=None)
+    if not config.POLICY_REQUIRED:
+        return True
+    if await db.is_policy_accepted(message.from_user.id):
+        return True
+    await db.set_pending_payload(message.from_user.id, payload)
+    await ask_policy(message)
+    return False
+
+
 async def _start_funnel(user_id: int, payload: str | None):
     """Запускает воронку по deep-link payload (после согласия)."""
     if not payload or not payload.startswith("lm_"):
@@ -66,6 +80,10 @@ async def cb_policy_accept(callback: CallbackQuery):
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+    if payload == "course":
+        from handlers.course import send_course
+        await send_course(callback.message, callback.from_user.id)
+        return
     await _start_funnel(callback.from_user.id, payload)
     await show_catalog(callback.message, user_id=callback.from_user.id)
 
@@ -107,6 +125,11 @@ async def cmd_start(message: Message):
     if config.POLICY_REQUIRED and not await db.is_policy_accepted(message.from_user.id):
         await db.set_pending_payload(message.from_user.id, payload)
         await ask_policy(message)
+        return
+
+    if payload == "course":
+        from handlers.course import send_course
+        await send_course(message, message.from_user.id)
         return
 
     if funnel_to_start:

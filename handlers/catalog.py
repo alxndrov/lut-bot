@@ -35,6 +35,13 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
 
     category = product.get("category", "digital")
 
+    # Курс: внутри одного товара три опции — свой экран
+    if await db.get_course_options(product_id):
+        from handlers.course import send_course
+        await callback.answer()
+        await send_course(callback.message, callback.from_user.id)
+        return
+
     # Товар «из наличия»: показываем, что осталось; распроданный — не продаём
     stock_line = ""
     variants = await db.get_product_variants(product_id) if db.is_stock_product(product) else []

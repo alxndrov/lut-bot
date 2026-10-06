@@ -115,6 +115,19 @@ GOOGLE_SHEET_FINANCE_TAB: str = os.getenv("GOOGLE_SHEET_FINANCE_TAB", "Фина�
 GSHEETS_ENABLED: bool = bool(GOOGLE_SHEET_ID)
 DAILY_REPORT_HOUR_MSK: int = int(os.getenv("DAILY_REPORT_HOUR_MSK", "9"))
 
+# Курс Shot on iPhone + Cut by MALIMABI. Даты — по Москве: с COURSE_OPEN_AT
+# в приложении открываются уроки, с COURSE_FULL_PRICE_FROM действуют полные
+# цены (course_options.price_full).
+COURSE_OPEN_AT: str = os.getenv("COURSE_OPEN_AT", "2026-11-01")
+COURSE_FULL_PRICE_FROM: str = os.getenv("COURSE_FULL_PRICE_FROM", "2026-11-01")
+BUNDLE_REVIEW_LIMIT: int = int(os.getenv("BUNDLE_REVIEW_LIMIT", "15"))
+# Адрес мини-приложения курса (только https). Пока не задан — кнопки
+# приложения не показываются.
+MINIAPP_URL: str = os.getenv("MINIAPP_URL", "")
+COURSE_OFFER_URL: str = os.getenv("COURSE_OFFER_URL", "") or OFFER_URL
+# Сколько живёт подпись initData мини-приложения
+WEBAPP_AUTH_MAX_AGE: int = int(os.getenv("WEBAPP_AUTH_MAX_AGE", str(24 * 3600)))
+
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN не задан в .env")
 if not ADMIN_IDS:

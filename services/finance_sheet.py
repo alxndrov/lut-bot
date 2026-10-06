@@ -519,24 +519,6 @@ def refunds_values(refunds):
     return [row + [''] * (width - len(row)) for row in head + lines[::-1]]
 
 
-def refunds_requests(sheet_id, refunds):
-    values = refunds_values(refunds)
-    return [
-        # Сначала стираем старое: возврат могли удалить, строк станет меньше
-        {'updateCells': {'range': {'sheetId': sheet_id}, 'fields': 'userEnteredValue'}},
-        write_cells(sheet_id, 0, 0, values),
-        {'repeatCell': {'range': {'sheetId': sheet_id, 'startRowIndex': 0, 'endRowIndex': 1},
-                        'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
-                        'fields': 'userEnteredFormat.textFormat.bold'}},
-        {'repeatCell': {'range': {'sheetId': sheet_id, 'startRowIndex': 5, 'endRowIndex': 6},
-                        'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
-                        'fields': 'userEnteredFormat.textFormat.bold'}},
-        {'updateSheetProperties': {'properties': {'sheetId': sheet_id,
-                                   'gridProperties': {'frozenRowCount': 6}},
-                                   'fields': 'gridProperties.frozenRowCount'}},
-    ]
-
-
 def load_workbook():
     """Only cashflow is bot-owned; the user owns summary formulas and layout.
 
@@ -668,26 +650,89 @@ def publish(book, props, values, snapshot, legacy, modern, *, preserve_summary=T
     return stats
 
 
-def publish_refunds(book, props, refunds):
-    """Лист «Возвраты» — отдельным запросом: сбой в нём не должен
-    останавливать сверку операций, от которой зависят деньги."""
-    if not refunds and REFUNDS_TAB not in props:
-        return
+def _publish_bot_tab(book, props, title, values, bold_rows, frozen):
+    """Лист, которым целиком владеет бот: стереть и записать заново —
+    отдельным запросом, чтобы сбой в нём не останавливал сверку операций,
+    от которой зависят деньги."""
+    width = max((len(r) for r in values), default=1)
     requests = []
-    if REFUNDS_TAB in props:
-        sid = props[REFUNDS_TAB]['sheetId']
-        rows = props[REFUNDS_TAB]['gridProperties']['rowCount']
-        if rows < len(refunds) + 7:
+    if title in props:
+        sid = props[title]['sheetId']
+        grid = props[title]['gridProperties']
+        if grid['rowCount'] < len(values) + 1 or grid['columnCount'] < width:
             requests.append({'updateSheetProperties': {'properties': {'sheetId': sid,
-                'gridProperties': {'rowCount': len(refunds) + 57}},
-                'fields': 'gridProperties.rowCount'}})
+                'gridProperties': {'rowCount': max(grid['rowCount'], len(values) + 50),
+                                   'columnCount': max(grid['columnCount'], width)}},
+                'fields': 'gridProperties.rowCount,gridProperties.columnCount'}})
     else:
         sid = max((p['sheetId'] for p in props.values()), default=0) + 1
-        requests.append({'addSheet': {'properties': {'title': REFUNDS_TAB, 'sheetId': sid,
-                         'gridProperties': {'rowCount': max(200, len(refunds) + 57),
-                                            'columnCount': len(REFUND_HEADERS)}}}})
-    requests += refunds_requests(sid, refunds)
+        props[title] = {'sheetId': sid, 'gridProperties': {
+            'rowCount': max(200, len(values) + 50), 'columnCount': width}}
+        requests.append({'addSheet': {'properties': {'title': title, **props[title]}}})
+    requests += [
+        # Сначала стираем старое: строк могло стать меньше
+        {'updateCells': {'range': {'sheetId': sid}, 'fields': 'userEnteredValue'}},
+        write_cells(sid, 0, 0, values),
+    ]
+    for row in bold_rows:
+        requests.append({'repeatCell': {
+            'range': {'sheetId': sid, 'startRowIndex': row, 'endRowIndex': row + 1},
+            'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
+            'fields': 'userEnteredFormat.textFormat.bold'}})
+    requests.append({'updateSheetProperties': {'properties': {'sheetId': sid,
+                     'gridProperties': {'frozenRowCount': frozen}},
+                     'fields': 'gridProperties.frozenRowCount'}})
     book.batch_update({'requests': requests})
+
+
+def publish_refunds(book, props, refunds):
+    """Лист «Возвраты»."""
+    if not refunds and REFUNDS_TAB not in props:
+        return
+    _publish_bot_tab(book, props, REFUNDS_TAB, refunds_values(refunds), (0, 5), 6)
+
+
+COURSE_TAB = 'Курс'
+COURSE_HEADERS = ['Дата оплаты', 'Опция', 'Сумма', 'Покупатель', 'Telegram', 'Telegram ID',
+                  'Место на разбор', 'Открытые разделы', 'Платёж Prodamus']
+_SECTION_NAMES = {'shooting': 'Съёмка', 'editing': 'Монтаж'}
+
+
+def course_values(buyers, options, review_limit):
+    """Лист «Курс»: итоги по опциям сверху, ниже по строке на покупку
+    (новые сверху). Сами деньги — в операциях, строки «Цифровой»."""
+    lines = []
+    for b in buyers:
+        owned = set((b.get('sections') or '').split(','))
+        sections = [s for s in _SECTION_NAMES if s in owned]
+        lines.append([
+            msk_date(b['created_at']).strftime('%d.%m.%Y %H:%M'), b['title'], money(b['amount']),
+            b.get('first_name') or '', '@' + b['username'] if b.get('username') else '',
+            str(b['user_id']), b['review_position'] or '',
+            ', '.join(_SECTION_NAMES.get(s, s) for s in sections) or 'Отозван',
+            b.get('telegram_payment_id') or '',
+        ])
+    head = [
+        ['КУРС SHOT ON IPHONE + CUT BY MALIMABI'],
+        ['Покупок', len(buyers)],
+        ['Выручка', money(sum(float(b['amount']) for b in buyers)),
+         'Уже на листе операций как «Цифровой» (делится как цифровые товары)'],
+    ]
+    for o in options:
+        mine = [b for b in buyers if b['slug'] == o['slug']]
+        head.append([o['title'], len(mine), money(sum(float(b['amount']) for b in mine))])
+    head.append(['Личные разборы', f"{sum(1 for b in buyers if b['review_position'])} из {review_limit}"])
+    head += [[], COURSE_HEADERS]
+    width = len(COURSE_HEADERS)
+    return [row + [''] * (width - len(row)) for row in head + lines[::-1]]
+
+
+def publish_course(book, props, course):
+    if not course['options']:
+        return
+    values = course_values(course['buyers'], course['options'], course['review_limit'])
+    header_row = values.index(COURSE_HEADERS)
+    _publish_bot_tab(book, props, COURSE_TAB, values, (0, header_row), header_row + 1)
 
 
 async def sync_finance():
@@ -710,6 +755,13 @@ async def sync_finance():
                 await asyncio.to_thread(publish_refunds, book, props, snapshot.get('refunds') or [])
             except Exception:
                 logger.exception('finance_sheet: лист «Возвраты» не обновился')
+            try:
+                course = {'buyers': await db.get_course_buyers(),
+                          'options': await db.get_course_options(),
+                          'review_limit': config.BUNDLE_REVIEW_LIMIT}
+                await asyncio.to_thread(publish_course, book, props, course)
+            except Exception:
+                logger.exception('finance_sheet: лист «Курс» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)
             return stats
 

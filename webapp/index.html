@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Курс MALIMABI</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #ffffff);
+    --text: var(--tg-theme-text-color, #111111);
+    --hint: var(--tg-theme-hint-color, #8a8a8e);
+    --card: var(--tg-theme-secondary-bg-color, #f2f2f5);
+    --accent: var(--tg-theme-button-color, #111111);
+    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 16px 16px 32px; }
+  .cover { border-radius: 20px; padding: 28px 22px; min-height: 190px; color: #fff;
+           display: flex; flex-direction: column; justify-content: flex-end;
+           background: radial-gradient(120% 90% at 85% 10%, #3a3a3a 0%, #0d0d0d 60%), #000;
+           background-size: cover; background-position: center; }
+  .cover small { opacity: .7; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
+  .cover h1 { margin: 6px 0 8px; font-size: 26px; line-height: 1.15; }
+  .cover p { margin: 0; opacity: .85; }
+  h2 { font-size: 13px; color: var(--hint); text-transform: uppercase; letter-spacing: .06em;
+       margin: 26px 4px 10px; font-weight: 600; }
+  .card { background: var(--card); border-radius: 16px; padding: 18px; margin-bottom: 12px; }
+  .card h3 { margin: 0 0 4px; font-size: 18px; }
+  .status { color: var(--hint); margin: 0 0 14px; }
+  .status.ok { color: #2e9e5b; font-weight: 600; }
+  button { width: 100%; border: 0; border-radius: 12px; padding: 13px 16px; font: inherit;
+           font-weight: 600; background: var(--accent); color: var(--accent-text); cursor: pointer; }
+  .muted { text-align: center; color: var(--hint); padding: 40px 12px; }
+  ul.lessons { list-style: none; margin: 0; padding: 0; }
+  ul.lessons li { padding: 10px 0; border-top: 1px solid rgba(127,127,127,.2); }
+</style>
+</head>
+<body>
+<main>
+  <section class="cover">
+    <small>Курс MALIMABI</small>
+    <h1>Shot on iPhone<br>+ Cut by MALIMABI</h1>
+    <p id="start">Старт 1 ноября</p>
+  </section>
+  <h2>Разделы</h2>
+  <div id="sections"><div class="muted">Загружаем…</div></div>
+</main>
+<script>
+(function () {
+  var tg = window.Telegram && window.Telegram.WebApp;
+  var box = document.getElementById('sections');
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]; }); }
+  function rub(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽'; }
+  function fail(text) { box.innerHTML = '<div class="muted">' + esc(text) + '</div>'; }
+
+  if (!tg || !tg.initData) { fail('Открой приложение из бота MALIMABI в Telegram.'); return; }
+  tg.ready(); tg.expand();
+
+  fetch('/api/course/me', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ initData: tg.initData }) })
+    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then(render)
+    .catch(function () { fail('Не получилось загрузить. Закрой приложение и открой снова.'); });
+
+  function render(d) {
+    document.getElementById('start').textContent =
+      d.open ? 'Курс открыт — уроки ниже' : 'Старт ' + d.open_date;
+    box.innerHTML = '';
+    d.sections.forEach(function (s) {
+      var card = document.createElement('div');
+      card.className = 'card';
+      var html = '<h3>' + esc(s.title) + '</h3>';
+      if (!s.owned) {
+        html += '<p class="status">Нет доступа' + (s.price ? ' · от ' + rub(s.price) : '') + '</p>' +
+                '<button type="button">Купить</button>';
+      } else if (!d.open) {
+        html += '<p class="status ok">Куплено ✓</p><p class="status">Уроки откроются ' +
+                esc(d.open_date) + '. Пришлём сообщение в бот.</p>';
+      } else if (s.lessons.length) {
+        html += '<ul class="lessons">' + s.lessons.map(function (l) {
+          return '<li>' + esc(l.position) + '. ' + esc(l.title) + '</li>'; }).join('') + '</ul>';
+      } else {
+        html += '<p class="status ok">Куплено ✓</p><p class="status">Уроки появятся здесь совсем скоро.</p>';
+      }
+      card.innerHTML = html;
+      var btn = card.querySelector('button');
+      if (btn) btn.addEventListener('click', function () {
+        if (d.buy_url) { tg.openTelegramLink(d.buy_url); tg.close(); }
+      });
+      box.appendChild(card);
+    });
+  }
+})();
+</script>
+</body>
+</html>

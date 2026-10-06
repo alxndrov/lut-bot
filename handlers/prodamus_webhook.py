@@ -125,6 +125,11 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             )
             return None
 
+    # Курс: order_num = c_{user_id}_{option_id} — своя выдача (разделы)
+    if order_type == "c":
+        from handlers.course import provision
+        return await provision(bot, user_id, product_id, prodamus_order_id, amount, _send_notify)
+
     product = await db.get_product(product_id)
     if not product:
         logger.error(f"prodamus: товар {product_id} не найден")

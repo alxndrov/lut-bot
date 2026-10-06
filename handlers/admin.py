@@ -775,7 +775,7 @@ async def _product_card_text(product: dict, purchase_count: int = 0) -> str:
     elif cat == "waitlist":
         cat_label = "📋 Список ожидания"
     elif cat == "infobiz":
-        cat_label = "📚 Инфобиз"
+        cat_label = "🎓 Курс"
     else:
         cat_label = "📦 Цифровой"
 
@@ -1260,7 +1260,7 @@ async def cb_category_select(callback: CallbackQuery):
     product = await db.get_product(product_id)
 
     labels = {"physical": "🚚 Физический", "waitlist": "📋 Список ожидания",
-              "infobiz": "📚 Инфобиз", "digital": "📦 Цифровой",
+              "infobiz": "🎓 Курс", "digital": "📦 Цифровой",
               "stock": "📦 Физический в наличии"}
     cat_label = labels.get(category, "📦 Цифровой")
 
@@ -2401,7 +2401,7 @@ async def cb_product_submenu(callback: CallbackQuery):
     titles = {
         "content": "✏️ Контент",
         "media": "📎 Медиафайлы",
-        "infobiz": "📚 Инфобиз",
+        "infobiz": "🎓 Курс",
         "marketing": "💌 Маркетинг",
     }
     if sub == "content":

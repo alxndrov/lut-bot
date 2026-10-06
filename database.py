@@ -401,6 +401,50 @@ async def init_db(existing_cdek_contract: str | None = None):
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Курс (категория infobiz, в интерфейсе — «Курс»): один товар, внутри
+        # опции — съёмка, монтаж, пакет. sections — какие разделы открывает
+        # опция (через запятую); price — цена предпродажи, price_full — после
+        # config.COURSE_FULL_PRICE_FROM. Цена выбирается по дате, без расписаний.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_options (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                slug       TEXT NOT NULL UNIQUE,
+                title      TEXT NOT NULL,
+                sections   TEXT NOT NULL,
+                price      INTEGER NOT NULL,
+                price_full INTEGER NOT NULL,
+                position   INTEGER NOT NULL DEFAULT 0,
+                review_bonus INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        # Доступ к разделу курса. Одна строка на человека и раздел — повторный
+        # вебхук и докупка второго раздела ничего не задваивают и не перетирают.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_access (
+                user_id     INTEGER NOT NULL,
+                section     TEXT NOT NULL,
+                purchase_id INTEGER,
+                granted_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                revoked_at  TIMESTAMP,
+                PRIMARY KEY (user_id, section)
+            )
+        """)
+        # Очередь на личный разбор — первые N покупателей пакета. Место
+        # выдаётся одним INSERT … SELECT MAX+1, уникальность position не даст
+        # двум одновременным оплатам получить одно и то же место.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS bundle_review_queue (
+                position    INTEGER PRIMARY KEY,
+                user_id     INTEGER NOT NULL UNIQUE,
+                purchase_id INTEGER NOT NULL UNIQUE,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        try:
+            await db.execute("ALTER TABLE purchases ADD COLUMN course_option_id INTEGER DEFAULT NULL")
+        except Exception:
+            pass
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -1769,7 +1813,8 @@ async def check_channel_access(user_id: int, channel_id: str) -> bool:
 async def add_purchase(user_id: int, username: Optional[str], product_id: int,
                        telegram_payment_id: str, amount: int,
                        delivery_amount: int = 0, quantity: int = 1,
-                       delivery_cost: float = 0.0) -> int:
+                       delivery_cost: float = 0.0,
+                       course_option_id: int | None = None) -> int:
     """Добавляет покупку и возвращает порядковый номер покупки этого товара (1-based).
 
     amount — вся сумма платежа, delivery_amount — сколько внутри неё доставка,
@@ -1780,10 +1825,10 @@ async def add_purchase(user_id: int, username: Optional[str], product_id: int,
         await db.execute(
             """INSERT INTO purchases
                    (user_id, username, product_id, telegram_payment_id, amount,
-                    delivery_amount, quantity, delivery_cost)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    delivery_amount, quantity, delivery_cost, course_option_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, username, product_id, telegram_payment_id, amount,
-             delivery_amount, max(1, quantity), delivery_cost),
+             delivery_amount, max(1, quantity), delivery_cost, course_option_id),
         )
         await db.commit()
         async with db.execute(
@@ -3819,3 +3864,187 @@ async def get_stats() -> dict:
             "waitlist_total": waitlist_total,
             "conversion":     conversion,
         }
+
+
+# --- Курс: опции, доступы к разделам, очередь на разбор ---
+
+async def get_course_product(include_inactive: bool = True) -> Optional[dict]:
+    """Товар курса — тот, у которого заведены опции (см. course_options)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT p.* FROM products p
+               WHERE p.id IN (SELECT product_id FROM course_options)
+               ORDER BY p.id LIMIT 1"""
+        ) as cur:
+            row = await cur.fetchone()
+    product = dict(row) if row else None
+    if product and not include_inactive and not product.get("active"):
+        return None
+    return product
+
+
+async def get_course_options(product_id: int | None = None) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        sql = "SELECT * FROM course_options"
+        args: tuple = ()
+        if product_id is not None:
+            sql += " WHERE product_id = ?"
+            args = (product_id,)
+        async with db.execute(sql + " ORDER BY position, id", args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_course_option(option_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM course_options WHERE id = ?", (option_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def add_course_option(product_id: int, slug: str, title: str, sections: str,
+                            price: int, price_full: int, position: int,
+                            review_bonus: bool = False) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO course_options
+                   (product_id, slug, title, sections, price, price_full, position, review_bonus)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (product_id, slug, title, sections, price, price_full, position,
+             1 if review_bonus else 0),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def set_course_option_prices(slug: str, price: int, price_full: int) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "UPDATE course_options SET price = ?, price_full = ? WHERE slug = ?",
+            (price, price_full, slug),
+        )
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def add_course_purchase(user_id: int, username: Optional[str], product_id: int,
+                              option_id: int, payment_id: str, amount: int) -> Optional[int]:
+    """Записывает покупку курса и возвращает её id. None — этот платёж уже
+    записан (повторный вебхук), выдавать второй раз нечего."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Проверка и запись одним запросом — два одновременных вебхука
+        # одного платежа не проскочат оба
+        cur = await db.execute(
+            """INSERT INTO purchases
+                   (user_id, username, product_id, telegram_payment_id, amount, course_option_id)
+               SELECT ?, ?, ?, ?, ?, ?
+               WHERE ? = '' OR NOT EXISTS
+                   (SELECT 1 FROM purchases WHERE telegram_payment_id = ?)""",
+            (user_id, username, product_id, payment_id, amount, option_id,
+             payment_id or "", payment_id or ""),
+        )
+        await db.commit()
+        return cur.lastrowid if cur.rowcount > 0 else None
+
+
+async def grant_course_access(user_id: int, sections: list[str], purchase_id: int | None) -> list[str]:
+    """Открывает разделы. Возвращает те, что открыты этой покупкой впервые
+    (или заново после отзыва); уже открытые не трогает."""
+    granted = []
+    async with aiosqlite.connect(DB_PATH) as db:
+        for section in sections:
+            cur = await db.execute(
+                """INSERT INTO course_access (user_id, section, purchase_id)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(user_id, section) DO UPDATE
+                       SET purchase_id = excluded.purchase_id,
+                           granted_at = CURRENT_TIMESTAMP,
+                           revoked_at = NULL
+                       WHERE course_access.revoked_at IS NOT NULL""",
+                (user_id, section, purchase_id),
+            )
+            if cur.rowcount > 0:
+                granted.append(section)
+        await db.commit()
+    return granted
+
+
+async def revoke_course_access(user_id: int, sections: list[str] | None = None) -> int:
+    """Снимает доступ (возврат, бан). sections=None — ко всем разделам."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        sql = ("UPDATE course_access SET revoked_at = CURRENT_TIMESTAMP "
+               "WHERE user_id = ? AND revoked_at IS NULL")
+        args: list = [user_id]
+        if sections:
+            sql += f" AND section IN ({','.join('?' * len(sections))})"
+            args += sections
+        cur = await db.execute(sql, args)
+        await db.commit()
+        return cur.rowcount
+
+
+async def get_user_course_sections(user_id: int) -> set[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT section FROM course_access WHERE user_id = ? AND revoked_at IS NULL",
+            (user_id,),
+        ) as cur:
+            return {r[0] for r in await cur.fetchall()}
+
+
+async def reserve_bundle_review(user_id: int, purchase_id: int, limit: int) -> Optional[int]:
+    """Место в очереди на разбор (1..limit) или None, если мест нет.
+
+    Одним запросом: SQLite держит блокировку записи на весь INSERT, так что
+    две одновременные оплаты не получат одно место и не выйдут за limit.
+    Если у человека место уже есть — возвращает его."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO bundle_review_queue (position, user_id, purchase_id)
+               SELECT COALESCE(MAX(position), 0) + 1, ?, ?
+               FROM bundle_review_queue
+               HAVING COALESCE(MAX(position), 0) < ?""",
+            (user_id, purchase_id, limit),
+        )
+        await db.commit()
+        async with db.execute(
+            "SELECT position FROM bundle_review_queue WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else None
+
+
+async def count_bundle_reviews() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM bundle_review_queue") as cur:
+            return int((await cur.fetchone())[0])
+
+
+async def get_course_buyers() -> list[dict]:
+    """Все покупки курса для админского списка и CSV, по времени."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT pu.id AS purchase_id, pu.user_id, pu.amount, pu.created_at,
+                      pu.telegram_payment_id,
+                      COALESCE(u.username, pu.username) AS username, u.first_name,
+                      o.slug, o.title, q.position AS review_position,
+                      (SELECT GROUP_CONCAT(a.section) FROM course_access a
+                        WHERE a.user_id = pu.user_id AND a.revoked_at IS NULL) AS sections
+               FROM purchases pu
+               JOIN course_options o ON o.id = pu.course_option_id
+               LEFT JOIN users u ON u.user_id = pu.user_id
+               LEFT JOIN bundle_review_queue q ON q.purchase_id = pu.id
+               ORDER BY pu.created_at, pu.id"""
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_user(user_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None

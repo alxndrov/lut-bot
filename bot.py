@@ -4,13 +4,14 @@ import logging
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
 
 import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds
+from handlers import course, course_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
 from services.finance_reports import report_loop
@@ -41,6 +42,7 @@ async def main():
     # Регистрируем роутеры
     dp.include_router(admin.router)   # Сначала админ, чтобы перехватывал FSM-состояния
     dp.include_router(start.router)
+    dp.include_router(course.router)        # кодовое слово — раньше поддержки
     dp.include_router(catalog.router)
     dp.include_router(brief_handler.router)
     dp.include_router(delivery.router)      # before payment!
@@ -58,6 +60,7 @@ async def main():
     await bot.set_my_commands([
         BotCommand(command="start",       description="🏠 В начало"),
         BotCommand(command="catalog",     description="📦 Каталог товаров"),
+        BotCommand(command="course",      description="🎬 Курс"),
         BotCommand(command="mypurchases", description="🧾 Мои покупки"),
         BotCommand(command="feedback",    description="💬 Оставить отзыв"),
         BotCommand(command="help",        description="🆘 Поддержка"),
@@ -72,6 +75,19 @@ async def main():
 
     # Запускаем aiohttp-сервер для приёма вебхуков от Prodamus
     webhook_app = create_webhook_app(bot)
+    try:
+        bot_username = (await bot.get_me()).username or ""
+    except Exception as e:
+        logging.warning(f"get_me не удался: {e}")
+        bot_username = ""
+    course.setup_web(webhook_app, bot_username)
+    if config.MINIAPP_URL:
+        # Кнопка приложения курса вместо меню команд; команды работают через «/»
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
+                text="Курс", web_app=WebAppInfo(url=config.MINIAPP_URL)))
+        except Exception as e:
+            logging.warning(f"Не удалось поставить кнопку приложения: {e}")
     runner = web.AppRunner(webhook_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.PRODAMUS_WEBHOOK_PORT)
@@ -86,6 +102,7 @@ async def main():
         admin_dp.include_router(operations_menu.router)
         admin_dp.include_router(order_actions.router)
         admin_dp.include_router(refunds.router)
+        admin_dp.include_router(course_admin.router)
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)
         admin_dp.include_router(finance.router)
