@@ -14,6 +14,7 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
 def catalog_submenu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📦 Все товары", callback_data="admin:products")],
+        [InlineKeyboardButton(text="↕️ Порядок в каталоге", callback_data="admin:order")],
         [InlineKeyboardButton(text="➕ Добавить товар", callback_data="admin:add_product")],
         [InlineKeyboardButton(text="🖼 Баннер каталога", callback_data="admin:upload_banner")],
         [InlineKeyboardButton(text="🛒 Незавершённые заказы", callback_data="admin:pending")],
@@ -159,6 +160,23 @@ def admin_products_keyboard(products: list[dict]) -> InlineKeyboardMarkup:
         )])
     buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu_catalog")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def product_order_keyboard(products: list[dict]) -> InlineKeyboardMarkup:
+    """Порядок товаров в каталоге: название и стрелки на каждой строке."""
+    rows = []
+    last = len(products) - 1
+    for i, p in enumerate(products):
+        name = ("" if p["active"] else "🙈 ") + p["name"]
+        rows.append([
+            InlineKeyboardButton(text=f"{i + 1}. {name[:28]}", callback_data="admin:noop"),
+            InlineKeyboardButton(text="⬆️" if i > 0 else "·",
+                                 callback_data=f"admin:order:{p['id']}:-1" if i > 0 else "admin:noop"),
+            InlineKeyboardButton(text="⬇️" if i < last else "·",
+                                 callback_data=f"admin:order:{p['id']}:1" if i < last else "admin:noop"),
+        ])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:menu_catalog")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _section(title: str) -> InlineKeyboardButton:

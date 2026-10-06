@@ -10,7 +10,7 @@ def catalog_keyboard(products: list[dict], is_admin: bool = False) -> InlineKeyb
         hidden = not p.get("active", 1)
         prefix = "🙈 " if hidden else ""
         buttons.append([InlineKeyboardButton(
-            text=f"{prefix}{p['name']} — {p['price']} ₽",
+            text=f"{prefix}{p['name']} — {p.get('price_label') or p['price']} ₽",
             callback_data=f"product:{p['id']}"
         )])
     return InlineKeyboardMarkup(inline_keyboard=buttons)

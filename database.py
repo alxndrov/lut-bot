@@ -401,6 +401,13 @@ async def init_db(existing_cdek_contract: str | None = None):
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Порядок товаров в каталоге (меньше — выше). NULL у старых товаров
+        # заполняется их id, чтобы исходный порядок не поменялся.
+        try:
+            await db.execute("ALTER TABLE products ADD COLUMN sort_order INTEGER DEFAULT NULL")
+        except Exception:
+            pass
+        await db.execute("UPDATE products SET sort_order = id WHERE sort_order IS NULL")
         # Курс (категория infobiz, в интерфейсе — «Курс»): один товар, внутри
         # опции — съёмка, монтаж, пакет. sections — какие разделы открывает
         # опция (через запятую); price — цена предпродажи, price_full — после
@@ -779,7 +786,9 @@ async def get_all_products(active_only=True) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         condition = "WHERE active = 1" if active_only else ""
-        async with db.execute(f"SELECT * FROM products {condition} ORDER BY id") as cursor:
+        async with db.execute(
+            f"SELECT * FROM products {condition} ORDER BY COALESCE(sort_order, id), id"
+        ) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
 
@@ -788,6 +797,12 @@ async def get_catalog_products(include_hidden: bool = False) -> list[dict]:
     """Товары каталога. Клиенту не показываем скрытые и распроданные
     товары «из наличия» (у которых все варианты разобраны)."""
     products = await get_all_products(active_only=not include_hidden)
+    # У курса цена зависит от опции и даты — в каталоге «от …»
+    from services.course import price_for
+    for p in products:
+        options = await get_course_options(p["id"]) if p.get("category") == "infobiz" else []
+        if options:
+            p["price_label"] = "от " + f"{min(price_for(o) for o in options):,}".replace(",", " ")
     if include_hidden:
         return products
     return [p for p in products
@@ -805,8 +820,10 @@ async def get_product(product_id: int) -> Optional[dict]:
 
 async def add_product(name: str, description: str, price: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
+        # Новый товар — в конец каталога
         cursor = await db.execute(
-            "INSERT INTO products (name, description, price, active) VALUES (?, ?, ?, 0)",
+            """INSERT INTO products (name, description, price, active, sort_order)
+               VALUES (?, ?, ?, 0, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM products))""",
             (name, description, price),
         )
         await db.commit()
@@ -856,6 +873,25 @@ async def update_product_price(product_id: int, price: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE products SET price = ? WHERE id = ?", (price, product_id))
         await db.commit()
+
+
+async def move_product(product_id: int, direction: int) -> bool:
+    """Меняет товар местами с соседом в каталоге. direction: -1 вверх, +1 вниз."""
+    products = await get_all_products(active_only=False)
+    ids = [p["id"] for p in products]
+    if product_id not in ids:
+        return False
+    i = ids.index(product_id)
+    j = i + direction
+    if not 0 <= j < len(ids):
+        return False
+    ids[i], ids[j] = ids[j], ids[i]
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Перенумеровываем всех подряд — так не бывает одинаковых номеров
+        for n, pid in enumerate(ids, 1):
+            await db.execute("UPDATE products SET sort_order = ? WHERE id = ?", (n, pid))
+        await db.commit()
+    return True
 
 
 async def delete_product(product_id: int):

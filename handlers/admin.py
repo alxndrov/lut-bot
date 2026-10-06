@@ -761,6 +761,38 @@ async def cb_admin_products(callback: CallbackQuery):
     await callback.answer()
 
 
+# --- Порядок товаров в каталоге ---
+
+_ORDER_TEXT = ("↕️ <b>Порядок в каталоге</b>\n\n"
+               "Так товары идут у клиента сверху вниз. 🙈 — скрытые, клиент их не видит.")
+
+
+@router.callback_query(F.data == "admin:order")
+async def cb_product_order(callback: CallbackQuery):
+    if not await admin_only(callback):
+        return
+    from keyboards.admin import product_order_keyboard
+    products = await db.get_all_products(active_only=False)
+    await callback.message.edit_text(_ORDER_TEXT, parse_mode="HTML",
+                                     reply_markup=product_order_keyboard(products))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:order:"))
+async def cb_product_move(callback: CallbackQuery):
+    if not await admin_only(callback):
+        return
+    from keyboards.admin import product_order_keyboard
+    _, _, pid, direction = callback.data.split(":")
+    await db.move_product(int(pid), int(direction))
+    products = await db.get_all_products(active_only=False)
+    try:
+        await callback.message.edit_reply_markup(reply_markup=product_order_keyboard(products))
+    except Exception:
+        pass   # двойное нажатие — разметка уже такая
+    await callback.answer()
+
+
 # --- Карточка товара ---
 
 async def _product_card_text(product: dict, purchase_count: int = 0) -> str:
