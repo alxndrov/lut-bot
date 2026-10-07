@@ -157,10 +157,19 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
 
     partner_goods = physical_net_was * config.PARTNER_GOODS_PERCENT / 100
     partner_print = printed_paid * config.PARTNER_PRINT_FEE
-    partner_digital = digital_net_was * config.PARTNER_DIGITAL_PERCENT / 100
     # Новая эпоха: бизнес общий — делим чистую прибыль целиком, вместе с
-    # расходами на материалы, а не только процент с товара
-    partner_new = now["net"] * config.PARTNER_GOODS_PERCENT_NEW / 100
+    # расходами на материалы, а не только процент с товара. Но цифровые
+    # товары (лут, курс) и в ней делятся по-старому, 80/20 (решение Дани
+    # 07.10.2026): их чистая часть — выручка минус комиссия и их НПД,
+    # доставки, возвратов и материалов у них не бывает.
+    new_from = max(dt_from, cut)
+    digital_tax_now = (await accrued_for_period(new_from, dt_to, "digital")
+                       if new_from <= dt_to else 0.0)
+    digital_net_now = now["digital"] * (1 - fee_rate) - digital_tax_now
+    partner_digital = ((digital_net_was + digital_net_now)
+                       * config.PARTNER_DIGITAL_PERCENT / 100)
+    partner_new = ((now["net"] - digital_net_now)
+                   * config.PARTNER_GOODS_PERCENT_NEW / 100)
     partner = partner_goods + partner_print + partner_digital + partner_new
 
     # Уже выплаченное внутри периода: доля начисляется за весь период, но
@@ -209,7 +218,7 @@ def share_parts(s: dict) -> list[str]:
         parts.append(f"цифра {config.PARTNER_DIGITAL_PERCENT:g}% "
                      f"= {s['partner_digital']:,.2f}")
     if s.get("partner_new"):
-        parts.append(f"{config.PARTNER_GOODS_PERCENT_NEW:g}% чистой прибыли с "
+        parts.append(f"{config.PARTNER_GOODS_PERCENT_NEW:g}% чистой прибыли с физтоваров с "
                      f"{_split_date_ru()} = {s['partner_new']:,.2f}")
     return parts
 

@@ -466,7 +466,9 @@ def formula_dashboard(snapshot, legacy, stats, cols):
         old_digital = total('База процента партнёра', filters=(*old, ('Товар', '"Цифровой"')))
         prints = total('Позиций напечатал Даня', filters=old)
         new_net = total('К выплате', filters=new) + '-' + expense('exp', new)
-        expressions += [f'{old_phys}*{pct(config.PARTNER_GOODS_PERCENT)}+{old_digital}*{pct(config.PARTNER_DIGITAL_PERCENT)}+{prints}*{config.PARTNER_PRINT_FEE}+({new_net})*{pct(config.PARTNER_GOODS_PERCENT_NEW)}', f'H{r}-I{r}']
+        # Цифровое и после границы делится по-старому (лут, курс — 80/20)
+        new_digital = total('К выплате', filters=(*new, ('Товар', '"Цифровой"')))
+        expressions += [f'{old_phys}*{pct(config.PARTNER_GOODS_PERCENT)}+{old_digital}*{pct(config.PARTNER_DIGITAL_PERCENT)}+{prints}*{config.PARTNER_PRINT_FEE}+({new_net}-{new_digital})*{pct(config.PARTNER_GOODS_PERCENT_NEW)}+{new_digital}*{pct(config.PARTNER_DIGITAL_PERCENT)}', f'H{r}-I{r}']
         values[r-1][1:] = [Formula(f'=ROUND({e};2)') for e in expressions]
     for col in range(1,10):
         letter = rowcol_to_a1(1, col+1)[:-1]

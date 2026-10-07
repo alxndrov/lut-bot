@@ -95,6 +95,20 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await tax.edit('2026-09', float('nan'), 1)
 
+    async def test_digital_after_new_split_stays_80_20(self):
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("INSERT INTO products(id, name, description, price, category) VALUES (2, 'LUT', '', 1000, 'digital')")
+            await conn.execute("INSERT INTO purchases(user_id, product_id, amount, created_at) VALUES (1, 2, 1000, '2026-09-20 10:00:00')")
+            await conn.commit()
+        await self.purchase(3000, '2026-09-20 11:00:00')
+        await tax.edit('2026-09', 160, 1)
+        split = await payout.split('2026-09-01', '2026-09-30')
+        fee_rate = config.PRODAMUS_FEE_PERCENT / 100
+        digital_net = 1000 * (1 - fee_rate) - 40      # НПД делится по выручке: 40 из 160
+        self.assertAlmostEqual(split['partner_digital'], digital_net * config.PARTNER_DIGITAL_PERCENT / 100)
+        self.assertAlmostEqual(split['partner_new'], (split['net'] - digital_net) * config.PARTNER_GOODS_PERCENT_NEW / 100)
+        self.assertAlmostEqual(split['owner'] + split['partner'], split['net'])
+
     async def test_old_shares_and_payment_summary_use_corrected_tax(self):
         from services.daily_report import fetch_payments_summary
         await self.purchase(1000, '2026-08-05 10:00:00')
