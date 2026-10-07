@@ -46,11 +46,20 @@ def option_sections(option: dict) -> list[str]:
     return [s for s in (option.get("sections") or "").split(",") if s]
 
 
-def open_date_text() -> str:
-    d = _msk_date_start(config.COURSE_OPEN_AT)
+def _date_text(date_str: str) -> str:
+    d = _msk_date_start(date_str)
     months = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля",
               "августа", "сентября", "октября", "ноября", "декабря"]
     return f"{d.day} {months[d.month - 1]}"
+
+
+def open_date_text() -> str:
+    return _date_text(config.COURSE_OPEN_AT)
+
+
+def presale_end_text() -> str:
+    """До какого числа действуют цены предпродажи (день смены цен не включается)."""
+    return _date_text(config.COURSE_FULL_PRICE_FROM)
 
 
 def rub(amount: int | float) -> str:

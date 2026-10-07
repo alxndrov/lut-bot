@@ -213,8 +213,10 @@ def admin_product_keyboard(product: dict, purchase_count: int = 0) -> InlineKeyb
         [InlineKeyboardButton(text="✏️ Контент", callback_data=f"admin:psub:content:{pid}")],
         [InlineKeyboardButton(text=f"📎 Медиафайлы  {media_preview}",
                               callback_data=f"admin:psub:media:{pid}")],
+        # У курса свои цены по датам и свои разборы (/course, /courseprice
+        # в malimadmins) — старые настройки инфобиза к нему не применяются
         *([[InlineKeyboardButton(text="🎓 Курс", callback_data=f"admin:psub:infobiz:{pid}")]]
-          if category == "infobiz" else []),
+          if category == "infobiz" and not product.get("is_course") else []),
         *([[InlineKeyboardButton(text="📦 Наличие и количество", callback_data=f"admin:stock:{pid}")]]
           if in_stock else []),
         *([[InlineKeyboardButton(text="📋 Опрос", callback_data=f"admin:psub:survey:{pid}")]]

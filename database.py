@@ -813,7 +813,12 @@ async def get_catalog_products(include_hidden: bool = False) -> list[dict]:
 async def get_product(product_id: int) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM products WHERE id = ?", (product_id,)) as cursor:
+        # is_course — у товара есть опции курса: цены, разборы и описание
+        # курса живут в course_options, а не в полях инфобиза
+        async with db.execute(
+            """SELECT p.*, EXISTS(SELECT 1 FROM course_options o WHERE o.product_id = p.id)
+                      AS is_course
+               FROM products p WHERE p.id = ?""", (product_id,)) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
 

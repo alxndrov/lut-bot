@@ -811,9 +811,17 @@ async def _product_card_text(product: dict, purchase_count: int = 0) -> str:
     else:
         cat_label = "📦 Цифровой"
 
+    course_options = await db.get_course_options(product["id"]) if product.get("is_course") else []
+    if course_options:
+        from services import course as course_svc
+        price_line = "Цены: " + " / ".join(
+            course_svc.rub(course_svc.price_for(o)) for o in course_options)
+    else:
+        price_line = f"Цена: {product['price']} ₽"
+
     text = (
         f"<b>{product['name']}</b>\n"
-        f"Цена: {product['price']} ₽\n"
+        f"{price_line}\n"
         f"Статус: {status}\n"
         f"Категория: {cat_label}\n"
         f"{file_info}\n"
@@ -822,7 +830,18 @@ async def _product_card_text(product: dict, purchase_count: int = 0) -> str:
     if db.is_stock_product(product):
         text += "\n" + await _stock_summary(product["id"]) + "\n"
 
-    if cat == "infobiz":
+    if course_options:
+        from services import course as course_svc
+        taken = await db.count_bundle_reviews()
+        text += "\n🎓 <b>Опции</b> (предпродажа → полная):\n" + "".join(
+            f"• {o['title']}: {course_svc.rub(o['price'])} → {course_svc.rub(o['price_full'])}\n"
+            for o in course_options)
+        text += (f"🎁 Разборы: занято {taken} из {config.BUNDLE_REVIEW_LIMIT}\n"
+                 f"📅 Предпродажа до {course_svc.presale_end_text()}, старт {course_svc.open_date_text()}; цены и покупатели — "
+                 f"/courseprice и /course в malimadmins\n"
+                 f"<i>Под описанием бот сам выводит цены, места на разбор и оферту — "
+                 f"в описании их писать не нужно.</i>\n")
+    elif cat == "infobiz":
         trigger = product.get("price_trigger")
         after = product.get("price_after_trigger")
         effective = after if (trigger and after and purchase_count >= trigger) else product["price"]
@@ -978,8 +997,12 @@ async def cb_edit_desc(callback: CallbackQuery, state: FSMContext):
     product_id = int(callback.data.split(":")[2])
     await state.set_state(EditProduct.description)
     await state.update_data(product_id=product_id)
+    product = await db.get_product(product_id)
+    course_hint = ("Пиши только текст о курсе: цены опций, места на разбор и ссылку "
+                   "на оферту бот добавит под описанием сам.\n\n"
+                   if product and product.get("is_course") else "")
     await callback.message.edit_text(
-        "Введи новое <b>описание</b> товара.\n\n"
+        "Введи новое <b>описание</b> товара.\n\n" + course_hint +
         "Отправь <code>-</code> — чтобы <b>убрать описание</b> "
         "(в карточке останется только название и цена).",
         parse_mode="HTML",

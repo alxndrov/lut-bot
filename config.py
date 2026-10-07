@@ -123,6 +123,8 @@ COURSE_FULL_PRICE_FROM: str = os.getenv("COURSE_FULL_PRICE_FROM", "2026-11-01")
 BUNDLE_REVIEW_LIMIT: int = int(os.getenv("BUNDLE_REVIEW_LIMIT", "15"))
 # Адрес мини-приложения курса (только https). Пока не задан — кнопки
 # приложения не показываются.
+# Кто делает личный разбор для первых покупателей пакета — так в текстах бота
+COURSE_REVIEWER: str = os.getenv("COURSE_REVIEWER", "baryshovv")
 MINIAPP_URL: str = os.getenv("MINIAPP_URL", "")
 COURSE_OFFER_URL: str = os.getenv("COURSE_OFFER_URL", "") or OFFER_URL
 # Сколько живёт подпись initData мини-приложения
