@@ -57,6 +57,8 @@ class PricingTest(unittest.TestCase):
 class OpenDateTest(unittest.TestCase):
     def test_days_to_open(self):
         utc = timezone.utc
+        old, config.COURSE_OPEN_AT = config.COURSE_OPEN_AT, "2026-11-01"
+        self.addCleanup(setattr, config, "COURSE_OPEN_AT", old)
         # Старт 1 ноября 00:00 МСК = 31 октября 21:00 UTC
         self.assertEqual(svc.days_to_open(datetime(2026, 10, 7, 7, 0, tzinfo=utc)), 25)
         self.assertEqual(svc.days_to_open(datetime(2026, 10, 31, 20, 0, tzinfo=utc)), 1)

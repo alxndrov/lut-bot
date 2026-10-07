@@ -118,7 +118,7 @@ DAILY_REPORT_HOUR_MSK: int = int(os.getenv("DAILY_REPORT_HOUR_MSK", "9"))
 # Курс Shot on iPhone + Cut by MALIMABI. Даты — по Москве: с COURSE_OPEN_AT
 # в приложении открываются уроки, с COURSE_FULL_PRICE_FROM действуют полные
 # цены (course_options.price_full).
-COURSE_OPEN_AT: str = os.getenv("COURSE_OPEN_AT", "2026-11-01")
+COURSE_OPEN_AT: str = os.getenv("COURSE_OPEN_AT", "2026-11-08")
 COURSE_FULL_PRICE_FROM: str = os.getenv("COURSE_FULL_PRICE_FROM", "2026-11-01")
 BUNDLE_REVIEW_LIMIT: int = int(os.getenv("BUNDLE_REVIEW_LIMIT", "15"))
 # Адрес мини-приложения курса (только https). Пока не задан — кнопки
