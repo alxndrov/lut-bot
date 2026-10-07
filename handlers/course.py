@@ -97,6 +97,8 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
     button = app_button()
     if button:
         rows.append([button])
+    if admin:
+        rows.append([InlineKeyboardButton(text="🧪 Тестовая оплата", callback_data="course:test")])
     rows.append([InlineKeyboardButton(text="◀️ Каталог", callback_data="catalog")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -163,37 +165,49 @@ async def cb_check(callback: CallbackQuery):
 # ── Выдача после оплаты ────────────────────────────────────────────────────────
 
 async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amount: int,
-                    notify) -> bool | None:
-    """Проводит оплату курса. None — платёж уже проведён, False — нет опции."""
+                    notify, test: bool = False) -> bool | None:
+    """Проводит оплату курса. None — платёж уже проведён, False — нет опции.
+
+    test=True — «как будто оплатил» из админки: тот же доступ и те же
+    сообщения покупателю, но без записи покупки, денег в финансах,
+    места в очереди на разбор и уведомления партнёрам."""
     option = await db.get_course_option(option_id)
     if not option:
         logger.error(f"course: опция {option_id} не найдена (платёж {payment_id})")
         return False
     user = await db.get_user(user_id) or {}
     username = user.get("username")
-    purchase_id = await db.add_course_purchase(user_id, username, option["product_id"],
-                                               option_id, payment_id, amount)
-    if purchase_id is None:
-        logger.info(f"course: платёж {payment_id} уже проведён — пропускаю")
-        return None
     sections = svc.option_sections(option)
     owned_before = await db.get_user_course_sections(user_id)
-    await db.grant_course_access(user_id, sections, purchase_id)
     position = None
-    if option.get("review_bonus"):
-        position = await db.reserve_bundle_review(user_id, purchase_id, config.BUNDLE_REVIEW_LIMIT)
+    if test:
+        await db.grant_course_access(user_id, sections, None, test=True)
+        if option.get("review_bonus"):
+            taken = await db.count_bundle_reviews()
+            position = taken + 1 if taken < config.BUNDLE_REVIEW_LIMIT else None
+    else:
+        purchase_id = await db.add_course_purchase(user_id, username, option["product_id"],
+                                                   option_id, payment_id, amount)
+        if purchase_id is None:
+            logger.info(f"course: платёж {payment_id} уже проведён — пропускаю")
+            return None
+        await db.grant_course_access(user_id, sections, purchase_id)
+        if option.get("review_bonus"):
+            position = await db.reserve_bundle_review(user_id, purchase_id,
+                                                      config.BUNDLE_REVIEW_LIMIT)
 
-    from services.gsheets import request_finance_append
-    paid_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
-    request_finance_append(payment_id, paid_msk, amount, 0.0,
-                           comment=f"Курс: {option['title']}", goods_type="Цифровой")
+        from services.gsheets import request_finance_append
+        paid_msk = (datetime.now(timezone.utc) + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+        request_finance_append(payment_id, paid_msk, amount, 0.0,
+                               comment=f"Курс: {option['title']}", goods_type="Цифровой")
 
-    who = f"@{username}" if username else f"id:{user_id}"
-    extra = f"\n🎁 Разбор: место {position} из {config.BUNDLE_REVIEW_LIMIT}" if position else ""
-    again = "\n♻️ Докупка второго раздела" if owned_before else ""
-    await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {user.get('first_name') or '—'} {who}\n"
-                      f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}")
+        who = f"@{username}" if username else f"id:{user_id}"
+        extra = f"\n🎁 Разбор: место {position} из {config.BUNDLE_REVIEW_LIMIT}" if position else ""
+        again = "\n♻️ Докупка второго раздела" if owned_before else ""
+        await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {user.get('first_name') or '—'} {who}\n"
+                          f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}")
 
+    mark = "🧪 <b>Тестовая оплата</b> — денег не было, в финансы не попадёт.\n\n" if test else ""
     if svc.is_open():
         text = "Оплата прошла 🤍 Уроки уже в приложении — открывай по кнопке ниже."
     else:
@@ -201,49 +215,202 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
                 f"Приложение курса уже можно открыть по кнопке ниже.")
     button = app_button()
     kb = InlineKeyboardMarkup(inline_keyboard=[[button]]) if button else None
-    await bot.send_message(user_id, text, reply_markup=kb)
+    await bot.send_message(user_id, mark + text, reply_markup=kb, parse_mode="HTML")
     if position:
         await bot.send_message(
             user_id,
             f"Ты среди первых {config.BUNDLE_REVIEW_LIMIT}, кто взял пакет, — значит, "
-            f"{config.COURSE_REVIEWER} лично разберёт твоё видео. Подробности пришлём после старта курса.")
-    logger.info(f"course: user {user_id} оплатил {option['slug']} ({amount} ₽, {payment_id}), "
-                f"разделы {sections}, разбор {position}")
+            f"{config.COURSE_REVIEWER} лично разберёт твоё видео. Подробности пришлём после старта курса."
+            + ("\n\n🧪 В тесте место в очереди не занимается." if test else ""))
+    logger.info(f"course: user {user_id} {'ТЕСТ ' if test else ''}оплатил {option['slug']} "
+                f"({amount} ₽, {payment_id}), разделы {sections}, разбор {position}")
     return True
+
+
+# ── Тестовая оплата (только админы) ────────────────────────────────────────────
+
+def _test_keyboard(options: list[dict]) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=f"🧪 Как будто оплатил: {o['title']}",
+                                  callback_data=f"course:testpay:{o['id']}")] for o in options]
+    rows.append([InlineKeyboardButton(text="♻️ Сбросить тестовый доступ",
+                                      callback_data="course:testreset")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="course:show")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "course:test")
+async def cb_test_menu(callback: CallbackQuery):
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer()
+        return
+    product = await db.get_course_product()
+    options = await db.get_course_options(product["id"]) if product else []
+    await callback.answer()
+    await callback.message.answer(
+        "🧪 <b>Тестовая оплата курса</b>\n\n"
+        "Выдаёт доступ к разделам и присылает те же сообщения, что и после настоящей "
+        "оплаты. Денег, записи о покупке, строки в финансах и места на разбор нет; "
+        "партнёрам уведомление не уходит.\n\n"
+        "«Сбросить» убирает только тестовый доступ — настоящие покупки остаются.",
+        reply_markup=_test_keyboard(options), parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("course:testpay:"))
+async def cb_test_pay(callback: CallbackQuery):
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer()
+        return
+    option_id = int(callback.data.rsplit(":", 1)[1])
+    await callback.answer("🧪 Провожу тестовую оплату…")
+    await provision(callback.bot, callback.from_user.id, option_id, "", 0, None, test=True)
+
+
+@router.callback_query(F.data == "course:testreset")
+async def cb_test_reset(callback: CallbackQuery):
+    if callback.from_user.id not in config.ADMIN_IDS:
+        await callback.answer()
+        return
+    removed = await db.clear_test_course_access(callback.from_user.id)
+    await callback.answer(f"Тестовый доступ снят ({removed})." if removed
+                          else "Тестового доступа не было.", show_alert=True)
 
 
 # ── Мини-приложение ────────────────────────────────────────────────────────────
 
-async def api_me(request: web.Request) -> web.Response:
+async def _app_user(request: web.Request) -> tuple[dict | None, dict]:
     try:
         body = await request.json()
     except Exception:
-        return web.json_response({"error": "bad request"}, status=400)
-    user = svc.verify_init_data(str(body.get("initData") or ""))
-    if not user:
-        return web.json_response({"error": "unauthorized"}, status=401)
-    owned = await db.get_user_course_sections(user["id"])
+        return None, {}
+    if not isinstance(body, dict):
+        return None, {}
+    return svc.verify_init_data(str(body.get("initData") or "")), body
+
+
+async def _app_state(user: dict, bot_username: str, preview_open: bool = False) -> dict:
+    user_id = user["id"]
+    admin = user_id in config.ADMIN_IDS
+    owned = await db.get_user_course_sections(user_id)
+    test_owned = await db.get_user_test_course_sections(user_id)
     product = await db.get_course_product()
     options = await db.get_course_options(product["id"]) if product else []
-    bot_username = request.app.get("bot_username") or ""
-    is_open = svc.is_open()
+    # Админ может посмотреть приложение «как после старта» до открытия
+    is_open = svc.is_open() or (admin and preview_open)
     sections = []
     for slug, title in svc.SECTIONS.items():
-        cheapest = min((svc.price_for(o) for o in options
-                        if svc.option_sections(o) == [slug]), default=None)
+        program = svc.PROGRAM[slug]
+        option = next((o for o in options if svc.option_sections(o) == [slug]), None)
+        has = slug in owned
         sections.append({
-            "slug": slug, "title": title, "owned": slug in owned,
-            "price": cheapest,
-            # Уроки появятся на этапе 2 — и только купившим после открытия
-            "lessons": [],
+            "slug": slug, "title": title, "name": program["name"], "lead": program["lead"],
+            "owned": has, "test": slug in test_owned,
+            "price": svc.price_for(option) if option else None,
+            "price_full": option["price_full"] if option else None,
+            "lessons": [{"n": i + 1, "title": t, "open": has and is_open}
+                        for i, t in enumerate(program["lessons"])],
         })
-    return web.json_response({
+    bundle = next((o for o in options if len(svc.option_sections(o)) > 1), None)
+    materials = []
+    for m in svc.MATERIALS:
+        has = bool(set(m["sections"]) & owned)
+        if not has:
+            continue
+        materials.append({k: m.get(k) for k in ("kind", "badge", "title", "note")}
+                         | {"url": m["url"] if is_open else ""})
+
+    position = await db.get_bundle_review_position(user_id)
+    taken = await db.count_bundle_reviews()
+    review_test = admin and {"shooting", "editing"} <= test_owned
+    last = await db.get_last_course_review_request(user_id)
+    return {
         "first_name": user.get("first_name") or "",
+        "admin": admin,
         "open": is_open,
+        "preview": is_open and not svc.is_open(),
         "open_date": svc.open_date_text(),
+        "days_left": svc.days_to_open(),
+        "full_price": svc.is_full_price(),
+        "presale_end": svc.presale_end_text(),
         "sections": sections,
+        "bundle": {"title": bundle["title"], "price": svc.price_for(bundle),
+                   "price_full": bundle["price_full"]} if bundle else None,
+        "materials": materials,
+        "review": {
+            "eligible": bool(position) or review_test,
+            "test": review_test and not position,
+            "position": position,
+            "limit": config.BUNDLE_REVIEW_LIMIT,
+            "left": max(0, config.BUNDLE_REVIEW_LIMIT - taken),
+            "reviewer": config.COURSE_REVIEWER,
+            "sent": bool(last),
+        },
+        "options": [{"id": o["id"], "slug": o["slug"], "title": o["title"]} for o in options]
+                   if admin else [],
         "buy_url": f"https://t.me/{bot_username}?start=course" if bot_username else "",
-    })
+    }
+
+
+async def api_me(request: web.Request) -> web.Response:
+    user, body = await _app_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    return web.json_response(await _app_state(user, request.app.get("bot_username") or "",
+                                              bool(body.get("preview_open"))))
+
+
+async def api_test(request: web.Request) -> web.Response:
+    """Тестовая оплата из мини-приложения — только админам."""
+    user, body = await _app_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    if user["id"] not in config.ADMIN_IDS:
+        return web.json_response({"error": "forbidden"}, status=403)
+    action = body.get("action")
+    if action == "pay":
+        try:
+            option_id = int(body.get("option_id"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "bad option"}, status=400)
+        ok = await provision(request.app["bot"], user["id"], option_id, "", 0, None, test=True)
+        if ok is False:
+            return web.json_response({"error": "bad option"}, status=400)
+    elif action == "reset":
+        await db.clear_test_course_access(user["id"])
+    else:
+        return web.json_response({"error": "bad action"}, status=400)
+    return web.json_response(await _app_state(user, request.app.get("bot_username") or "",
+                                              bool(body.get("preview_open"))))
+
+
+async def api_review(request: web.Request) -> web.Response:
+    """Заявка на личный разбор: ссылка на видео и вопрос — партнёрам в админ-бот."""
+    user, body = await _app_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    state = await _app_state(user, "", bool(body.get("preview_open")))
+    review = state["review"]
+    if not review["eligible"]:
+        return web.json_response({"error": "Разбор — для первых покупателей пакета."}, status=403)
+    if not state["open"]:
+        return web.json_response({"error": f"Заявки откроются {state['open_date']}."}, status=403)
+    link = str(body.get("link") or "").strip()[:500]
+    question = str(body.get("question") or "").strip()[:2000]
+    if not link.lower().startswith(("http://", "https://")):
+        return web.json_response({"error": "Нужна ссылка на видео — начинается с https://"},
+                                 status=400)
+    test = review["test"]
+    await db.add_course_review_request(user["id"], link, question, test)
+    from handlers.prodamus_webhook import _send_notify
+    from html import escape
+    who = f"@{user['username']}" if user.get("username") else f"id:{user['id']}"
+    place = f"место {review['position']} из {review['limit']}" if review["position"] else "тест"
+    await _send_notify(None, (
+        f"{'🧪 ТЕСТ · ' if test else ''}🎬 <b>Заявка на разбор</b> ({place})\n\n"
+        f"👤 {escape(user.get('first_name') or '—')} {escape(who)}\n"
+        f"🔗 {escape(link)}\n"
+        + (f"❓ {escape(question)}" if question else "")))
+    state["review"]["sent"] = True
+    return web.json_response(state)
 
 
 async def app_index(request: web.Request) -> web.Response:
@@ -257,3 +424,5 @@ def setup_web(app: web.Application, bot_username: str = ""):
     if (WEBAPP_DIR / "static").is_dir():
         app.router.add_static("/app/static/", WEBAPP_DIR / "static", show_index=False)
     app.router.add_post("/api/course/me", api_me)
+    app.router.add_post("/api/course/test", api_test)
+    app.router.add_post("/api/course/review", api_review)

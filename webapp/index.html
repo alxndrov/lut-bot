@@ -5,95 +5,555 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Курс MALIMABI</title>
 <script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/app/static/fonts/fonts.css">
 <style>
   :root {
-    --bg: var(--tg-theme-bg-color, #ffffff);
-    --text: var(--tg-theme-text-color, #111111);
-    --hint: var(--tg-theme-hint-color, #8a8a8e);
-    --card: var(--tg-theme-secondary-bg-color, #f2f2f5);
-    --accent: var(--tg-theme-button-color, #111111);
-    --accent-text: var(--tg-theme-button-text-color, #ffffff);
+    --bg: #0a0a0a;
+    --card: #141414;
+    --card-2: #1a1a1a;
+    --line: #1f1f1f;
+    --border: #262626;
+    --text: #f2f2f2;
+    --dim: #a3a3a3;
+    --hint: #7a7a7a;
+    --mute: #3a3a3a;
+    --red: #e10600;
+    --display: 'Anybody', 'Unbounded', 'Arial Black', sans-serif;
+    --sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Arial, sans-serif;
+    --safe-b: env(safe-area-inset-bottom, 0px);
   }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text);
-         font: 16px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Arial, sans-serif; }
-  main { max-width: 560px; margin: 0 auto; padding: 16px 16px 32px; }
-  .cover { border-radius: 20px; padding: 28px 22px; min-height: 190px; color: #fff;
-           display: flex; flex-direction: column; justify-content: flex-end;
-           background: radial-gradient(120% 90% at 85% 10%, #3a3a3a 0%, #0d0d0d 60%), #000;
-           background-size: cover; background-position: center; }
-  .cover small { opacity: .7; letter-spacing: .08em; text-transform: uppercase; font-size: 12px; }
-  .cover h1 { margin: 6px 0 8px; font-size: 26px; line-height: 1.15; }
-  .cover p { margin: 0; opacity: .85; }
-  h2 { font-size: 13px; color: var(--hint); text-transform: uppercase; letter-spacing: .06em;
-       margin: 26px 4px 10px; font-weight: 600; }
-  .card { background: var(--card); border-radius: 16px; padding: 18px; margin-bottom: 12px; }
-  .card h3 { margin: 0 0 4px; font-size: 18px; }
-  .status { color: var(--hint); margin: 0 0 14px; }
-  .status.ok { color: #2e9e5b; font-weight: 600; }
-  button { width: 100%; border: 0; border-radius: 12px; padding: 13px 16px; font: inherit;
-           font-weight: 600; background: var(--accent); color: var(--accent-text); cursor: pointer; }
-  .muted { text-align: center; color: var(--hint); padding: 40px 12px; }
-  ul.lessons { list-style: none; margin: 0; padding: 0; }
-  ul.lessons li { padding: 10px 0; border-top: 1px solid rgba(127,127,127,.2); }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { background: var(--bg); }
+  body { margin: 0; color: var(--text); font: 15px/1.45 var(--sans);
+         -webkit-font-smoothing: antialiased; overflow-x: hidden; }
+  button, input, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  main { max-width: 480px; margin: 0 auto; padding: 18px 20px calc(96px + var(--safe-b)); }
+
+  /* ── типографика ── */
+  .eyebrow { font-size: 12px; letter-spacing: .16em; text-transform: uppercase; color: var(--hint);
+             margin: 0 0 8px; }
+  .eyebrow.red { color: var(--red); }
+  .display { font-family: var(--display); font-weight: 900; font-stretch: 150%;
+             text-transform: uppercase; line-height: .94; letter-spacing: -.01em; margin: 0; }
+  h1.display { font-size: 34px; }
+  h1.display span { display: block; }
+  h1.display .dim { color: #7a7a7a; }
+  .lead { color: var(--dim); margin: 14px 0 0; font-size: 15px; }
+  .section-title { margin: 30px 0 0; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+
+  /* ── шапка главной ── */
+  .top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 26px; }
+  .who { display: inline-flex; align-items: center; gap: 9px; padding: 5px 14px 5px 5px;
+         border: 1px solid var(--border); border-radius: 999px; font-weight: 600; font-size: 14px; }
+  .who i { width: 26px; height: 26px; border-radius: 50%; background: var(--red); color: #fff;
+           display: grid; place-items: center; font-style: normal; font-size: 12px; font-weight: 700; }
+  .top .eyebrow { margin: 0; }
+
+  /* ── карточки и кнопки ── */
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 20px;
+          padding: 18px; margin-top: 22px; }
+  .hero-row { display: flex; align-items: center; gap: 14px; margin-top: 4px; }
+  .big-num { font-family: var(--display); font-weight: 900; font-stretch: 150%; color: var(--red);
+             font-size: 44px; line-height: .9; letter-spacing: -.02em; flex: none; }
+  .hero-row b { display: block; font-family: var(--display); font-weight: 900; font-stretch: 150%;
+                text-transform: uppercase; font-size: 15px; line-height: 1.05; }
+  .hero-row small { display: block; color: var(--dim); font-size: 13px; margin-top: 4px; }
+  .bar { height: 3px; background: #262626; border-radius: 2px; margin: 16px 0 0; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--red); }
+  .btn { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%;
+         border: 0; border-radius: 999px; min-height: 48px; padding: 12px 18px; margin-top: 16px;
+         font-weight: 600; font-size: 16px; background: #f2f2f2; color: #0a0a0a; text-decoration: none; }
+  .btn.red { background: var(--red); color: #fff; }
+  .btn.ghost { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  .btn:active { transform: scale(.985); }
+  .btn[disabled] { opacity: .45; pointer-events: none; }
+  .btn svg { width: 16px; height: 16px; }
+  .price-old { color: var(--hint); text-decoration: line-through; font-size: 14px; margin-left: 8px; }
+  .note { color: var(--dim); font-size: 13px; margin: 12px 0 0; }
+  .note.ok { color: #8ad3a0; }
+
+  /* ── списки ── */
+  .rows { list-style: none; margin: 0; padding: 0; }
+  .row { display: flex; align-items: center; gap: 16px; padding: 18px 0; border-bottom: 1px solid var(--line);
+         background: none; border-left: 0; border-right: 0; border-top: 0; width: 100%; text-align: left; }
+  .row .n { color: var(--hint); font-size: 13px; width: 20px; flex: none; }
+  .row .main { flex: 1; min-width: 0; }
+  .row .main b { display: block; font-family: var(--display); font-weight: 900; font-stretch: 150%;
+                 text-transform: uppercase; font-size: 15px; line-height: 1.1; }
+  .row .main small { display: block; color: var(--dim); font-size: 13px; margin-top: 4px; }
+  .row .arrow { color: var(--dim); flex: none; width: 18px; height: 18px; }
+
+  .lessons .row { padding: 16px 0; gap: 14px; }
+  .lessons .num { font-family: var(--display); font-weight: 900; font-stretch: 150%; font-size: 20px;
+                  color: var(--mute); width: 46px; flex: none; letter-spacing: -.02em; }
+  .lessons .row.next .num { color: var(--red); }
+  .lessons .t { flex: 1; font-weight: 600; font-size: 15px; line-height: 1.3; }
+  .lessons .meta { color: var(--hint); font-size: 13px; flex: none; display: flex; align-items: center; }
+  .lessons .meta svg { width: 15px; height: 15px; }
+
+  .hint-card { display: flex; gap: 14px; align-items: center; background: var(--card);
+               border: 1px solid var(--line); border-radius: 16px; padding: 14px 16px; margin-top: 22px;
+               color: var(--dim); font-size: 13px; width: 100%; text-align: left; }
+  .hint-card svg { width: 18px; height: 18px; flex: none; color: var(--text); }
+
+  /* ── экран урока ── */
+  .back { display: inline-flex; align-items: center; gap: 10px; color: var(--dim); background: none;
+          border: 0; padding: 4px 0; margin-bottom: 22px; font-size: 15px; }
+  .back svg { width: 18px; height: 18px; }
+  .video { position: relative; aspect-ratio: 16 / 10; background: var(--card); border: 1px solid var(--border);
+           border-radius: 18px; overflow: hidden; display: grid; place-items: center; margin-bottom: 22px; }
+  .video .label { position: absolute; left: 16px; top: 14px; font-size: 11px; letter-spacing: .16em;
+                  color: var(--hint); text-transform: uppercase; }
+  .video .play { width: 64px; height: 64px; border-radius: 50%; background: var(--red);
+                 display: grid; place-items: center; }
+  .video .play svg { width: 22px; height: 22px; color: #fff; margin-left: 3px; }
+  .video .soon { position: absolute; bottom: 14px; left: 0; right: 0; text-align: center; color: var(--hint);
+                 font-size: 12px; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
+  .pair button { display: flex; align-items: center; gap: 10px; background: none; border: 1px solid var(--border);
+                 border-radius: 16px; padding: 15px 16px; font-weight: 600; }
+  .pair svg { width: 18px; height: 18px; }
+  .next-card { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(80px + var(--safe-b));
+               width: calc(100% - 40px); max-width: 440px; background: #f2f2f2; color: #0a0a0a; border: 0;
+               border-radius: 16px; padding: 12px 16px; display: flex; align-items: center; text-align: left;
+               box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .next-card span { flex: 1; font-weight: 600; font-size: 14px; }
+  .next-card small { display: block; font-size: 10px; letter-spacing: .16em; color: #666; font-weight: 500; }
+  .next-card svg { width: 18px; height: 18px; }
+
+  /* ── материалы ── */
+  .file { display: flex; align-items: center; gap: 14px; background: var(--card); border: 1px solid var(--border);
+          border-radius: 18px; padding: 16px; margin-top: 12px; color: inherit; text-decoration: none; }
+  .badge { width: 42px; height: 42px; border-radius: 12px; background: #1d1d1d; display: grid; place-items: center;
+           font-family: var(--display); font-weight: 900; font-stretch: 150%; color: var(--red); font-size: 13px;
+           letter-spacing: -.02em; flex: none; }
+  .file .main { flex: 1; min-width: 0; }
+  .file b { display: block; font-weight: 600; font-size: 16px; }
+  .file small { display: block; color: var(--dim); font-size: 13px; margin-top: 2px; }
+  .file .act, .pdf .act { color: var(--dim); font-size: 12px; flex: none; display: flex; }
+  .file .act svg { width: 20px; height: 20px; }
+  .pdf { display: flex; align-items: center; gap: 18px; padding: 20px 0; border-bottom: 1px solid var(--line);
+         color: inherit; text-decoration: none; }
+  .pdf .n { color: var(--hint); font-size: 13px; width: 20px; }
+  .pdf .t { flex: 1; font-size: 16px; }
+  .pdf .act { letter-spacing: .1em; }
+
+  /* ── разбор ── */
+  label.field { display: block; margin-top: 22px; }
+  label.field .eyebrow { margin-bottom: 10px; }
+  .input { width: 100%; background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+           padding: 15px 16px; font-size: 16px; outline: none; resize: none; }
+  .input::placeholder { color: #5c5c5c; }
+  .input:focus { border-color: #444; }
+  textarea.input { min-height: 96px; }
+  .err { color: #ff6b5e; font-size: 13px; margin: 10px 0 0; min-height: 0; }
+
+  /* ── пустое состояние и логотип ── */
+  .empty { color: var(--dim); margin-top: 22px; }
+  .wordmark { margin: 54px -20px 0; overflow: hidden; height: min(8.5vw, 42px); position: relative; }
+  .wordmark div { font-family: var(--display); font-weight: 900; font-stretch: 150%; color: var(--red);
+                  font-size: min(12vw, 57px); line-height: 1; text-align: center; letter-spacing: -.02em; white-space: nowrap;
+                  -webkit-mask-image: linear-gradient(#000 35%, transparent 100%);
+                  mask-image: linear-gradient(#000 35%, transparent 100%); }
+
+  /* ── тест-режим (только админы) ── */
+  .test { border: 1px dashed #4a3a00; background: #141108; }
+  .test .eyebrow { color: #e0b100; }
+  .test .btn { margin-top: 10px; min-height: 42px; font-size: 14px; }
+  .test .toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+                  margin-top: 14px; font-size: 14px; }
+  .switch { width: 46px; height: 28px; border-radius: 999px; background: #333; border: 0; position: relative; flex: none; }
+  .switch::after { content: ''; position: absolute; top: 3px; left: 3px; width: 22px; height: 22px;
+                   border-radius: 50%; background: #fff; transition: left .15s; }
+  .switch.on { background: var(--red); }
+  .switch.on::after { left: 21px; }
+  .pill { display: inline-block; font-size: 10px; letter-spacing: .12em; padding: 3px 7px; border-radius: 6px;
+          background: #2a2306; color: #e0b100; vertical-align: middle; margin-left: 6px; font-family: var(--sans);
+          font-weight: 600; font-stretch: 100%; }
+
+  /* ── нижние вкладки ── */
+  nav.tabs { position: fixed; left: 0; right: 0; bottom: 0; background: rgba(10,10,10,.96);
+             border-top: 1px solid var(--line); display: flex; justify-content: center;
+             padding: 8px 0 calc(8px + var(--safe-b)); backdrop-filter: blur(10px); z-index: 5; }
+  nav.tabs .in { display: flex; width: 100%; max-width: 480px; }
+  nav.tabs button { flex: 1; background: none; border: 0; color: var(--hint); display: flex; flex-direction: column;
+                    align-items: center; gap: 4px; font-size: 12px; padding: 4px 0; }
+  nav.tabs button svg { width: 22px; height: 22px; }
+  nav.tabs button.on { color: var(--text); font-weight: 600; }
+
+  .muted { text-align: center; color: var(--hint); padding: 80px 12px; }
+  .toast { position: fixed; left: 50%; bottom: calc(90px + var(--safe-b)); transform: translateX(-50%);
+           background: #f2f2f2; color: #0a0a0a; padding: 10px 16px; border-radius: 12px; font-size: 14px;
+           font-weight: 600; z-index: 10; opacity: 0; transition: opacity .2s; pointer-events: none;
+           max-width: calc(100% - 40px); text-align: center; }
+  .toast.on { opacity: 1; }
 </style>
 </head>
 <body>
-<main>
-  <section class="cover">
-    <small>Курс MALIMABI</small>
-    <h1>Shot on iPhone<br>+ Cut by MALIMABI</h1>
-    <p id="start">Старт 1 ноября</p>
-  </section>
-  <h2>Разделы</h2>
-  <div id="sections"><div class="muted">Загружаем…</div></div>
-</main>
+<main id="root"><div class="muted">Загружаем…</div></main>
+<nav class="tabs" id="tabs" hidden><div class="in">
+  <button type="button" data-tab="lessons"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M10 9.2v5.6l4.6-2.8z" fill="currentColor" stroke-linejoin="round"/></svg>Уроки</button>
+  <button type="button" data-tab="materials"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5"/></svg>Материалы</button>
+  <button type="button" data-tab="review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>Разбор</button>
+</div></nav>
+<div class="toast" id="toast"></div>
 <script>
 (function () {
+  'use strict';
   var tg = window.Telegram && window.Telegram.WebApp;
-  var box = document.getElementById('sections');
-  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) {
-    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]; }); }
+  var root = document.getElementById('root');
+  var tabsEl = document.getElementById('tabs');
+  var demo = location.hash === '#demo' && !(tg && tg.initData);
+  var data = null;
+  var view = { tab: 'lessons', screen: null, section: null, lesson: null };
+  var previewOpen = false;
+  try { previewOpen = localStorage.getItem('previewOpen') === '1'; } catch (e) {}
+  var busy = false;
+
+  var ICON = {
+    arrow: '<svg class="arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>',
+    back: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 6l-6 6 6 6"/></svg>',
+    play: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M7 5v14l12-7z"/></svg>',
+    playFill: '<svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 5v14l12-7z"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
+    doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5"/></svg>',
+    lut: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17M3.5 12h17"/></svg>',
+    dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>'
+  };
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]; }); }
   function rub(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' ₽'; }
-  function fail(text) { box.innerHTML = '<div class="muted">' + esc(text) + '</div>'; }
-
-  if (!tg || !tg.initData) { fail('Открой приложение из бота MALIMABI в Telegram.'); return; }
-  tg.ready(); tg.expand();
-
-  fetch('/api/course/me', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ initData: tg.initData }) })
-    .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
-    .then(render)
-    .catch(function () { fail('Не получилось загрузить. Закрой приложение и открой снова.'); });
-
-  function render(d) {
-    document.getElementById('start').textContent =
-      d.open ? 'Курс открыт — уроки ниже' : 'Старт ' + d.open_date;
-    box.innerHTML = '';
-    d.sections.forEach(function (s) {
-      var card = document.createElement('div');
-      card.className = 'card';
-      var html = '<h3>' + esc(s.title) + '</h3>';
-      if (!s.owned) {
-        html += '<p class="status">Нет доступа' + (s.price ? ' · от ' + rub(s.price) : '') + '</p>' +
-                '<button type="button">Купить</button>';
-      } else if (!d.open) {
-        html += '<p class="status ok">Куплено ✓</p><p class="status">Уроки откроются ' +
-                esc(d.open_date) + '. Пришлём сообщение в бот.</p>';
-      } else if (s.lessons.length) {
-        html += '<ul class="lessons">' + s.lessons.map(function (l) {
-          return '<li>' + esc(l.position) + '. ' + esc(l.title) + '</li>'; }).join('') + '</ul>';
-      } else {
-        html += '<p class="status ok">Куплено ✓</p><p class="status">Уроки появятся здесь совсем скоро.</p>';
-      }
-      card.innerHTML = html;
-      var btn = card.querySelector('button');
-      if (btn) btn.addEventListener('click', function () {
-        if (d.buy_url) { tg.openTelegramLink(d.buy_url); tg.close(); }
-      });
-      box.appendChild(card);
-    });
+  function pad(n) { return (n < 10 ? '0' : '') + n; }
+  function plural(n, one, few, many) {
+    var m10 = n % 10, m100 = n % 100;
+    if (m10 === 1 && m100 !== 11) return one;
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+    return many;
   }
+  function haptic(kind) { try { tg && tg.HapticFeedback && tg.HapticFeedback.impactOccurred(kind || 'light'); } catch (e) {} }
+  var toastTimer;
+  function toast(text) {
+    var t = document.getElementById('toast');
+    t.textContent = text; t.classList.add('on');
+    clearTimeout(toastTimer); toastTimer = setTimeout(function () { t.classList.remove('on'); }, 2600);
+  }
+  // Заголовок в две строки: всё, кроме последнего слова, — белым, последнее — серым
+  function title2(text, split) {
+    var words = String(text).trim().split(/\s+/);
+    var cut = split || Math.max(1, words.length - 1);
+    if (words.length === 1) return '<h1 class="display"><span>' + esc(words[0]) + '</span></h1>';
+    return '<h1 class="display"><span>' + esc(words.slice(0, cut).join(' ')) + '</span>' +
+           '<span class="dim">' + esc(words.slice(cut).join(' ')) + '.</span></h1>';
+  }
+  function section(slug) {
+    for (var i = 0; i < data.sections.length; i++) if (data.sections[i].slug === slug) return data.sections[i];
+    return null;
+  }
+  function ownedSections() { return data.sections.filter(function (s) { return s.owned; }); }
+
+  // ── API ──
+  function api(path, extra) {
+    var body = { initData: tg.initData, preview_open: previewOpen };
+    for (var k in extra || {}) body[k] = extra[k];
+    return fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                         body: JSON.stringify(body) })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (j) {
+          if (!r.ok) { var e = new Error(j.error || ('HTTP ' + r.status)); e.status = r.status; throw e; }
+          return j;
+        });
+      });
+  }
+  function load() {
+    if (demo) { data = demoData(); render(); return Promise.resolve(); }
+    return api('/api/course/me').then(function (d) { data = d; render(); });
+  }
+  function buy() {
+    haptic('medium');
+    if (demo) { toast('Демо: тут откроется покупка в боте'); return; }
+    if (data.buy_url) { tg.openTelegramLink(data.buy_url); tg.close(); }
+  }
+
+  // ── экраны ──
+  function screenHome() {
+    var owned = ownedSections();
+    var total = data.sections.reduce(function (n, s) { return n + s.lessons.length; }, 0);
+    var mine = owned.reduce(function (n, s) { return n + s.lessons.length; }, 0);
+    var name = data.first_name || 'Ты';
+    var right = !data.open ? 'Старт · ' + data.open_date
+              : owned.length ? mine + ' ' + plural(mine, 'урок', 'урока', 'уроков') : total + ' уроков';
+    var h = '<div class="top"><span class="who"><i>' + esc(name.charAt(0).toUpperCase()) + '</i>' +
+            esc(name) + '</span><p class="eyebrow">' + esc(right) + '</p></div>';
+    h += '<p class="eyebrow">' + (owned.length ? 'Обучение' : 'Курс') + '</p>';
+    h += owned.length ? title2('Твои уроки') : title2('Курс MALIMABI');
+    if (data.preview) h += '<p class="note">Режим «как после старта» — уроки видишь только ты.</p>';
+
+    // Главная карточка
+    if (owned.length && !data.open) {
+      h += '<div class="card"><p class="eyebrow">До старта · ' + esc(data.open_date) + '</p>' +
+           '<div class="hero-row"><span class="big-num">' + pad(data.days_left) + '</span><div><b>' +
+           esc(plural(data.days_left, 'день', 'дня', 'дней')) + ' до уроков</b><small>Откроем все уроки сразу и пришлём сообщение в бот.</small></div></div>' +
+           '<div class="bar"><i style="width:' + Math.max(4, Math.min(100, 100 - data.days_left * 3)) + '%"></i></div>' +
+           '<button class="btn" type="button" data-go="section:' + owned[0].slug + '">Смотреть программу</button></div>';
+    } else if (owned.length) {
+      var s = owned[0], l = s.lessons[0];
+      h += '<div class="card"><p class="eyebrow">Начать · ' + esc(s.name) + '</p>' +
+           '<div class="hero-row"><span class="big-num">' + pad(l.n) + '</span><div><b>' + esc(l.title) +
+           '</b><small>Урок ' + l.n + ' из ' + s.lessons.length + '</small></div></div>' +
+           '<div class="bar"><i style="width:0%"></i></div>' +
+           '<button class="btn" type="button" data-go="lesson:' + s.slug + ':' + l.n + '">' + ICON.play + 'Смотреть</button></div>';
+    } else if (data.bundle) {
+      var b = data.bundle;
+      h += '<div class="card"><p class="eyebrow">' + (data.full_price ? 'Пакет · оба раздела' : 'Предпродажа до ' + esc(data.presale_end)) + '</p>' +
+           '<div class="hero-row"><span class="big-num">' + (data.sections.length) + '</span><div><b>' + esc(b.title) + '</b>' +
+           '<small>' + rub(b.price) + (b.price_full > b.price ? '<span class="price-old">' + rub(b.price_full) + '</span>' : '') + '</small></div></div>' +
+           (data.review.left ? '<p class="note">Первым ' + data.review.limit + ' покупателям пакета — личный разбор видео. Осталось мест: ' + data.review.left + '.</p>' : '') +
+           '<button class="btn" type="button" data-buy>Купить в боте</button></div>';
+    }
+
+    h += '<p class="eyebrow section-title">Продукты</p><div class="rows">';
+    data.sections.forEach(function (s, i) {
+      var sub = s.lessons.length + ' ' + plural(s.lessons.length, 'урок', 'урока', 'уроков') + ' · ' +
+                (s.owned ? (data.open ? 'открыт' : 'куплен, старт ' + data.open_date) : (s.price ? rub(s.price) : 'нет доступа'));
+      h += '<button class="row" type="button" data-go="section:' + s.slug + '"><span class="n">' + pad(i + 1) + '</span>' +
+           '<span class="main"><b>' + esc(s.name) + (s.test ? '<span class="pill">ТЕСТ</span>' : '') + '</b><small>' + esc(sub) + '</small></span>' + ICON.arrow + '</button>';
+    });
+    h += '</div>';
+    if (data.admin) h += testPanel();
+    h += '<div class="wordmark"><div>MALIMABI</div></div>';
+    return h;
+  }
+
+  function testPanel() {
+    var h = '<div class="card test"><p class="eyebrow">🧪 Тест-режим · видно только админам</p>' +
+            '<p class="note" style="margin-top:0">Как будто оплатил: доступ и сообщения в боте как у покупателя, без денег, финансов и места на разбор.</p>';
+    data.options.forEach(function (o) {
+      h += '<button class="btn ghost" type="button" data-test-pay="' + o.id + '">Оплатить: ' + esc(o.title) + '</button>';
+    });
+    h += '<div class="toggle"><span>Показать как после старта</span><button type="button" class="switch' + (previewOpen ? ' on' : '') + '" data-preview aria-label="Как после старта"></button></div>';
+    h += '<button class="btn ghost" type="button" data-test-reset>Сбросить тестовый доступ</button></div>';
+    return h;
+  }
+
+  function screenSection(slug) {
+    var s = section(slug);
+    var idx = data.sections.indexOf(s) + 1;
+    var h = '<button class="back" type="button" data-back>' + ICON.back + 'Все уроки</button>';
+    h += '<p class="eyebrow">Продукт ' + pad(idx) + ' · ' + s.lessons.length + ' ' + plural(s.lessons.length, 'урок', 'урока', 'уроков') + '</p>';
+    h += title2(s.name) + '<p class="lead">' + esc(s.lead) + '</p>';
+    h += '<div class="rows lessons" style="margin-top:22px;border-top:1px solid var(--line)">';
+    s.lessons.forEach(function (l, i) {
+      var meta = l.open ? '' : (s.owned ? esc(data.open_date) : ICON.lock);
+      h += '<button class="row' + (l.open && i === 0 ? ' next' : '') + '" type="button"' + (l.open ? ' data-go="lesson:' + s.slug + ':' + l.n + '"' : ' data-locked') + '>' +
+           '<span class="num">' + pad(l.n) + '</span><span class="t">' + esc(l.title) + '</span><span class="meta">' + meta + '</span></button>';
+    });
+    h += '</div>';
+    var mats = s.slug === 'shooting' ? '4 шпаргалки PDF и авторский лут' : 'Авторский лут, Playhead и Bin';
+    h += '<button class="hint-card" type="button" data-tab-go="materials">' + ICON.doc + '<span>' + mats + ' — в «Материалах»</span></button>';
+    if (!s.owned) {
+      h += '<button class="btn red" type="button" data-buy>Купить' + (s.price ? ' · ' + rub(s.price) : '') + '</button>';
+      if (!data.full_price) h += '<p class="note" style="text-align:center">Цена предпродажи — до ' + esc(data.presale_end) + '</p>';
+    } else if (!data.open) {
+      h += '<p class="note" style="text-align:center">Уроки откроются ' + esc(data.open_date) + ' — пришлём сообщение в бот.</p>';
+    }
+    return h;
+  }
+
+  function screenLesson(slug, n) {
+    var s = section(slug), l = s.lessons[n - 1], next = s.lessons[n];
+    var h = '<button class="back" type="button" data-back>' + ICON.back + esc(s.name) + '</button>';
+    h += '<div class="video"><span class="label">[Видео урока]</span><span class="play">' + ICON.playFill + '</span>' +
+         '<span class="soon">Видео появится здесь в день старта</span></div>';
+    h += '<p class="eyebrow">Урок ' + pad(l.n) + ' · ' + esc(s.name) + '</p>' + title2(l.title);
+    h += '<div class="pair"><button type="button" data-tab-go="materials">' + ICON.doc + 'Шпаргалки</button>' +
+         '<button type="button" data-tab-go="materials">' + ICON.lut + 'Лут</button></div>';
+    if (next) {
+      h += '<div style="height:70px"></div><button class="next-card" type="button" data-go="lesson:' + s.slug + ':' + next.n + '">' +
+           '<span><small>СЛЕДУЮЩИЙ</small>' + pad(next.n) + ' · ' + esc(next.title) + '</span>' + ICON.arrow + '</button>';
+    }
+    return h;
+  }
+
+  function screenMaterials() {
+    var h = '<p class="eyebrow">В комплекте</p><h1 class="display"><span>Мате-</span><span class="dim">риалы.</span></h1><div style="height:10px"></div>';
+    if (!data.materials.length) {
+      h += '<p class="empty">Лут, Playhead и шпаргалки приходят вместе с курсом — появятся здесь после покупки.</p>' +
+           '<button class="btn red" type="button" data-buy>Выбрать раздел</button>';
+      return h;
+    }
+    var act = function (m) {
+      if (m.url) return m.kind === 'pdf' ? 'PDF' : ICON.dl;
+      return data.open ? 'скоро' : esc(data.open_date);
+    };
+    data.materials.filter(function (m) { return m.kind !== 'pdf'; }).forEach(function (m) {
+      var tag = m.url ? 'a href="' + esc(m.url) + '" target="_blank" rel="noopener"' : 'div';
+      h += '<' + tag + ' class="file"><span class="badge">' + esc(m.badge) + '</span><span class="main"><b>' + esc(m.title) +
+           '</b><small>' + esc(m.note) + '</small></span><span class="act">' + act(m) + '</span></' + tag.split(' ')[0] + '>';
+    });
+    var pdfs = data.materials.filter(function (m) { return m.kind === 'pdf'; });
+    if (pdfs.length) {
+      h += '<p class="eyebrow section-title">Шпаргалки PDF</p>';
+      pdfs.forEach(function (m, i) {
+        var tag = m.url ? 'a href="' + esc(m.url) + '" target="_blank" rel="noopener"' : 'div';
+        h += '<' + tag + ' class="pdf"><span class="n">' + pad(i + 1) + '</span><span class="t">' + esc(m.title) +
+             '</span><span class="act">' + act(m) + '</span></' + tag.split(' ')[0] + '>';
+      });
+    }
+    if (!data.open) h += '<p class="note">Файлы откроются ' + esc(data.open_date) + ' вместе с уроками.</p>';
+    return h;
+  }
+
+  function screenReview() {
+    var r = data.review;
+    var h = '<p class="eyebrow red">Первые ' + r.limit + ' · пакет</p>' +
+            '<h1 class="display"><span>Разбор</span><span class="dim">твоего видео.</span></h1>';
+    if (!r.eligible) {
+      h += '<p class="lead">Первым ' + r.limit + ' покупателям пакета ' + esc(r.reviewer) + ' лично разберёт ролик: съёмку, цвет, монтаж.</p>';
+      if (r.left && data.bundle) {
+        h += '<div class="card"><p class="eyebrow">Осталось мест</p><div class="hero-row"><span class="big-num">' + pad(r.left) +
+             '</span><div><b>из ' + r.limit + '</b><small>' + esc(data.bundle.title) + ' · ' + rub(data.bundle.price) + '</small></div></div>' +
+             '<button class="btn red" type="button" data-buy>Взять пакет</button></div>';
+      } else {
+        h += '<p class="empty">Места на разбор закончились.</p>';
+      }
+      return h;
+    }
+    h += '<p class="lead">Скинь ссылку на ролик — посмотрю и разберу лично: съёмку, цвет, монтаж.</p>';
+    if (r.test) h += '<p class="note">🧪 Тестовый доступ — заявка уйдёт админам с пометкой «ТЕСТ».</p>';
+    else if (r.position) h += '<p class="note">Твоё место в очереди: ' + r.position + ' из ' + r.limit + '.</p>';
+    if (!data.open) {
+      h += '<div class="card"><p class="eyebrow">Заявки — с ' + esc(data.open_date) + '</p><p class="note" style="margin:0">Место за тобой. Форма откроется вместе с уроками.</p></div>';
+      return h;
+    }
+    h += '<label class="field"><p class="eyebrow">Ссылка на видео</p><input class="input" id="rv-link" type="url" inputmode="url" placeholder="https://" autocomplete="off"></label>' +
+         '<label class="field"><p class="eyebrow">Что хочешь узнать</p><textarea class="input" id="rv-q" maxlength="2000" placeholder="Например: почему картинка шумит ночью"></textarea></label>' +
+         '<p class="err" id="rv-err"></p>' +
+         '<button class="btn red" type="button" data-review>Отправить на разбор</button>';
+    if (r.sent) h += '<p class="note ok" style="text-align:center">✓ Заявка отправлена. Можно прислать ещё одну.</p>';
+    return h;
+  }
+
+  // ── рендер и навигация ──
+  function render() {
+    var h;
+    if (view.screen === 'section') h = screenSection(view.section);
+    else if (view.screen === 'lesson') h = screenLesson(view.section, view.lesson);
+    else if (view.tab === 'materials') h = screenMaterials();
+    else if (view.tab === 'review') h = screenReview();
+    else h = screenHome();
+    root.innerHTML = h;
+    tabsEl.hidden = false;
+    [].forEach.call(tabsEl.querySelectorAll('button'), function (b) {
+      b.classList.toggle('on', b.getAttribute('data-tab') === view.tab);
+    });
+    if (tg && tg.BackButton) { view.screen ? tg.BackButton.show() : tg.BackButton.hide(); }
+  }
+  function go(target) {
+    var p = target.split(':');
+    view.screen = p[0]; view.section = p[1]; view.lesson = p[2] ? +p[2] : null;
+    view.tab = 'lessons';
+    render(); window.scrollTo(0, 0);
+  }
+  function back() {
+    if (view.screen === 'lesson') { view.screen = 'section'; view.lesson = null; }
+    else { view.screen = null; view.section = null; }
+    render(); window.scrollTo(0, 0);
+  }
+  function setTab(tab) {
+    view.tab = tab; view.screen = null; view.section = null; view.lesson = null;
+    render(); window.scrollTo(0, 0);
+  }
+
+  function run(promise, okText) {
+    busy = true;
+    return promise.then(function (d) { if (d) { data = d; render(); } if (okText) toast(okText); })
+      .catch(function (e) { toast(e.message || 'Не получилось'); })
+      .then(function () { busy = false; });
+  }
+
+  document.addEventListener('click', function (ev) {
+    var el = ev.target.closest('button, a');
+    if (!el || busy) return;
+    if (el.hasAttribute('data-tab')) { haptic(); setTab(el.getAttribute('data-tab')); }
+    else if (el.hasAttribute('data-tab-go')) { haptic(); setTab(el.getAttribute('data-tab-go')); }
+    else if (el.hasAttribute('data-go')) { haptic(); go(el.getAttribute('data-go')); }
+    else if (el.hasAttribute('data-back')) { back(); }
+    else if (el.hasAttribute('data-buy')) { buy(); }
+    else if (el.hasAttribute('data-locked')) {
+      var s = section(view.section);
+      toast(s && s.owned ? 'Откроется ' + data.open_date : 'Урок откроется после покупки');
+    }
+    else if (el.hasAttribute('data-preview')) {
+      previewOpen = !previewOpen;
+      try { localStorage.setItem('previewOpen', previewOpen ? '1' : '0'); } catch (e) {}
+      haptic(); demo ? (data = demoData(), render()) : run(api('/api/course/me'));
+    }
+    else if (el.hasAttribute('data-test-pay')) {
+      if (demo) return toast('Демо: в Telegram тут пройдёт тестовая оплата');
+      haptic('medium');
+      run(api('/api/course/test', { action: 'pay', option_id: +el.getAttribute('data-test-pay') }),
+          'Тестовая оплата прошла — сообщение в боте');
+    }
+    else if (el.hasAttribute('data-test-reset')) {
+      if (demo) return toast('Демо: в Telegram тут сбросится тест');
+      haptic('medium');
+      run(api('/api/course/test', { action: 'reset' }), 'Тестовый доступ снят');
+    }
+    else if (el.hasAttribute('data-review')) {
+      var link = document.getElementById('rv-link').value.trim();
+      var q = document.getElementById('rv-q').value.trim();
+      var err = document.getElementById('rv-err');
+      if (!/^https?:\/\//i.test(link)) { err.textContent = 'Вставь ссылку на видео — начинается с https://'; return; }
+      if (demo) return toast('Демо: заявка ушла бы админам');
+      haptic('medium');
+      err.textContent = '';
+      run(api('/api/course/review', { link: link, question: q }), 'Заявка отправлена ✓');
+    }
+  });
+
+  // ── демо-данные для просмотра вне Telegram (#demo) ──
+  function demoData() {
+    var lessons = function (titles, open) { return titles.map(function (t, i) { return { n: i + 1, title: t, open: open }; }); };
+    var open = previewOpen;
+    return {
+      first_name: 'Миша', admin: true, open: open, preview: open, open_date: '1 ноября', days_left: 25,
+      full_price: false, presale_end: '1 ноября',
+      sections: [
+        { slug: 'shooting', title: 'Shot on iPhone — съёмка', name: 'Shot on iPhone', owned: true, test: true, price: 2490,
+          lead: 'Настраиваем камеру, собираем сет и снимаем себя без команды.',
+          lessons: lessons(['Blackmagic Camera', 'Оборудование и съёмка себя', 'Линзы', 'Как снимать под лут', 'Мои приёмы и движение камеры'], open) },
+        { slug: 'editing', title: 'Cut by MALIMABI — монтаж', name: 'Cut by MALIMABI', owned: false, test: false, price: 2990,
+          lead: 'Монтаж в Premiere Pro: от первого проекта до финального рендера.',
+          lessons: lessons(['Старт и настройка проекта', 'Монтаж под музыку и саунд-дизайн', 'Нейросети для переходов и динамики', 'Цвет и film look', 'Работа с текстом', 'Чёткость и мастер-экспорт', 'Финальный рендер в Topaz'], false) }
+      ],
+      bundle: { title: 'Пакет: съёмка + монтаж', price: 4490, price_full: 5990 },
+      materials: [
+        { kind: 'file', badge: 'LUT', title: 'Авторский лут', note: '.cube · для Blackmagic и Premiere', url: '' },
+        { kind: 'pdf', title: 'Баланс белого', url: '' }, { kind: 'pdf', title: 'Выдержка', url: '' },
+        { kind: 'pdf', title: 'ISO без шума', url: '' }, { kind: 'pdf', title: 'False color', url: '' }
+      ],
+      review: { eligible: true, test: true, position: null, limit: 15, left: 15, reviewer: 'baryshovv', sent: false },
+      options: [{ id: 1, title: 'Shot on iPhone — съёмка' }, { id: 2, title: 'Cut by MALIMABI — монтаж' }, { id: 3, title: 'Пакет: съёмка + монтаж' }],
+      buy_url: ''
+    };
+  }
+
+  // ── старт ──
+  if (!demo && (!tg || !tg.initData)) {
+    root.innerHTML = '<div class="muted">Открой приложение из бота MALIMABI в Telegram.</div>';
+    return;
+  }
+  if (tg && tg.initData) {
+    tg.ready(); tg.expand();
+    try { tg.setHeaderColor('#0a0a0a'); tg.setBackgroundColor('#0a0a0a'); tg.setBottomBarColor && tg.setBottomBarColor('#0a0a0a'); } catch (e) {}
+    try { tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}
+    tg.BackButton.onClick(back);
+  }
+  load().catch(function () {
+    root.innerHTML = '<div class="muted">Не получилось загрузить. Закрой приложение и открой снова.</div>';
+  });
 })();
 </script>
 </body>

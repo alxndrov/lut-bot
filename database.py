@@ -452,6 +452,23 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE purchases ADD COLUMN course_option_id INTEGER DEFAULT NULL")
         except Exception:
             pass
+        # Тестовая оплата из админки: доступ без денег и без покупки. test=1
+        # такие строки снимает «Сбросить тест»; настоящая оплата их перекрывает.
+        try:
+            await db.execute("ALTER TABLE course_access ADD COLUMN test INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        # Заявки на личный разбор из вкладки «Разбор» мини-приложения
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_review_requests (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id    INTEGER NOT NULL,
+                link       TEXT NOT NULL,
+                question   TEXT,
+                test       INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -3992,21 +4009,25 @@ async def add_course_purchase(user_id: int, username: Optional[str], product_id:
         return cur.lastrowid if cur.rowcount > 0 else None
 
 
-async def grant_course_access(user_id: int, sections: list[str], purchase_id: int | None) -> list[str]:
+async def grant_course_access(user_id: int, sections: list[str], purchase_id: int | None,
+                              test: bool = False) -> list[str]:
     """Открывает разделы. Возвращает те, что открыты этой покупкой впервые
-    (или заново после отзыва); уже открытые не трогает."""
+    (или заново после отзыва); уже открытые не трогает. Настоящая оплата
+    перекрывает тестовый доступ, тестовая настоящий — нет."""
     granted = []
     async with aiosqlite.connect(DB_PATH) as db:
         for section in sections:
             cur = await db.execute(
-                """INSERT INTO course_access (user_id, section, purchase_id)
-                   VALUES (?, ?, ?)
+                """INSERT INTO course_access (user_id, section, purchase_id, test)
+                   VALUES (?, ?, ?, ?)
                    ON CONFLICT(user_id, section) DO UPDATE
                        SET purchase_id = excluded.purchase_id,
+                           test = excluded.test,
                            granted_at = CURRENT_TIMESTAMP,
                            revoked_at = NULL
-                       WHERE course_access.revoked_at IS NOT NULL""",
-                (user_id, section, purchase_id),
+                       WHERE course_access.revoked_at IS NOT NULL
+                          OR (course_access.test = 1 AND excluded.test = 0)""",
+                (user_id, section, purchase_id, 1 if test else 0),
             )
             if cur.rowcount > 0:
                 granted.append(section)
@@ -4035,6 +4056,56 @@ async def get_user_course_sections(user_id: int) -> set[str]:
             (user_id,),
         ) as cur:
             return {r[0] for r in await cur.fetchall()}
+
+
+async def get_user_test_course_sections(user_id: int) -> set[str]:
+    """Разделы, открытые тестовой оплатой (без денег)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT section FROM course_access WHERE user_id = ? AND revoked_at IS NULL AND test = 1",
+            (user_id,),
+        ) as cur:
+            return {r[0] for r in await cur.fetchall()}
+
+
+async def clear_test_course_access(user_id: int) -> int:
+    """«Сбросить тест»: убирает тестовые доступы и тестовые заявки на разбор.
+    Настоящие оплаты не трогает."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM course_access WHERE user_id = ? AND test = 1", (user_id,))
+        await db.execute("DELETE FROM course_review_requests WHERE user_id = ? AND test = 1", (user_id,))
+        await db.commit()
+        return cur.rowcount
+
+
+async def get_bundle_review_position(user_id: int) -> Optional[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT position FROM bundle_review_queue WHERE user_id = ?", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else None
+
+
+async def add_course_review_request(user_id: int, link: str, question: str, test: bool) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO course_review_requests (user_id, link, question, test) VALUES (?, ?, ?, ?)",
+            (user_id, link, question, 1 if test else 0),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_last_course_review_request(user_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM course_review_requests WHERE user_id = ?
+               ORDER BY id DESC LIMIT 1""", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 async def reserve_bundle_review(user_id: int, purchase_id: int, limit: int) -> Optional[int]:

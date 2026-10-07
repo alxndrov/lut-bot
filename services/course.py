@@ -21,6 +21,50 @@ SECTIONS = {
 }
 SECTION_SHORT = {"shooting": "Съёмка", "editing": "Монтаж"}
 
+# Программа для мини-приложения — по оферте (раздел 7.1). Видео и длительности
+# появятся на этапе 2 (видеохостинг); пока у уроков только названия.
+PROGRAM = {
+    "shooting": {
+        "name": "Shot on iPhone",
+        "lead": "Настраиваем камеру, собираем сет и снимаем себя без команды.",
+        "lessons": [
+            "Blackmagic Camera",
+            "Оборудование и съёмка себя",
+            "Линзы",
+            "Как снимать под лут",
+            "Мои приёмы и движение камеры",
+        ],
+    },
+    "editing": {
+        "name": "Cut by MALIMABI",
+        "lead": "Монтаж в Premiere Pro: от первого проекта до финального рендера.",
+        "lessons": [
+            "Старт и настройка проекта",
+            "Монтаж под музыку и саунд-дизайн",
+            "Нейросети для переходов и динамики",
+            "Цвет и film look",
+            "Работа с текстом",
+            "Чёткость и мастер-экспорт",
+            "Финальный рендер в Topaz",
+        ],
+    },
+}
+
+# Вкладка «Материалы». sections — кому положено (хватает любого из разделов);
+# url пустой — файл ещё не загружен, в приложении «откроется с уроками».
+MATERIALS = [
+    {"kind": "file", "badge": "LUT", "title": "Авторский лут",
+     "note": ".cube · для Blackmagic и Premiere", "sections": ["shooting", "editing"], "url": ""},
+    {"kind": "file", "badge": "PH", "title": "Playhead",
+     "note": "Трекер времени · Mac и Windows", "sections": ["editing"], "url": ""},
+    {"kind": "file", "badge": "BIN", "title": "Bin",
+     "note": "Порядок в файлах · Mac", "sections": ["editing"], "url": ""},
+    {"kind": "pdf", "title": "Баланс белого", "sections": ["shooting"], "url": ""},
+    {"kind": "pdf", "title": "Выдержка", "sections": ["shooting"], "url": ""},
+    {"kind": "pdf", "title": "ISO без шума", "sections": ["shooting"], "url": ""},
+    {"kind": "pdf", "title": "False color", "sections": ["shooting"], "url": ""},
+]
+
 
 def _msk_date_start(date_str: str) -> datetime:
     return datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=MSK)
@@ -36,6 +80,12 @@ def is_full_price(now: datetime | None = None) -> bool:
 
 def is_open(now: datetime | None = None) -> bool:
     return (now or now_msk()) >= _msk_date_start(config.COURSE_OPEN_AT)
+
+
+def days_to_open(now: datetime | None = None) -> int:
+    """Сколько дней до открытия уроков (0 — уже открыты; в последний день — 1)."""
+    left = _msk_date_start(config.COURSE_OPEN_AT) - (now or now_msk())
+    return 0 if left.total_seconds() <= 0 else left.days + 1
 
 
 def price_for(option: dict, now: datetime | None = None) -> int:
