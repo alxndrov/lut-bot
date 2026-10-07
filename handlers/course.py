@@ -12,7 +12,8 @@ from pathlib import Path
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.types import (
-    CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, WebAppInfo,
+    BotCommand, BotCommandScopeChat, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup,
+    MenuButtonCommands, MenuButtonWebApp, Message, WebAppInfo,
 )
 from aiohttp import web
 
@@ -47,6 +48,35 @@ def app_button(text: str = "📱 Открыть приложение курса"
     if not config.MINIAPP_URL:
         return None
     return InlineKeyboardButton(text=text, web_app=WebAppInfo(url=config.MINIAPP_URL))
+
+
+async def sync_menu_button(bot: Bot):
+    """Кнопка «Курс» у поля ввода. Пока курс скрыт в каталоге (до анонса) —
+    только у админов, после включения товара — у всех."""
+    if not config.MINIAPP_URL:
+        return
+    app_menu = MenuButtonWebApp(text="Курс", web_app=WebAppInfo(url=config.MINIAPP_URL))
+    product = await db.get_course_product()
+    public = bool(product and product.get("active"))
+    try:
+        await bot.set_chat_menu_button(menu_button=app_menu if public else MenuButtonCommands())
+    except Exception as e:
+        logger.warning(f"Не удалось поставить кнопку приложения: {e}")
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.set_chat_menu_button(chat_id=admin_id, menu_button=app_menu)
+        except Exception as e:  # админ ещё не запускал клиентский бот
+            logger.info(f"Кнопка приложения админу {admin_id} не поставлена: {e}")
+
+
+async def set_admin_commands(bot: Bot, commands: list[BotCommand]):
+    """Админам в меню команд — ещё /app (приложение курса)."""
+    admin_commands = commands + [BotCommand(command="app", description="📱 Приложение курса")]
+    for admin_id in config.ADMIN_IDS:
+        try:
+            await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
+        except Exception as e:
+            logger.info(f"Команды админу {admin_id} не поставлены: {e}")
 
 
 async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None:
@@ -143,6 +173,25 @@ async def cmd_course(message: Message):
     if not await ensure_policy(message, "course"):
         return
     await send_course(message, message.from_user.id)
+
+
+@router.message(Command("app"))
+async def cmd_app(message: Message):
+    """Открыть мини-приложение. До анонса — только админам."""
+    product = await db.get_course_product()
+    admin = message.from_user.id in config.ADMIN_IDS
+    if not admin and not (product and product.get("active")):
+        await send_course(message, message.from_user.id)
+        return
+    button = app_button()
+    if not button:
+        await message.answer("Адрес приложения не задан (MINIAPP_URL в .env).")
+        return
+    hidden = admin and not (product and product.get("active"))
+    await message.answer(
+        "📱 Приложение курса" + ("\n\n<i>🔐 Курс скрыт — у покупателей кнопки «Курс» "
+                                "пока нет, приложение открывают только админы.</i>" if hidden else ""),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[button]]), parse_mode="HTML")
 
 
 @router.callback_query(F.data == "course:show")

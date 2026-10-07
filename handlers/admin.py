@@ -1157,6 +1157,10 @@ async def cb_toggle(callback: CallbackQuery):
 
     status = "показан" if new_active else "скрыт"
     await callback.answer(f"Товар {status}.")
+    if await db.get_course_options(product_id):
+        # Курс показан/скрыт — кнопка «Курс» у поля ввода появляется/пропадает у всех
+        from handlers.course import sync_menu_button
+        await sync_menu_button(callback.bot)
 
     # Обновляем карточку через общую функцию
     purchase_count = await db.get_product_purchase_count(product["id"])

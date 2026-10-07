@@ -4,7 +4,7 @@ import logging
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import BotCommand, MenuButtonWebApp, WebAppInfo
+from aiogram.types import BotCommand
 
 import config
 import database as db
@@ -57,14 +57,16 @@ async def main():
     # Последним: ловит ответ на просьбу об отзыве — всё, что не разобрали выше
     dp.include_router(support.review_router)
 
-    await bot.set_my_commands([
+    commands = [
         BotCommand(command="start",       description="🏠 В начало"),
         BotCommand(command="catalog",     description="📦 Каталог товаров"),
         BotCommand(command="course",      description="🎬 Курс"),
         BotCommand(command="mypurchases", description="🧾 Мои покупки"),
         BotCommand(command="feedback",    description="💬 Оставить отзыв"),
         BotCommand(command="help",        description="🆘 Поддержка"),
-    ])
+    ]
+    await bot.set_my_commands(commands)
+    await course.set_admin_commands(bot, commands)
 
     asyncio.create_task(finance_sync_loop())
     asyncio.create_task(daily_report_loop(bot))
@@ -81,13 +83,8 @@ async def main():
         logging.warning(f"get_me не удался: {e}")
         bot_username = ""
     course.setup_web(webhook_app, bot_username)
-    if config.MINIAPP_URL:
-        # Кнопка приложения курса вместо меню команд; команды работают через «/»
-        try:
-            await bot.set_chat_menu_button(menu_button=MenuButtonWebApp(
-                text="Курс", web_app=WebAppInfo(url=config.MINIAPP_URL)))
-        except Exception as e:
-            logging.warning(f"Не удалось поставить кнопку приложения: {e}")
+    # Кнопка приложения курса: до анонса — только админам
+    await course.sync_menu_button(bot)
     runner = web.AppRunner(webhook_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.PRODAMUS_WEBHOOK_PORT)
