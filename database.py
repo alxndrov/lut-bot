@@ -3708,7 +3708,7 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
                       COALESCE(SUM(delivery_amount), 0) as delivery,
                       {_DELIVERY_COST_SQL}
                FROM purchases
-               WHERE DATE(created_at) BETWEEN ? AND ?""",
+               WHERE DATE(created_at, '+3 hours') BETWEEN ? AND ?""",
             (month_from, month_to),
         ) as cur:
             row = await cur.fetchone()
@@ -3723,7 +3723,7 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
                       COALESCE(SUM(pu.amount), 0) as subtotal
                FROM purchases pu
                LEFT JOIN products pr ON pu.product_id = pr.id
-               WHERE DATE(pu.created_at) BETWEEN ? AND ?
+               WHERE DATE(pu.created_at, '+3 hours') BETWEEN ? AND ?
                GROUP BY pu.product_id
                ORDER BY subtotal DESC""",
             (month_from, month_to),
@@ -3732,7 +3732,7 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
 
         async with db.execute(
             """SELECT COUNT(*) FROM users
-               WHERE DATE(first_seen) BETWEEN ? AND ?""",
+               WHERE DATE(first_seen, '+3 hours') BETWEEN ? AND ?""",
             (month_from, month_to),
         ) as cur:
             new_users = (await cur.fetchone())[0]
@@ -3741,9 +3741,9 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
 
         # Лучший день по выручке
         async with db.execute(
-            """SELECT DATE(created_at) as day, COALESCE(SUM(amount), 0) as day_total
+            """SELECT DATE(created_at, '+3 hours') as day, COALESCE(SUM(amount), 0) as day_total
                FROM purchases
-               WHERE DATE(created_at) BETWEEN ? AND ?
+               WHERE DATE(created_at, '+3 hours') BETWEEN ? AND ?
                GROUP BY day
                ORDER BY day_total DESC
                LIMIT 1""",
@@ -3755,7 +3755,7 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
         # Уникальных покупателей
         async with db.execute(
             """SELECT COUNT(DISTINCT user_id) FROM purchases
-               WHERE DATE(created_at) BETWEEN ? AND ?""",
+               WHERE DATE(created_at, '+3 hours') BETWEEN ? AND ?""",
             (month_from, month_to),
         ) as cur:
             unique_buyers = (await cur.fetchone())[0]
@@ -3776,7 +3776,9 @@ async def get_monthly_purchases_report(year: int, month: int) -> dict:
 
 async def get_purchases_report(date_str: str) -> dict:
     """
-    Возвращает сводку покупок за указанную дату (формат YYYY-MM-DD).
+    Возвращает сводку покупок за указанную дату (формат YYYY-MM-DD) по Москве —
+    как и расчёт денег (payout.split), иначе ночные покупки попадают в
+    заголовок отчёта не тем днём, что в «Чистыми».
     """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -3785,7 +3787,7 @@ async def get_purchases_report(date_str: str) -> dict:
                       COALESCE(SUM(delivery_amount), 0) as delivery,
                       {_DELIVERY_COST_SQL}
                FROM purchases
-               WHERE DATE(created_at) = ?""",
+               WHERE DATE(created_at, '+3 hours') = ?""",
             (date_str,),
         ) as cur:
             row = await cur.fetchone()
@@ -3800,7 +3802,7 @@ async def get_purchases_report(date_str: str) -> dict:
                       COALESCE(SUM(pu.amount), 0) as subtotal
                FROM purchases pu
                LEFT JOIN products pr ON pu.product_id = pr.id
-               WHERE DATE(pu.created_at) = ?
+               WHERE DATE(pu.created_at, '+3 hours') = ?
                GROUP BY pu.product_id
                ORDER BY subtotal DESC""",
             (date_str,),
