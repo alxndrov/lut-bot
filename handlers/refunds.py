@@ -420,7 +420,7 @@ async def _show_confirm(message: Message, state: FSMContext, edit: bool = False)
             lines.append("Расходники на склад: " + (
                 "решу, когда приедет" if stock is None else ("да" if stock else "нет")))
     else:
-        lines.append("Заказ ещё не отправлен — он уйдёт из очереди печати." if data["full"]
+        lines.append("Заказ ещё не отправлен — он уйдёт из очереди заказов." if data["full"]
                      else "Заказ ещё не отправлен — останется в очереди.")
     created = order.get("created_at") or ""
     lines += [

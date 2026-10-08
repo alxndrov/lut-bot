@@ -57,6 +57,40 @@ def _admin_id_by_name(name: str | None) -> int | None:
     return None
 
 
+# Товары «в наличии» (готовые микрофоны и т.п.) не печатают, а собирают:
+# для их позиций этап называется «Собрал», а не «Распечатал». Отметка та же
+# (order_prints) — меняются только слова. Флаг «в наличии» меняют в карточке
+# товара, поэтому список перечитываем при каждом обращении к заказам.
+_STOCK_IDS: set[int] = set()
+
+_PRINT_WORDS = {"icon": "🖨", "did": "Распечатал", "do": "Напечатать",
+                "pos_done": "напечатана", "done": "распечатан", "all_done": "Распечатано",
+                "wait": "Ждём печать", "doing": "печатает", "doing_you": "печатаешь"}
+_ASSEMBLY_WORDS = {"icon": "🛠", "did": "Собрал", "do": "Собрать",
+                   "pos_done": "собрана", "done": "собран", "all_done": "Собрано",
+                   "wait": "Ждём сборку", "doing": "собирает", "doing_you": "собираешь"}
+# Заказ, где одни позиции печатают, а другие собирают
+_MIXED_WORDS = dict(_PRINT_WORDS, icon="✅", done="готов", all_done="Готово",
+                    wait="Ждём", doing="делает", doing_you="делаешь")
+
+
+async def _refresh_stock_ids():
+    ids = await db.get_stock_product_ids()
+    _STOCK_IDS.clear()
+    _STOCK_IDS.update(ids)
+
+
+def _words(order: dict, positions=None) -> dict:
+    """Слова этапа для этих позиций (по умолчанию — всего заказа)."""
+    total = _order_positions(order)
+    rp = _round_products(order, total)
+    positions = list(positions or range(1, total + 1))
+    stock = [p - 1 < len(rp) and rp[p - 1] in _STOCK_IDS for p in positions]
+    if all(stock):
+        return _ASSEMBLY_WORDS
+    return _PRINT_WORDS if not any(stock) else _MIXED_WORDS
+
+
 def _my_positions(order: dict, viewer_id: int | None) -> list[int]:
     """Номера позиций, которые печатает этот админ."""
     if not viewer_id:
@@ -108,19 +142,21 @@ def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
         # исполнитель) — показываем все, иначе отметить будет некому
         show = _my_positions(order, viewer_id) or list(range(1, total + 1))
         for pos in show:
+            w = _words(order, [pos])
             if pos in printed:
                 rows.append([InlineKeyboardButton(
-                    text=f"✅ Поз.{pos} напечатана — отменить",
+                    text=f"✅ Поз.{pos} {w['pos_done']} — отменить",
                     callback_data=f"order_unprint:{oid}:{pos}")])
             else:
                 rows.append([InlineKeyboardButton(
-                    text=f"🖨 Распечатал поз.{pos}",
+                    text=f"{w['icon']} {w['did']} поз.{pos}",
                     callback_data=f"order_printed:{oid}:{pos}")])
     elif printed:
-        rows.append([InlineKeyboardButton(text="↩️ Отменить «распечатал»",
+        rows.append([InlineKeyboardButton(text=f"↩️ Отменить «{_words(order)['did'].lower()}»",
                                           callback_data=f"order_unprint:{oid}:1")])
     else:
-        rows.append([InlineKeyboardButton(text="🖨 Распечатал",
+        w = _words(order)
+        rows.append([InlineKeyboardButton(text=f"{w['icon']} {w['did']}",
                                           callback_data=f"order_printed:{oid}:1")])
 
     # Наклейка СДЭК — когда печатать больше нечего и пора клеить на коробку.
@@ -217,13 +253,16 @@ def _order_text(order: dict, prints: list | None = None) -> str:
 
         done = [p for p in range(1, total + 1) if p in printed]
         waiting = [p for p in range(1, total + 1) if p not in printed]
-        text += "\n🖨 <b>Распечатано:</b> " + (
+        w = _words(order)
+        text += f"\n{w['icon']} <b>{w['all_done']}:</b> " + (
             " · ".join(_pos_line(p) for p in done) if done else "—")
         if waiting:
-            text += "\n⏳ <b>Ждём печать:</b> " + " · ".join(_pos_line(p) for p in waiting)
+            text += (f"\n⏳ <b>{_words(order, waiting)['wait']}:</b> "
+                     + " · ".join(_pos_line(p) for p in waiting))
     elif order.get("printed_at"):
         when = _msk(order["printed_at"])
-        text += f"\n🖨 <b>Распечатал:</b> {order.get('printed_by_name') or ''}"
+        w = _words(order)
+        text += f"\n{w['icon']} <b>{w['did']}:</b> {order.get('printed_by_name') or ''}"
         if when:
             text += f" · {when}"
     if order.get("shipped_at"):
@@ -264,6 +303,7 @@ _ADMIN_NAMES: dict[int, str] = {}
 
 
 async def _ensure_admin_names():
+    await _refresh_stock_ids()
     if _ADMIN_NAMES:
         return
     for uid in config.ADMIN_IDS:
@@ -366,19 +406,22 @@ def _list_item_text(order: dict, index: int, has_card: bool,
     elif not waiting:
         action = "📦 Отправить" + _products_label(order, list(range(1, total + 1)), total)
     elif total == 1:
-        action = "🖨 Напечатать" + _products_label(order, [1], total)
+        w = _words(order)
+        action = f"{w['icon']} {w['do']}" + _products_label(order, [1], total)
     elif mode == "my":
         mine = [p for p in _my_positions(order, viewer_id) if p in waiting]
-        action = (f"🖨 Напечатать {_pos_list(mine)}" + _products_label(order, mine, total) if mine
-                  else "⏳ Ждём вторую часть")
+        w = _words(order, mine)
+        action = (f"{w['icon']} {w['do']} {_pos_list(mine)}" + _products_label(order, mine, total)
+                  if mine else "⏳ Ждём вторую часть")
     else:
         whos = db.order_routing(order)
         by_who: dict[str, list] = {}
         for p in waiting:
             who = (whos[p - 1] if p <= len(whos) else None) or "не определён"
             by_who.setdefault(who, []).append(p)
-        action = "🖨 " + " · ".join(
-            f"Напечатать {_pos_list(ps)}{_products_label(order, ps, total)} — {who}"
+        action = " · ".join(
+            f"{_words(order, ps)['icon']} {_words(order, ps)['do']} {_pos_list(ps)}"
+            f"{_products_label(order, ps, total)} — {who}"
             for who, ps in by_who.items())
 
     if order.get("refunded_at"):
@@ -566,6 +609,7 @@ async def _load(callback: CallbackQuery) -> dict | None:
     if not order:
         await callback.answer("Заказ не найден.", show_alert=True)
         return None
+    await _refresh_stock_ids()
     return order
 
 
@@ -626,7 +670,8 @@ def _stage(order: dict, prints: list | None = None) -> tuple[str, str]:
     if order.get("shipped_at"):
         return "📦", "отправлен"
     if order.get("printed_at"):
-        return "🖨", "распечатан"
+        w = _words(order)
+        return w["icon"], w["done"]
     total = _order_positions(order)
     if total > 1 and prints:
         printed = _print_map(order, prints)
@@ -636,7 +681,7 @@ def _stage(order: dict, prints: list | None = None) -> tuple[str, str]:
             waiting = ", ".join(
                 f"поз.{p}" + (f" ({whos[p - 1]})" if p <= len(whos) and whos[p - 1] else "")
                 for p in waiting_pos)
-            return "🖨", f"часть готова, ждём {waiting}"
+            return _words(order)["icon"], f"часть готова, ждём {waiting}"
     if order.get("assignee_id"):
         return "🧑‍🔧", "в работе"
     return "🆕", "новый"
@@ -682,6 +727,7 @@ async def _cards_in_chat(orders: list, chat_id: int) -> dict:
 async def _send_list(message: Message, orders: list, start_index: int,
                      cards: dict, mode: str) -> tuple[int, list[int]]:
     """Шлёт пункты списка ответами на карточки заказов. Возвращает след. номер and message ids."""
+    await _refresh_stock_ids()
     i = start_index
     sent_ids = []
     for o in orders:
@@ -834,7 +880,8 @@ async def cb_order_printed(callback: CallbackQuery):
     uid = callback.from_user.id
     if not _may_act(order, uid):
         await callback.answer(
-            f"Этот заказ печатает {order['assignee_name']} — отметить может только он.",
+            f"Этот заказ {_words(order)['doing']} {order['assignee_name']} — "
+            f"отметить может только он.",
             show_alert=True,
         )
         return
@@ -859,7 +906,9 @@ async def cb_order_printed(callback: CallbackQuery):
     waiting = [p for p in range(1, total + 1) if p not in _print_map(order, prints)]
     if not waiting:
         await db.set_order_printed(order["id"], uid, name)
-        note = "Отмечено: распечатано целиком 🖨" if marked else "Уже отмечено 🖨"
+        w = _words(order)
+        note = (f"Отмечено: {w['all_done'].lower()} целиком {w['icon']}" if marked
+                else f"Уже отмечено {w['icon']}")
         # В финансовый лист «Печатал» проставляем только теперь — при
         # оплате исполнитель ещё не известен, а заказ до печати мог и
         # передаться другому админу, поэтому берём фактических печатавших
@@ -870,10 +919,13 @@ async def cb_order_printed(callback: CallbackQuery):
             danya_positions = credits.get(config.PARTNER_ID, 0)
             request_finance_printer_update(order["order_code"], printers, danya_positions)
     elif total > 1:
-        note = (f"Отмечено: {_pos_list(sorted(targets))} 🖨 Осталось: {_pos_list(waiting)}"
-                if marked else "Эта позиция уже отмечена 🖨")
+        icon = _words(order, sorted(targets))["icon"]
+        note = (f"Отмечено: {_pos_list(sorted(targets))} {icon} Осталось: {_pos_list(waiting)}"
+                if marked else f"Эта позиция уже отмечена {icon}")
     else:
-        note = "Отмечено: распечатано 🖨" if marked else "Уже отмечено 🖨"
+        w = _words(order)
+        note = (f"Отмечено: {w['all_done'].lower()} {w['icon']}" if marked
+                else f"Уже отмечено {w['icon']}")
 
     request_sync()
     await callback.answer(note)
@@ -1278,7 +1330,7 @@ async def cb_order_takepos(callback: CallbackQuery):
         whos[pos - 1] = name
         await _apply_routing(order, whos, callback.from_user.id, name)
         request_sync()
-        await callback.answer(f"Поз.{pos} теперь печатаешь ты ✅")
+        await callback.answer(f"Поз.{pos} теперь {_words(order, [pos])['doing_you']} ты ✅")
     await _sync_order_messages(callback, await db.get_order(order["id"]))
 
 

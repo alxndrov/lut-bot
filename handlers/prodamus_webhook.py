@@ -298,7 +298,8 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
                                         [p["user_id"] for p in printers])
             await db.force_set_order_assignee(order_row_id, printers[0]["user_id"],
                                               f"@{printers[0]['username']}")
-            from handlers.order_actions import _order_text
+            from handlers.order_actions import _ensure_admin_names, _order_text
+            await _ensure_admin_names()
             summary = _order_text(await db.get_order(order_row_id))
 
         # Строка в финансовый лист Google Таблицы — по заказу целиком, не

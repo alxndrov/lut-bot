@@ -2023,7 +2023,7 @@ async def cb_order_analytics(callback: CallbackQuery):
         return
     await callback.message.edit_text(
         "🎤 <b>Аналитика заказов</b>\n\nВыбери товар — покажу разбивку по ответам "
-        "(цвет, текстура и т.д.) и кто печатал.",
+        "(цвет, текстура и т.д.) и кто печатал или собирал.",
         parse_mode="HTML",
         reply_markup=order_analytics_products_keyboard(physical),
     )
@@ -2090,7 +2090,9 @@ async def cb_oa_product(callback: CallbackQuery):
         qshort = q["text"] if len(q["text"]) <= 60 else q["text"][:59] + "…"
         parts = " · ".join(f"<b>{v}</b> — {n}" for v, n in cnt.most_common())
         lines.append(f"• {qshort}\n   {parts}")
-    lines.append("\n🖨 <b>Кто печатал</b>")
+    # Товар «в наличии» не печатают, а собирают
+    lines.append("\n🛠 <b>Кто собирал</b>" if db.is_stock_product(product)
+                 else "\n🖨 <b>Кто печатал</b>")
     for name, n in assignee.most_common():
         lines.append(f"   {name} — <b>{n}</b>")
 

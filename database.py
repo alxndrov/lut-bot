@@ -926,6 +926,15 @@ async def delete_product(product_id: int):
 
 # --- Варианты товара в наличии ---
 
+async def get_stock_product_ids() -> set[int]:
+    """id товаров «Физический в наличии» — их не печатают, а собирают."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT id FROM products WHERE category = 'physical' AND in_stock = 1"
+        ) as cur:
+            return {r[0] for r in await cur.fetchall()}
+
+
 def is_stock_product(product: dict | None) -> bool:
     """Товар вида «Физический в наличии»."""
     return bool(product and product.get("category") == "physical" and product.get("in_stock"))
