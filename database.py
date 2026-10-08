@@ -1306,6 +1306,18 @@ async def replace_admin_command_messages(command: str, chat_id: int, user_id: in
         await db.commit()
 
 
+async def add_admin_command_message(command: str, chat_id: int, user_id: int,
+                                    message_id: int) -> None:
+    """Дописывает сообщение к текущей пачке команды — уберётся вместе с ней."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO admin_command_messages(command, chat_id, user_id, message_id) "
+            "VALUES (?, ?, ?, ?)",
+            (command, chat_id, user_id, int(message_id)),
+        )
+        await db.commit()
+
+
 async def get_admin_command_messages(command: str, chat_id: int, user_id: int) -> list[int]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(

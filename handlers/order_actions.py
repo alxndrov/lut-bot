@@ -170,8 +170,7 @@ def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
     if all(p in printed for p in range(1, total + 1)):
         rows.append([InlineKeyboardButton(text="📦 Заказ отправил",
                                           callback_data=f"order_shipped:{oid}")])
-    rows.append([InlineKeyboardButton(text="🔁 Повторить заказ",
-                                      callback_data=f"order_repeat:{oid}")])
+    # «Повторить заказ» — только у отправленного (см. order_shipped_keyboard)
     from handlers.refunds import refund_rows
     rows += refund_rows(order)
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -882,9 +881,10 @@ async def cb_order_barcode(callback: CallbackQuery):
         await callback.answer()
         # Ответом на карточку заказа — чтобы наклейка была привязана к нему
         # в чате так же, как пункты списка /myorders
-        await callback.message.reply_document(order["cdek_barcode_file_id"],
-                                              caption=caption,
-                                              allow_sending_without_reply=True)
+        sent = await callback.message.reply_document(order["cdek_barcode_file_id"],
+                                                     caption=caption,
+                                                     allow_sending_without_reply=True)
+        await _remember_for_orders_cleanup(callback, sent)
         return
 
     if not order.get("cdek_uuid"):
@@ -913,6 +913,12 @@ async def cb_order_barcode(callback: CallbackQuery):
 _BARCODE_BUSY: set[int] = set()
 
 
+async def _remember_for_orders_cleanup(callback: CallbackQuery, sent: Message):
+    """Наклейки СДЭК убираются из чата вместе со списком при следующем /orders."""
+    await db.add_admin_command_message("orders", sent.chat.id, callback.from_user.id,
+                                       sent.message_id)
+
+
 async def _deliver_barcode(callback: CallbackQuery, order: dict, name: str, caption: str):
     from services.cdek_accounts import client_for_order
 
@@ -929,17 +935,19 @@ async def _deliver_barcode(callback: CallbackQuery, order: dict, name: str, capt
         _BARCODE_BUSY.discard(order["id"])
 
     if not pdf:
-        await callback.message.answer(
+        sent = await callback.message.answer(
             f"⚠️ СДЭК не отдал наклейку по заказу {name} — у них зависла очередь "
             f"печати форм. Нажмите позже или распечатайте из кабинета СДЭК "
             f"(накладная {order.get('cdek_number') or '—'})."
         )
+        await _remember_for_orders_cleanup(callback, sent)
         return
 
     sent = await callback.message.reply_document(
         BufferedInputFile(pdf, filename=f"{name}.pdf"), caption=caption,
         allow_sending_without_reply=True,
     )
+    await _remember_for_orders_cleanup(callback, sent)
     if sent.document:
         await db.set_order_barcode_file(order["id"], sent.document.file_id)
 
@@ -949,6 +957,12 @@ async def cb_order_repeat(callback: CallbackQuery):
     """Показывает подтверждение — повтор создаёт реальную накладную СДЭК."""
     order = await _load(callback)
     if not order:
+        return
+    # Повтор — для уже отправленного заказа; на старых карточках кнопка
+    # могла остаться и до отправки
+    if not order.get("shipped_at"):
+        await callback.answer("Повторить можно после «Заказ отправил».", show_alert=True)
+        await _sync_order_messages(callback, order)
         return
     existing = await db.get_direct_replacement(order["id"])
     if existing:
