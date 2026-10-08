@@ -101,8 +101,9 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
         later = "" if full else f" <s>{svc.rub(o['price_full'])}</s>"
         mark = " ✓ куплено" if set(svc.option_sections(o)) <= owned else ""
         lines.append(f"• <b>{o['title']}</b> — {price}{later}{mark}")
-    if not full:
-        lines += ["", f"Цены предпродажи действуют до {svc.presale_end_text()}."]
+    schedule = svc.price_schedule_text()
+    if schedule:
+        lines += ["", schedule]
     if reviews_left and not owned:
         lines.append(f"🎁 Первым {config.BUNDLE_REVIEW_LIMIT}, кто возьмёт пакет, — личный "
                      f"разбор видео от {config.COURSE_REVIEWER}. Осталось мест: <b>{reviews_left}</b>.")
@@ -379,7 +380,8 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
         "open_date": svc.open_date_text(),
         "days_left": svc.days_to_open(),
         "full_price": svc.is_full_price(),
-        "presale_end": svc.presale_end_text(),
+        "price_stage": svc.price_stage(),
+        "price_until": svc.price_until_text(),
         "sections": sections,
         "bundle": {"title": bundle["title"], "price": svc.price_for(bundle),
                    "price_full": bundle["price_full"]} if bundle else None,

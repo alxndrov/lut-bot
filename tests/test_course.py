@@ -40,9 +40,21 @@ class InitDataTest(unittest.TestCase):
 class PricingTest(unittest.TestCase):
     opt = {"price": 4490, "price_full": 5990, "sections": "shooting,editing"}
 
-    def test_switch_at_msk_midnight(self):
-        self.assertEqual(svc.price_for(self.opt, datetime(2026, 10, 31, 20, 59, tzinfo=timezone.utc)), 4490)
-        self.assertEqual(svc.price_for(self.opt, datetime(2026, 10, 31, 21, 0, tzinfo=timezone.utc)), 5990)
+    def test_cascade_switches_at_msk_midnight(self):
+        utc = timezone.utc
+        for name, value in (("COURSE_MID_PRICE_FROM", "2026-11-01"),
+                            ("COURSE_FULL_PRICE_FROM", "2026-11-08")):
+            self.addCleanup(setattr, config, name, getattr(config, name))
+            setattr(config, name, value)
+        price = lambda *dt: svc.price_for(self.opt, datetime(*dt, tzinfo=utc))
+        self.assertEqual(price(2026, 10, 31, 20, 59), 4490)
+        self.assertEqual(price(2026, 10, 31, 21, 0), 5240)   # 1 ноября по Москве
+        self.assertEqual(price(2026, 11, 7, 20, 59), 5240)
+        self.assertEqual(price(2026, 11, 7, 21, 0), 5990)    # 8 ноября по Москве
+
+    def test_mid_price_rounds_to_tens(self):
+        self.assertEqual(svc.mid_price({"price": 2490, "price_full": 3490}), 2990)
+        self.assertEqual(svc.mid_price({"price": 2490, "price_full": 3495}), 2990)
 
     def test_available_options(self):
         opts = [{"slug": "shooting", "sections": "shooting"},

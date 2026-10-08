@@ -88,8 +88,28 @@ def days_to_open(now: datetime | None = None) -> int:
     return 0 if left.total_seconds() <= 0 else left.days + 1
 
 
+def price_stage(now: datetime | None = None) -> str:
+    """presale — до COURSE_MID_PRICE_FROM, mid — до COURSE_FULL_PRICE_FROM, full — дальше."""
+    now = now or now_msk()
+    if now >= _msk_date_start(config.COURSE_FULL_PRICE_FROM):
+        return "full"
+    if now >= _msk_date_start(config.COURSE_MID_PRICE_FROM):
+        return "mid"
+    return "presale"
+
+
+def mid_price(option: dict) -> int:
+    """Середина между предпродажей и полной ценой, до десятков рублей."""
+    return int(round((option["price"] + option["price_full"]) / 20) * 10)
+
+
 def price_for(option: dict, now: datetime | None = None) -> int:
-    return int(option["price_full"] if is_full_price(now) else option["price"])
+    stage = price_stage(now)
+    if stage == "full":
+        return int(option["price_full"])
+    if stage == "mid":
+        return mid_price(option)
+    return int(option["price"])
 
 
 def option_sections(option: dict) -> list[str]:
@@ -109,7 +129,32 @@ def open_date_text() -> str:
 
 def presale_end_text() -> str:
     """До какого числа действуют цены предпродажи (день смены цен не включается)."""
+    return _date_text(config.COURSE_MID_PRICE_FROM)
+
+
+def full_price_from_text() -> str:
     return _date_text(config.COURSE_FULL_PRICE_FROM)
+
+
+def price_until_text(now: datetime | None = None) -> str | None:
+    """До какого числа действует текущая цена; None — цена уже полная."""
+    stage = price_stage(now)
+    if stage == "presale":
+        return presale_end_text()
+    if stage == "mid":
+        return full_price_from_text()
+    return None
+
+
+def price_schedule_text() -> str:
+    """Строка под ценами: что будет дальше. Пусто — цены уже полные."""
+    stage = price_stage()
+    if stage == "presale":
+        return (f"Цены предпродажи действуют до {presale_end_text()}. "
+                f"С {presale_end_text()} — дороже, с {full_price_from_text()} — полные.")
+    if stage == "mid":
+        return f"С {full_price_from_text()} — полные цены."
+    return ""
 
 
 def rub(amount: int | float) -> str:

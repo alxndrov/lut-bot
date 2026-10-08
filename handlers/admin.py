@@ -833,11 +833,13 @@ async def _product_card_text(product: dict, purchase_count: int = 0) -> str:
     if course_options:
         from services import course as course_svc
         taken = await db.count_bundle_reviews()
-        text += "\n🎓 <b>Опции</b> (предпродажа → полная):\n" + "".join(
-            f"• {o['title']}: {course_svc.rub(o['price'])} → {course_svc.rub(o['price_full'])}\n"
+        text += (f"\n🎓 <b>Опции</b> (до {course_svc.presale_end_text()} → "
+                 f"до {course_svc.full_price_from_text()} → полная):\n") + "".join(
+            f"• {o['title']}: {course_svc.rub(o['price'])} → {course_svc.rub(course_svc.mid_price(o))}"
+            f" → {course_svc.rub(o['price_full'])}\n"
             for o in course_options)
         text += (f"🎁 Разборы: занято {taken} из {config.BUNDLE_REVIEW_LIMIT}\n"
-                 f"📅 Предпродажа до {course_svc.presale_end_text()}, старт {course_svc.open_date_text()}; цены и покупатели — "
+                 f"📅 Старт {course_svc.open_date_text()}; цены и покупатели — "
                  f"/courseprice и /course в malimadmins\n"
                  f"<i>Под описанием бот сам выводит цены, места на разбор и оферту — "
                  f"в описании их писать не нужно.</i>\n")

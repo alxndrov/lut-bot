@@ -39,7 +39,9 @@ async def cmd_course(message: Message):
         await message.answer("Курс ещё не заведён.")
         return
     product = await db.get_course_product()
-    price_kind = "полные" if svc.is_full_price() else "предпродажа"
+    price_kind = {"presale": f"предпродажа (до {svc.presale_end_text()})",
+                  "mid": f"средние (до {svc.full_price_from_text()})",
+                  "full": "полные"}[svc.price_stage()]
     lines = [f"🎓 <b>Курс</b> — {'в продаже' if product and product.get('active') else 'скрыт'}, "
              f"цены: {price_kind}", ""]
     for o in options:

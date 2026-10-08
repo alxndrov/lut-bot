@@ -306,7 +306,7 @@
            '<button class="btn" type="button" data-go="lesson:' + s.slug + ':' + l.n + '">' + ICON.play + 'Смотреть</button></div>';
     } else if (data.bundle) {
       var b = data.bundle;
-      h += '<div class="card"><p class="eyebrow">' + (data.full_price ? 'Пакет · оба раздела' : 'Предпродажа до ' + esc(data.presale_end)) + '</p>' +
+      h += '<div class="card"><p class="eyebrow">' + (data.full_price ? 'Пакет · оба раздела' : (data.price_stage === 'presale' ? 'Предпродажа до ' : 'Цена до ') + esc(data.price_until)) + '</p>' +
            '<div class="hero-row"><span class="big-num">' + (data.sections.length) + '</span><div><b>' + esc(b.title) + '</b>' +
            '<small>' + rub(b.price) + (b.price_full > b.price ? '<span class="price-old">' + rub(b.price_full) + '</span>' : '') + '</small></div></div>' +
            (data.review.left ? '<p class="note">Первым ' + data.review.limit + ' покупателям пакета — личный разбор видео. Осталось мест: ' + data.review.left + '.</p>' : '') +
@@ -354,7 +354,7 @@
     h += '<button class="hint-card" type="button" data-tab-go="materials">' + ICON.doc + '<span>' + mats + ' — в «Материалах»</span></button>';
     if (!s.owned) {
       h += '<button class="btn red" type="button" data-buy>Купить' + (s.price ? ' · ' + rub(s.price) : '') + '</button>';
-      if (!data.full_price) h += '<p class="note" style="text-align:center">Цена предпродажи — до ' + esc(data.presale_end) + '</p>';
+      if (!data.full_price) h += '<p class="note" style="text-align:center">' + (data.price_stage === 'presale' ? 'Цена предпродажи' : 'Эта цена') + ' — до ' + esc(data.price_until) + '</p>';
     } else if (!data.open) {
       h += '<p class="note" style="text-align:center">Уроки откроются ' + esc(data.open_date) + ' — пришлём сообщение в бот.</p>';
     }
@@ -519,7 +519,7 @@
     var open = previewOpen;
     return {
       first_name: 'Миша', admin: true, open: open, preview: open, open_date: '8 ноября', days_left: 32,
-      full_price: false, presale_end: '1 ноября',
+      full_price: false, price_stage: 'presale', price_until: '1 ноября',
       sections: [
         { slug: 'shooting', title: 'Shot on iPhone — съёмка', name: 'Shot on iPhone', owned: true, test: true, price: 2490,
           lead: 'Настраиваем камеру, собираем сет и снимаем себя без команды.',
