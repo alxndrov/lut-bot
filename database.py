@@ -2555,16 +2555,6 @@ async def force_set_order_assignee(order_id: int, assignee_id: int, assignee_nam
         await db.commit()
 
 
-async def clear_order_assignee(order_id: int):
-    """Снимает исполнителя — заказ снова свободен."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "UPDATE orders SET assignee_id = NULL, assignee_name = NULL WHERE id = ?",
-            (order_id,),
-        )
-        await db.commit()
-
-
 async def add_order_print(order_id: int, user_id: int, user_name: str) -> bool:
     """Отмечает свою часть заказа распечатанной. False — если уже отмечал."""
     async with aiosqlite.connect(DB_PATH) as db:

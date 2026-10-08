@@ -1,6 +1,6 @@
 """
 Кнопки заказа в админском боте (malimadmins / WAITLIST_BOT_TOKEN):
-«Взял заказ» и «Сменить исполнителя».
+«Распечатал»/«Собрал», «Заказ отправил», повтор и возврат.
 Этот бот слушает только callback_query — отдельным поллингом в bot.py.
 """
 import asyncio
@@ -127,7 +127,7 @@ def _all_printed(order: dict, prints: list) -> bool:
 
 def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
                             prints: list | None = None) -> InlineKeyboardMarkup:
-    """Основные кнопки заказа: распечатать → отправить / сменить исполнителя.
+    """Основные кнопки заказа: распечатать (собрать) → отправить.
 
     В заказе из нескольких позиций печать отмечается по каждой отдельно —
     даже когда все позиции печатает один человек: он делает их не разом.
@@ -165,43 +165,15 @@ def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
         rows.append([InlineKeyboardButton(text="🏷 Штрихкод СДЭК",
                                           callback_data=f"order_barcode:{oid}")])
 
-    rows += [
-        [InlineKeyboardButton(text="📦 Заказ отправил",
-                              callback_data=f"order_shipped:{oid}")],
-        [InlineKeyboardButton(text="🔄 Сменить исполнителя",
-                              callback_data=f"order_reassign:{oid}")],
-        [InlineKeyboardButton(text="🔁 Повторить заказ",
-                              callback_data=f"order_repeat:{oid}")],
-    ]
+    # «Заказ отправил» — следующий шаг: появляется, когда всё распечатано
+    # (собрано), чтобы не отметить отправку раньше времени
+    if all(p in printed for p in range(1, total + 1)):
+        rows.append([InlineKeyboardButton(text="📦 Заказ отправил",
+                                          callback_data=f"order_shipped:{oid}")])
+    rows.append([InlineKeyboardButton(text="🔁 Повторить заказ",
+                                      callback_data=f"order_repeat:{oid}")])
     from handlers.refunds import refund_rows
     rows += refund_rows(order)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def order_reassign_keyboard(order: dict) -> InlineKeyboardMarkup:
-    """Меню смены исполнителя.
-
-    В заказе из нескольких позиций каждую можно забрать отдельно: иначе
-    «передать мне» меняло только подпись, а печать позиции оставалась
-    за напарником.
-    """
-    oid = order["id"]
-    whos = db.order_routing(order)
-    rows = []
-    if len(whos) > 1:
-        for i, w in enumerate(whos, 1):
-            rows.append([InlineKeyboardButton(
-                text=f"🙋 Забрать поз.{i}" + (f" (сейчас {w})" if w else ""),
-                callback_data=f"order_takepos:{oid}:{i}")])
-        take = "👤 Забрать весь заказ"
-    else:
-        take = "👤 Передать мне"
-    # «Снять исполнителя» нет: ничейный заказ теряется, исполнитель
-    # у заказа должен быть всегда — меняется только на другого
-    rows += [
-        [InlineKeyboardButton(text=take, callback_data=f"order_takeover:{oid}")],
-        [InlineKeyboardButton(text="◀️ Отмена", callback_data=f"order_reassign_cancel:{oid}")],
-    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -508,83 +480,12 @@ async def refresh_open_orders(bot):
     logger.info(f"Кнопки обновлены у заказов: {len(orders)}")
 
 
-async def _positions_by_admin(whos: list, hint: tuple | None = None) -> dict[int, set]:
-    """Ники позиций → {id админа: номера его позиций}, в порядке появления.
-
-    hint — (ник, id) того, кто прямо сейчас забирает позицию: если у него
-    нет юзернейма, по подписи его не найти, а потерять печатающего нельзя.
-    """
-    out: dict[int, set] = {}
-    for i, name in enumerate(whos):
-        if not name:
-            continue
-        if hint and name == hint[0]:
-            out.setdefault(hint[1], set()).add(i)
-            continue
-        admin = await db.get_admin_by_username(name, config.ADMIN_IDS)
-        if not admin:
-            logger.warning(f"routing: не нашёл админа по нику {name!r}")
-            continue
-        out.setdefault(admin["user_id"], set()).add(i)
-    return out
-
-
-def _owner_of(by_admin: dict[int, set], index: int) -> int | None:
-    """Кто печатает позицию с этим индексом (0-based)."""
-    for uid, positions in by_admin.items():
-        if index in positions:
-            return uid
-    return None
-
-
 def _print_positions_of(order: dict, mark: dict) -> set:
     """Какие позиции закрывает отметка (старая, без номеров — всю свою часть)."""
     positions = db.print_positions(mark)
     if positions:
         return positions
     return {pos for pos, m in _print_map(order, [mark]).items()}
-
-
-async def _apply_routing(order: dict, whos: list, actor_id: int, actor_name: str):
-    """Записывает новое распределение позиций и подтягивает под него всё
-    остальное: список печатающих, отметки о печати и исполнителя."""
-    oid = order["id"]
-    hint = (actor_name, actor_id)
-    before = await _positions_by_admin(db.order_routing(order), hint)
-    await db.set_order_routing(oid, whos)
-    after = await _positions_by_admin(whos, hint)
-    ids = list(after)
-    await db.set_order_printers(oid, ids)
-
-    # Позиция сменила хозяина — снимаем отметку только с ЕЩЁ НЕ напечатанных:
-    # новому печатать заново. Уже напечатанное трогать нельзя — это факт,
-    # за который начислены 200 ₽, и терять его молча при смене исполнителя
-    # нельзя. Ошиблись — есть явная кнопка «↩️ Откатить печать».
-    moved = {i + 1 for i in range(len(whos))
-             if _owner_of(before, i) != _owner_of(after, i)}
-    order_now = await db.get_order(oid)
-    prints_now = await db.get_order_prints(oid)
-    printed_pos = set(_print_map(order_now, prints_now))
-    to_clear = moved - printed_pos
-    if to_clear:
-        for p in prints_now:
-            kept = _print_positions_of(order_now, p) - to_clear
-            await db.set_order_print_positions(oid, p["user_id"], p["user_name"], kept)
-    kept_printed = moved & printed_pos
-    if kept_printed:
-        logger.info(f"order {oid}: позиции {sorted(kept_printed)} сменили исполнителя, "
-                    f"но отметки о печати сохранены")
-
-    order_now = await db.get_order(oid)
-    if _all_printed(order_now, await db.get_order_prints(oid)):
-        await db.set_order_printed(oid, actor_id, actor_name)
-    else:
-        await db.clear_order_printed(oid)
-
-    # Ничейных заказов быть не должно: если прежний исполнитель больше
-    # ничего не печатает, заказ закрепляем за тем, кто позицию забрал
-    if not order.get("assignee_id") or (ids and order["assignee_id"] not in ids):
-        await db.force_set_order_assignee(oid, actor_id, actor_name)
 
 
 def _may_act(order: dict, uid: int) -> bool:
@@ -909,10 +810,8 @@ async def cb_order_printed(callback: CallbackQuery):
         w = _words(order)
         note = (f"Отмечено: {w['all_done'].lower()} целиком {w['icon']}" if marked
                 else f"Уже отмечено {w['icon']}")
-        # В финансовый лист «Печатал» проставляем только теперь — при
-        # оплате исполнитель ещё не известен, а заказ до печати мог и
-        # передаться другому админу, поэтому берём фактических печатавших
-        # (order_prints), а не того, за кем заказ числится
+        # В финансовый лист «Печатал» проставляем только теперь — берём
+        # фактически отметивших (order_prints), а не того, за кем заказ числится
         if order.get("order_code"):
             printers = ", ".join(sorted({p["user_name"] for p in prints if p["user_name"]}))
             credits = await db.order_print_credits(order, prints, config.ADMIN_IDS)
@@ -1184,6 +1083,12 @@ async def cb_order_shipped(callback: CallbackQuery):
             show_alert=True,
         )
         return
+    # Кнопка появляется только после печати (сборки), но на старой
+    # карточке она может остаться — отправку раньше времени не отмечаем
+    if not _all_printed(order, await db.get_order_prints(order["id"])):
+        await callback.answer(f"Сначала отметь «{_words(order)['did']}» ✋", show_alert=True)
+        await _sync_order_messages(callback, order)
+        return
     if not order.get("assignee_id"):
         await db.force_set_order_assignee(order["id"], callback.from_user.id,
                                           _actor_name(callback))
@@ -1259,88 +1164,11 @@ async def cb_order_unship(callback: CallbackQuery):
     await _sync_order_messages(callback, order)
 
 
-@router.callback_query(F.data.startswith("order_reassign:"))
-async def cb_order_reassign(callback: CallbackQuery):
-    order = await _load(callback)
-    if not order:
-        return
-    await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(
-            reply_markup=order_reassign_keyboard(order)
-        )
-    except Exception as e:
-        logger.debug(f"order reassign menu failed: {e}")
-
-
-@router.callback_query(F.data.startswith("order_reassign_cancel:"))
-async def cb_order_reassign_cancel(callback: CallbackQuery):
-    order = await _load(callback)
-    if not order:
-        return
-    await callback.answer()
-    try:
-        await callback.message.edit_reply_markup(reply_markup=_order_keyboard(order))
-    except Exception as e:
-        logger.debug(f"order reassign cancel failed: {e}")
-
-
-@router.callback_query(F.data.startswith("order_takeover:"))
-async def cb_order_takeover(callback: CallbackQuery):
-    order = await _load(callback)
-    if not order:
-        return
-
-    name = _actor_name(callback)
-    whos = db.order_routing(order) or [None]
-    mine = (order.get("assignee_id") == callback.from_user.id
-            and all(w == name for w in whos))
-    if mine:
-        await callback.answer("Заказ и так за тобой ✅")
-    else:
-        # Забираем целиком: все позиции печатает тот, кто нажал
-        await _apply_routing(order, [name] * len(whos), callback.from_user.id, name)
-        request_sync()
-        await callback.answer(f"Весь заказ теперь за {name} ✅")
-    order = await db.get_order(order["id"])
-    await _sync_order_messages(callback, order)
-
-
-@router.callback_query(F.data.startswith("order_takepos:"))
-async def cb_order_takepos(callback: CallbackQuery):
-    """Забрать себе одну позицию разделённого заказа."""
-    order = await _load(callback)
-    if not order:
-        return
-    try:
-        pos = int(callback.data.split(":")[2])
-    except (IndexError, ValueError):
-        await callback.answer()
-        return
-
-    whos = db.order_routing(order)
-    if not 1 <= pos <= len(whos):
-        await callback.answer("Такой позиции в заказе нет", show_alert=True)
-        return
-
-    name = _actor_name(callback)
-    if whos[pos - 1] == name:
-        await callback.answer(f"Поз.{pos} и так за тобой ✅")
-    else:
-        whos[pos - 1] = name
-        await _apply_routing(order, whos, callback.from_user.id, name)
-        request_sync()
-        await callback.answer(f"Поз.{pos} теперь {_words(order, [pos])['doing_you']} ты ✅")
-    await _sync_order_messages(callback, await db.get_order(order["id"]))
-
-
-@router.callback_query(F.data.startswith("order_unassign:"))
-async def cb_order_unassign(callback: CallbackQuery):
-    """Кнопки больше нет, но старые карточки в чате могут её показывать."""
-    await callback.answer(
-        "Заказ не может быть ничейным — передай его на себя или напарнику.",
-        show_alert=True,
-    )
+@router.callback_query(F.data.regexp(r"^order_(reassign|reassign_cancel|takeover|takepos|unassign):"))
+async def cb_order_removed_button(callback: CallbackQuery):
+    """Смены исполнителя больше нет, но старые карточки в чате ещё могут
+    показывать её кнопки — перерисовываем карточку без них."""
+    await callback.answer("Этой кнопки больше нет — обновил карточку.")
     order = await _load(callback)
     if order:
         await _sync_order_messages(callback, order)
