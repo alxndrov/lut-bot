@@ -82,12 +82,17 @@ class CdekContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_old_barcode_uses_old_contract(self):
         order = await self.make_order("old", "old-uuid")
         self.old.get_barcode_pdf.return_value = b"pdf"
-        callback = SimpleNamespace(message=SimpleNamespace(reply_document=AsyncMock(
-            return_value=SimpleNamespace(document=SimpleNamespace(file_id="cached")))))
+        callback = SimpleNamespace(
+            from_user=SimpleNamespace(id=7),
+            message=SimpleNamespace(reply_document=AsyncMock(return_value=SimpleNamespace(
+                document=SimpleNamespace(file_id="cached"),
+                chat=SimpleNamespace(id=70), message_id=700))))
         await order_actions._deliver_barcode(callback, order, "order", "caption")
         self.old.get_barcode_pdf.assert_awaited_once()
         self.new.get_barcode_pdf.assert_not_awaited()
         self.assertEqual((await db.get_order(order["id"]))["cdek_barcode_file_id"], "cached")
+        # Наклейка уберётся вместе со списком при следующем /orders
+        self.assertEqual(await db.get_admin_command_messages("orders", 70, 7), [700])
 
     async def test_retry_after_timeout_keeps_original_contract(self):
         order = await self.make_order("old")
