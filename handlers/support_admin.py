@@ -9,7 +9,7 @@ from aiogram import Router, Bot, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, ForceReply, Message
+from aiogram.types import CallbackQuery, Message
 
 import config
 import database as db
@@ -30,25 +30,41 @@ async def cb_support_reply(callback: CallbackQuery, state: FSMContext):
     Раньше рассчитывали только на Reply к подсказке. Но на ForceReply
     полагаться нельзя: ответ легко отправить и без цитаты, тогда его не
     ловил никто и он молча пропадал. Поэтому запоминаем, кому отвечаем.
+    ForceReply у подсказки тоже нет: Telegram держит его, пока на подсказку
+    не ответят Reply, и при каждом открытии чата снова предлагал ответить.
+    Подсказку удаляем, как только ответ ушёл или его отменили.
     """
     if callback.from_user.id not in config.ADMIN_IDS:
         await callback.answer("Только для администраторов.", show_alert=True)
         return
     user_id = int(callback.data.split(":", 1)[1])
     await callback.answer()
+    await _drop_prompt(callback.bot, state)   # прошлая подсказка, если была
     await state.set_state(SupportReplyState.waiting_answer)
-    await state.update_data(support_user_id=user_id)
     prompt = await callback.message.answer(
         "✍️ Напишите ответ клиенту — он придёт ему в основной бот.\n"
         "Отменить — /cancel.",
-        reply_markup=ForceReply(),
     )
+    await state.update_data(support_user_id=user_id,
+                            prompt=[prompt.chat.id, prompt.message_id])
     # Reply на подсказку тоже работает — через support_messages
     await db.add_support_message(prompt.chat.id, prompt.message_id, user_id)
 
 
+async def _drop_prompt(bot: Bot, state: FSMContext):
+    """Удаляет подсказку «Напишите ответ клиенту» — она своё отработала."""
+    prompt = (await state.get_data()).get("prompt")
+    if not prompt:
+        return
+    try:
+        await bot.delete_message(prompt[0], prompt[1])
+    except Exception as e:
+        logger.debug(f"support: не удалить подсказку {prompt}: {e}")
+
+
 @router.message(Command("cancel"), SupportReplyState.waiting_answer)
 async def cmd_cancel_reply(message: Message, state: FSMContext):
+    await _drop_prompt(message.bot, state)
     await state.clear()
     await message.answer("❌ Ответ отменён.")
 
@@ -102,6 +118,7 @@ async def _send_to_client(message: Message, support_user_id: int) -> bool:
 @router.message(SupportReplyState.waiting_answer, ~(F.text & F.text.startswith("/")))
 async def on_reply_after_button(message: Message, state: FSMContext):
     data = await state.get_data()
+    await _drop_prompt(message.bot, state)
     await state.clear()
     user_id = data.get("support_user_id")
     if not user_id:
