@@ -107,8 +107,12 @@ async def handle_webhook(request: web.Request, secret: str | list = "") -> web.R
 
 
 async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type: str,
-                            prodamus_order_id: str, amount: int) -> bool | None:
+                            prodamus_order_id: str, amount: int,
+                            gift: bool = False) -> bool | None:
     """Проводит оплаченный заказ: покупка, уведомление админам, выдача товара.
+
+    gift — заказ для друга в подарок (handlers/friend_order.py): заказ уходит
+    в работу как обычно, но без оплаты и без строки покупки (не выручка).
 
     Вызывается вебхуком Prodamus, а также вручную из админки, если вебхук
     не дошёл (перезапуск бота, сбой сети). Повторный вызов безопасен —
@@ -249,7 +253,7 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         weights = {pid: products_by_id[pid]["price"] * counts[pid] for pid in order_ids}
         weight_total = sum(weights.values()) or 1
         remaining_goods = goods_amount_total
-        for i, pid in enumerate(order_ids):
+        for i, pid in enumerate(order_ids if not gift else []):
             if i == len(order_ids) - 1:
                 row_goods = remaining_goods
             else:
@@ -270,6 +274,10 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         # Полное уведомление о заказе — только сейчас, после успешной оплаты.
         # Идёт в админский бот (malimadmins) с кнопкой «Взял заказ».
         whos = await _default_whos(len(rounds))
+        if pending.get("friend_by"):
+            # Покупатель в заказе для друга — сам админ; в карточке важнее,
+            # что это друг и кто оформил
+            first_name, username_str = "🤝 Для друга", f"— оформил {pending['friend_by']}"
         summary = _format_order(
             first_name, username_str, product["name"], amount,
             delivery_info, rounds, now, order_number=order_code,
@@ -277,6 +285,8 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             # Анкета заполнена до смены палитры — номер цвета старый
             old_palette=is_old_palette(pending.get("created_at")),
         )
+        if gift:
+            summary = summary.replace("💵 0 ₽", "🎁 Подарок, без оплаты", 1)
         order_row_id = await db.create_order(
             user_id, product_id, prodamus_order_id, summary,
             rounds_json=json.dumps(rounds, ensure_ascii=False),
@@ -285,6 +295,8 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
             recipient_phone=pending.get("recipient_phone"),
             pvz_code=pending.get("pvz_code"),
             round_products_json=json.dumps(round_products, ensure_ascii=False),
+            pickup=bool(pending.get("pickup")),
+            friend_by=pending.get("friend_by"),
         )
 
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
@@ -325,6 +337,8 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         )
         fresh_order = await db.get_order(order_row_id)
         credits = await db.order_print_credits(fresh_order, [], config.ADMIN_IDS)
+        if gift:
+            goods_comment = f"Подарок другу: {goods_comment}"
         request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost,
                                comment=goods_comment, goods_type="Физический",
                                printer_positions=credits.get(config.PARTNER_ID, 0))
@@ -334,7 +348,8 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
 
         # Накладная СДЭК — отдельной задачей: создание асинхронное, ждать его
         # внутри вебхука нельзя, Prodamus ждёт быстрый ответ 200.
-        if config.CDEK_AUTO_ORDER:
+        # Самовывоз (только заказ для друга) — без накладной.
+        if config.CDEK_AUTO_ORDER and not pending.get("pickup"):
             asyncio.create_task(_create_cdek_order(
                 order_row_id, pending, round_products, products_by_id,
                 order_code, bot, user_id,
@@ -344,9 +359,16 @@ async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type:
         from services.gsheets import request_sync
         request_sync()
 
-        paid_text = (product.get("post_payment_text") or DEFAULT_POST_PAYMENT)
-        paid_text = paid_text.replace("{order}", order_code)
-        await bot.send_message(user_id, paid_text)
+        if pending.get("friend_by"):
+            # Заказ для друга оформлял админ — ему и подтверждение, а не
+            # клиентский текст «спасибо за заказ»
+            await bot.send_message(user_id, (
+                f"🎁 Подарок оформлен: заказ {order_code} ушёл в работу." if gift else
+                f"🤝 Друг оплатил заказ {order_code} — он ушёл в работу."))
+        else:
+            paid_text = (product.get("post_payment_text") or DEFAULT_POST_PAYMENT)
+            paid_text = paid_text.replace("{order}", order_code)
+            await bot.send_message(user_id, paid_text)
 
         # Пуш отзыва ставится не здесь: для физтовара отсчёт должен идти
         # от отправки, а не от оплаты — заказ может ждать печати неделями.

@@ -91,6 +91,18 @@ def _words(order: dict, positions=None) -> dict:
     return _PRINT_WORDS if not any(stock) else _MIXED_WORDS
 
 
+# Самовывоз (заказ для друга, handlers/friend_order.py): заказ не отправляют,
+# а выдают — те же отметки shipped_*, другие слова
+_SHIP_WORDS = {"icon": "📦", "btn": "📦 Заказ отправил", "did": "Отправлен",
+               "do": "Отправить", "all_done": "Отправлено", "stage": "отправлен"}
+_PICKUP_WORDS = {"icon": "🤝", "btn": "🤝 Заказ выдал", "did": "Выдан",
+                 "do": "Выдать", "all_done": "Выдано", "stage": "выдан"}
+
+
+def _ship(order: dict) -> dict:
+    return _PICKUP_WORDS if order.get("pickup") else _SHIP_WORDS
+
+
 def _my_positions(order: dict, viewer_id: int | None) -> list[int]:
     """Номера позиций, которые печатает этот админ."""
     if not viewer_id:
@@ -168,7 +180,7 @@ def order_assigned_keyboard(order: dict, viewer_id: int | None = None,
     # «Заказ отправил» — следующий шаг: появляется, когда всё распечатано
     # (собрано), чтобы не отметить отправку раньше времени
     if all(p in printed for p in range(1, total + 1)):
-        rows.append([InlineKeyboardButton(text="📦 Заказ отправил",
+        rows.append([InlineKeyboardButton(text=_ship(order)["btn"],
                                           callback_data=f"order_shipped:{oid}")])
     # «Повторить заказ» — только у отправленного (см. order_shipped_keyboard)
     from handlers.refunds import refund_rows
@@ -238,7 +250,8 @@ def _order_text(order: dict, prints: list | None = None) -> str:
             text += f" · {when}"
     if order.get("shipped_at"):
         when = _msk(order["shipped_at"])
-        text += f"\n📦 <b>Отправлен:</b> {order.get('shipped_by_name') or ''}"
+        sw = _ship(order)
+        text += f"\n{sw['icon']} <b>{sw['did']}:</b> {order.get('shipped_by_name') or ''}"
         if when:
             text += f" · {when}"
     if order.get("cdek_number"):
@@ -252,7 +265,8 @@ def order_shipped_keyboard(order_id: int, order: dict | None = None) -> InlineKe
     """Заказ отправлен — можно откатить отметку, оформить повтор или возврат."""
     from handlers.refunds import refund_rows
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="↩️ Отменить отметку об отправке",
+        [InlineKeyboardButton(text=("↩️ Отменить «выдал»" if (order or {}).get("pickup")
+                                    else "↩️ Отменить отметку об отправке"),
                               callback_data=f"order_unship:{order_id}")],
         [InlineKeyboardButton(text="🔁 Повторить заказ",
                               callback_data=f"order_repeat:{order_id}")],
@@ -366,16 +380,17 @@ def _list_item_text(order: dict, index: int, has_card: bool,
 
     if mode == "sent":
         when = _msk(order.get("shipped_at"))
-        action = "✅ Отправлено" + _products_label(order, list(range(1, total + 1)), total)
+        action = f"✅ {_ship(order)['all_done']}" + _products_label(order, list(range(1, total + 1)), total)
         action += f" · {when}" if when else ""
         if order.get("shipped_by_name"):
             action += f" · {order['shipped_by_name']}"
         if has_card and order.get("cdek_number"):
             action += f"\n📦 СДЭК {order['cdek_number']}"   # без карточки трек и так ниже
     elif order.get("shipped_at"):
-        action = "✅ <s>Отправлено</s>" + _products_label(order, list(range(1, total + 1)), total)
+        action = f"✅ <s>{_ship(order)['all_done']}</s>" + _products_label(order, list(range(1, total + 1)), total)
     elif not waiting:
-        action = "📦 Отправить" + _products_label(order, list(range(1, total + 1)), total)
+        sw = _ship(order)
+        action = f"{sw['icon']} {sw['do']}" + _products_label(order, list(range(1, total + 1)), total)
     elif total == 1:
         w = _words(order)
         action = f"{w['icon']} {w['do']}" + _products_label(order, [1], total)
@@ -568,7 +583,7 @@ async def _create_replacement_cdek(order_id: int, pending: dict,
 def _stage(order: dict, prints: list | None = None) -> tuple[str, str]:
     """Значок и подпись текущего этапа заказа."""
     if order.get("shipped_at"):
-        return "📦", "отправлен"
+        return _ship(order)["icon"], _ship(order)["stage"]
     if order.get("printed_at"):
         w = _words(order)
         return w["icon"], w["done"]
@@ -1087,7 +1102,7 @@ async def cb_order_shipped(callback: CallbackQuery):
         return
 
     if order.get("shipped_at"):
-        await callback.answer("Заказ уже отмечен как отправленный ✅")
+        await callback.answer(f"Заказ уже отмечен: {_ship(order)['stage']} ✅")
         await _sync_order_messages(callback, order)
         return
 
@@ -1109,7 +1124,8 @@ async def cb_order_shipped(callback: CallbackQuery):
 
     await db.set_order_shipped(order["id"], callback.from_user.id, _actor_name(callback))
     request_sync()
-    await callback.answer("Отмечено: заказ отправлен 📦")
+    sw = _ship(order)
+    await callback.answer(f"Отмечено: заказ {sw['stage']} {sw['icon']}")
 
     # Расходники (коробка/поп-фильтр) списываем в момент отправки — именно
     # тогда товар реально уходит в коробку, а не когда его напечатали.
@@ -1134,7 +1150,8 @@ async def cb_order_shipped(callback: CallbackQuery):
         order.get("round_products_json"), rounds, order["product_id"])
     if not round_products:
         round_products = [order["product_id"]]
-    for pid in dict.fromkeys(round_products):
+    # Заказ для друга оформлял админ — просьба об отзыве ушла бы ему
+    for pid in dict.fromkeys(round_products if not order.get("friend_by") else []):
         product = await db.get_product(pid)
         if product and product.get("review_push_delay"):
             await db.enqueue_review_push(order["user_id"], pid,
@@ -1152,7 +1169,8 @@ async def cb_order_unship(callback: CallbackQuery):
         return
 
     if not order.get("shipped_at"):
-        await callback.answer("Отметки об отправке нет.")
+        await callback.answer("Отметки о выдаче нет." if order.get("pickup")
+                              else "Отметки об отправке нет.")
         await _sync_order_messages(callback, order)
         return
 
@@ -1173,7 +1191,8 @@ async def cb_order_unship(callback: CallbackQuery):
 
     await db.clear_order_shipped(order["id"])
     request_sync()
-    await callback.answer("Отметка об отправке снята ↩️")
+    await callback.answer("Отметка о выдаче снята ↩️" if order.get("pickup")
+                          else "Отметка об отправке снята ↩️")
     order = await db.get_order(order["id"])
     await _sync_order_messages(callback, order)
 

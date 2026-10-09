@@ -725,6 +725,14 @@ async def init_db(existing_cdek_contract: str | None = None):
             if existing_cdek_contract:
                 await db.execute("UPDATE orders SET cdek_contract = ?",
                                  (existing_cdek_contract,))
+        # Заказ для друга (оформляет админ, см. handlers/friend_order.py):
+        # friend_by — кто оформил, pickup — самовывоз без накладной СДЭК
+        for table in ("pending_deliveries", "orders"):
+            for col in ("pickup INTEGER DEFAULT 0", "friend_by TEXT DEFAULT NULL"):
+                try:
+                    await db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
+                except Exception:
+                    pass
         # Повторный заказ по решению администратора: клиент ничего не
         # оплачивает и товар не возвращает, а новую доставку оплачиваем мы.
         # Отдельные поля не смешивают такой заказ с покупками/выручкой.
@@ -2041,7 +2049,8 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                                 pvz_code: str | None = None,
                                 delivery_amount: int = 0,
                                 delivery_cost: float = 0.0,
-                                round_products_json: str | None = None):
+                                round_products_json: str | None = None,
+                                pickup: bool = False, friend_by: str | None = None):
     """Сохраняет детали будущего заказа (адрес + ответы опроса + сумму) до оплаты.
 
     ФИО, телефон и код ПВЗ нужны, чтобы после оплаты завести заказ в СДЭК.
@@ -2055,8 +2064,8 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
             """INSERT INTO pending_deliveries
                    (user_id, product_id, delivery_str, survey_json, amount,
                     recipient_name, recipient_phone, pvz_code, delivery_amount,
-                    delivery_cost, round_products_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    delivery_cost, round_products_json, pickup, friend_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, product_id) DO UPDATE SET
                    delivery_str = excluded.delivery_str,
                    survey_json = excluded.survey_json,
@@ -2067,11 +2076,13 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                    delivery_amount = excluded.delivery_amount,
                    delivery_cost = excluded.delivery_cost,
                    round_products_json = excluded.round_products_json,
+                   pickup = excluded.pickup,
+                   friend_by = excluded.friend_by,
                    created_at = CURRENT_TIMESTAMP,
                    nudged_at = NULL""",
             (user_id, product_id, delivery_str, survey_json, amount,
              recipient_name, recipient_phone, pvz_code, delivery_amount,
-             delivery_cost, round_products_json),
+             delivery_cost, round_products_json, int(bool(pickup)), friend_by),
         )
         await db.commit()
 
@@ -2145,17 +2156,18 @@ async def create_order(user_id: int, product_id: int, prodamus_order_id: str,
                        recipient_name: str | None = None,
                        recipient_phone: str | None = None,
                        pvz_code: str | None = None,
-                       round_products_json: str | None = None) -> int:
+                       round_products_json: str | None = None,
+                       pickup: bool = False, friend_by: str | None = None) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO orders
                    (user_id, product_id, prodamus_order_id, summary, rounds_json,
                     order_code, recipient_name, recipient_phone, pvz_code,
-                    round_products_json)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    round_products_json, pickup, friend_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (user_id, product_id, prodamus_order_id, summary, rounds_json,
              order_code, recipient_name, recipient_phone, pvz_code,
-             round_products_json),
+             round_products_json, int(bool(pickup)), friend_by),
         )
         await db.commit()
         return cur.lastrowid
@@ -2198,15 +2210,17 @@ async def create_replacement_order(source_order_id: int, order_code: str,
                         round_products_json, routing_json, printer_ids,
                         assignee_id, assignee_name,
                         repeat_of_order_id, repeat_created_by_id,
-                        repeat_created_by_name, covered_delivery_cost)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        repeat_created_by_name, covered_delivery_cost,
+                        pickup, friend_by)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (source["user_id"], source["product_id"], synthetic_payment_id,
                  summary, source["rounds_json"], order_code,
                  source["recipient_name"], source["recipient_phone"],
                  source["pvz_code"], source["round_products_json"],
                  source["routing_json"], source["printer_ids"],
                  source["assignee_id"], source["assignee_name"], source_order_id,
-                 actor_id, actor_name, max(0.0, float(delivery_cost or 0))),
+                 actor_id, actor_name, max(0.0, float(delivery_cost or 0)),
+                 source["pickup"] or 0, source["friend_by"]),
             )
             await db.commit()
             return int(cur.lastrowid), True

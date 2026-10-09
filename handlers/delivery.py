@@ -163,6 +163,8 @@ async def start_delivery_flow(target: Message, state: FSMContext, product_id: in
     """
     if not CDEK_CLIENT:
         return False
+    # Заказ для друга (метку ставит только админский handlers/friend_order.py)
+    friend_by = (await state.get_data()).get("friend_by")
     await state.clear()
     await state.set_state(DeliveryOrder.waiting_city)
     await state.update_data(
@@ -170,7 +172,12 @@ async def start_delivery_flow(target: Message, state: FSMContext, product_id: in
         quantity=max(1, quantity),
         rounds=rounds or [],
         round_products=round_products or [product_id] * max(1, quantity),
+        friend_by=friend_by,
     )
+    if friend_by:
+        from handlers.friend_order import ask_receive_method
+        await ask_receive_method(target, state)
+        return True
     await target.answer(
         "🚚 Осталось оформить доставку СДЭК.\n\n"
         "Введи свой <b>город</b> — рассчитаю стоимость:",
@@ -610,6 +617,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
         delivery_str += f" (код ПВЗ: {pvz_code})"
     if name:
         delivery_str += f"\nПолучатель: {name}, {phone}"
+    friend_by = data.get("friend_by")
     rounds = data.get("rounds") or []
     await db.save_pending_delivery(
         user_id, product["id"], delivery_str,
@@ -621,7 +629,17 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
         delivery_amount=delivery_cost,
         delivery_cost=round(delivery_real, 2),
         round_products_json=json.dumps(round_products, ensure_ascii=False),
+        friend_by=friend_by,
     )
+
+    if friend_by:
+        from handlers.friend_order import send_friend_confirm
+        await state.clear()
+        await send_friend_confirm(
+            message, text.replace("📋 <b>Подтверждение заказа</b>", "📋 <b>Заказ для друга</b>")
+                         .replace("\n\nПосле оплаты я свяжусь с тобой для уточнения деталей доставки.", ""),
+            product["id"], user_id, total, _goods_payment_name(goods_items))
+        return
 
     if not config.PRODAMUS_SHOP_URL_PHYSICAL:
         await state.clear()

@@ -621,8 +621,8 @@ def refund_line(order: dict) -> str:
 def refund_rows(order: dict) -> list[list[InlineKeyboardButton]]:
     """Кнопки возврата: оформить, а после — дописать то, что было неизвестно."""
     oid = order["id"]
-    if order.get("repeat_of_order_id"):
-        return []      # бесплатный повтор — денег за него не платили
+    if order.get("repeat_of_order_id") or str(order.get("prodamus_order_id") or "").startswith("gift:"):
+        return []      # бесплатный повтор или подарок другу — денег за них не платили
     if not order.get("refunded_at"):
         return [[InlineKeyboardButton(text="💸 Провести возврат", callback_data=f"rf:start:{oid}")]]
     rows = []
