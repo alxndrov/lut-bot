@@ -100,7 +100,7 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
         self.bundle = await db.add_course_option(14, "bundle", "Пакет", "shooting,editing",
                                                  4490, 5990, 3, review_bonus=True)
         self.vip = await db.add_course_option(14, "vip", "VIP", "shooting,editing",
-                                              12490, 12490, 4, review_bonus=True)
+                                              12490, 12490, 4)
         async with aiosqlite.connect(db.DB_PATH) as conn:
             await conn.execute("UPDATE course_options SET call_bonus = 1 WHERE id = ?", (self.vip,))
             await conn.commit()
@@ -136,6 +136,7 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
         state = await course_handler._app_state({"id": 7}, "bot")
         self.assertFalse(state["call"]["expired"])
         self.assertIsNone(state["vip"])  # уже куплен — не предлагаем
+        self.assertEqual(await self._count("bundle_review_queue"), 0)
         await db.clear_test_course_access(7)
         self.assertIsNone(await db.get_user_course_call(7))
 
@@ -175,11 +176,16 @@ class VipCallTest(unittest.TestCase):
         self.assertEqual(svc.call_expires_at(datetime(2026, 11, 20, tzinfo=msk)), "2027-01-20")
         self.assertEqual(svc.call_expires_at(datetime(2026, 12, 31, tzinfo=msk)), "2027-02-28")
 
-    def test_vip_not_offered_after_one_section(self):
+    def test_vip_upgrade_for_owners(self):
         opts = [{"slug": "shooting", "sections": "shooting"},
-                {"slug": "vip", "sections": "shooting,editing", "call_bonus": 1}]
-        self.assertEqual([o["slug"] for o in svc.available_options(opts, set())], ["shooting", "vip"])
-        self.assertEqual([o["slug"] for o in svc.available_options(opts, {"shooting"})], [])
+                {"slug": "vip", "sections": "shooting,editing", "call_bonus": 1,
+                 "price": 12490, "price_mid": 12490, "price_full": 12490}]
+        slugs = lambda owned, call=False: [o["slug"] for o in svc.available_options(opts, owned, call)]
+        self.assertEqual(slugs(set()), ["shooting", "vip"])
+        self.assertEqual(slugs({"shooting", "editing"}), ["vip"])
+        self.assertEqual(slugs({"shooting", "editing"}, call=True), [])
+        self.assertEqual(svc.price_for_user(opts[1], 0), 12490)
+        self.assertEqual(svc.price_for_user(opts[1], 4990), 7500)
 
 
 if __name__ == "__main__":

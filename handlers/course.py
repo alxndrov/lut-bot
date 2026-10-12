@@ -31,11 +31,11 @@ WEBAPP_DIR = Path(__file__).resolve().parent.parent / "webapp"
 
 # ── Экран покупки ──────────────────────────────────────────────────────────────
 
-def _payment_url(option: dict, user_id: int) -> str:
+def _payment_url(option: dict, user_id: int, price: int) -> str:
     return build_payment_url(
         shop_url=config.PRODAMUS_SHOP_URL,
         product_name=option["title"],
-        price=svc.price_for(option),
+        price=price,
         user_id=user_id,
         product_id=option["id"],
         order_type="c",
@@ -88,6 +88,8 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
         return None
     options = await db.get_course_options(product["id"])
     owned = await db.get_user_course_sections(user_id)
+    paid = await db.get_user_course_paid(user_id)
+    has_call = bool(await db.get_user_course_call(user_id))
     full = svc.is_full_price()
     reviews_left = max(0, config.BUNDLE_REVIEW_LIMIT - await db.count_bundle_reviews())
 
@@ -100,7 +102,12 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
         price = svc.rub(svc.price_for(o))
         later = ("" if full or o["price_full"] <= svc.price_for(o)
                  else f" <s>{svc.rub(o['price_full'])}</s>")
-        mark = " ✓ куплено" if set(svc.option_sections(o)) <= owned else ""
+        if svc.is_call_option(o):
+            topup = svc.price_for_user(o, paid)
+            mark = (" ✓ куплено" if has_call else
+                    f" · тебе доплата {svc.rub(topup)}" if owned and topup < svc.price_for(o) else "")
+        else:
+            mark = " ✓ куплено" if set(svc.option_sections(o)) <= owned else ""
         lines.append(f"• <b>{o['title']}</b> — {price}{later}{mark}")
     schedule = svc.price_schedule_text()
     if schedule:
@@ -121,10 +128,16 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
 
     rows = []
     if config.PRODAMUS_SHOP_URL:
-        for o in svc.available_options(options, owned):
-            label = "Докупить " + o["title"] if owned else o["title"]
+        for o in svc.available_options(options, owned, has_call):
+            price = svc.price_for_user(o, paid)
+            if not price:
+                continue
+            if owned and svc.is_call_option(o):
+                label = "Перейти на VIP (созвон с Мишей)"
+            else:
+                label = "Докупить " + o["title"] if owned else o["title"]
             rows.append([InlineKeyboardButton(
-                text=f"💳 {label} · {svc.rub(svc.price_for(o))}", url=_payment_url(o, user_id))])
+                text=f"💳 {label} · {svc.rub(price)}", url=_payment_url(o, user_id, price))])
         if rows:
             rows.append([InlineKeyboardButton(text="🔄 Я оплатил", callback_data="course:check")])
     button = app_button()
@@ -258,7 +271,10 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
         extra = f"\n🎁 Разбор: место {position} из {config.BUNDLE_REVIEW_LIMIT}" if position else ""
         if svc.is_call_option(option):
             extra += f"\n📞 Созвон VIP — до {svc.date_text(svc.call_expires_at())}"
-        again = "\n♻️ Докупка второго раздела" if owned_before else ""
+        again = ""
+        if owned_before:
+            again = ("\n⬆️ Переход на VIP — доплата" if svc.is_call_option(option)
+                     else "\n♻️ Докупка второго раздела")
         await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {user.get('first_name') or '—'} {who}\n"
                           f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}")
 
@@ -417,8 +433,9 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             "reviewer": config.COURSE_REVIEWER,
             "sent": bool(last),
         },
-        "vip": {"title": vip["title"], "price": svc.price_for(vip)}
-               if vip and not owned else None,
+        "vip": {"title": vip["title"], "upgrade": bool(owned),
+                "price": svc.price_for_user(vip, await db.get_user_course_paid(user_id))}
+               if vip and not call else None,
         "call": {
             "until": svc.date_text(call["expires_at"]),
             "expired": svc.now_msk().date().isoformat() > call["expires_at"],

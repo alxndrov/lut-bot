@@ -143,6 +143,15 @@ def is_call_option(option: dict) -> bool:
     return bool(option.get("call_bonus"))
 
 
+def price_for_user(option: dict, paid: int, now: datetime | None = None) -> int:
+    """Цена опции для человека. На VIP уже купившие доплачивают разницу:
+    цена VIP минус всё, что заплачено за курс раньше."""
+    price = price_for(option, now)
+    if is_call_option(option) and paid:
+        return max(0, price - paid)
+    return price
+
+
 def option_sections(option: dict) -> list[str]:
     return [s for s in (option.get("sections") or "").split(",") if s]
 
@@ -192,11 +201,16 @@ def rub(amount: int | float) -> str:
     return f"{int(amount):,}".replace(",", " ") + " ₽"
 
 
-def available_options(options: list[dict], owned: set[str]) -> list[dict]:
+def available_options(options: list[dict], owned: set[str], has_call: bool = False) -> list[dict]:
     """Что ещё имеет смысл купить: опции, которые откроют хотя бы один новый
-    раздел. Купившему один раздел пакет не предлагаем — только второй раздел."""
+    раздел. Купившему один раздел пакет не предлагаем — только второй раздел.
+    VIP (созвон) предлагаем всем, у кого созвона ещё нет, — уже купившим с доплатой."""
     result = []
     for o in options:
+        if is_call_option(o):
+            if not has_call:
+                result.append(o)
+            continue
         secs = set(option_sections(o))
         if not secs or secs <= owned:
             continue

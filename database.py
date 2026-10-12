@@ -4159,6 +4159,16 @@ async def mark_course_call_requested(call_id: int):
         await db.commit()
 
 
+async def get_user_course_paid(user_id: int) -> int:
+    """Сколько человек уже заплатил за курс (для доплаты при переходе на VIP)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT COALESCE(SUM(amount), 0) FROM purchases
+               WHERE user_id = ? AND course_option_id IS NOT NULL""", (user_id,)
+        ) as cur:
+            return int((await cur.fetchone())[0])
+
+
 async def get_bundle_review_position(user_id: int) -> Optional[int]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(

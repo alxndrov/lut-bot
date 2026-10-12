@@ -412,9 +412,11 @@
       if (!data.vip) return '';
       return '<div class="card"><p class="eyebrow red">VIP · созвон с Мишей</p>' +
              '<div class="hero-row"><span class="big-num">1:1</span><div><b>Личный созвон на час</b>' +
-             '<small>' + esc(data.vip.title) + ' · ' + rub(data.vip.price) + '</small></div></div>' +
-             '<p class="note">Пакет + час на твои вопросы. Когда созвониться — решаешь сам: до или после курса, в течение 2 месяцев после покупки.</p>' +
-             '<button class="btn" type="button" data-buy>Взять VIP</button></div>';
+             '<small>' + (data.vip.upgrade ? 'Доплата ' + rub(data.vip.price) : esc(data.vip.title) + ' · ' + rub(data.vip.price)) + '</small></div></div>' +
+             '<p class="note">' + (data.vip.upgrade ? 'Уроки у тебя уже есть — доплати и получи час с Мишей на твои вопросы и разбор твоих работ.'
+                                                     : 'Пакет + час с Мишей на твои вопросы и разбор твоих работ.') +
+             ' Когда созвониться — решаешь сам: до или после курса, в течение 2 месяцев после покупки.</p>' +
+             '<button class="btn" type="button" data-buy>' + (data.vip.upgrade ? 'Перейти на VIP' : 'Взять VIP') + '</button></div>';
     }
     var h = '<div class="card"><p class="eyebrow red">VIP' + (c.test ? ' · тест' : '') + ' · созвон с Мишей</p>' +
             '<div class="hero-row"><span class="big-num">1:1</span><div><b>Личный созвон на час</b>' +
@@ -562,7 +564,7 @@
         { kind: 'pdf', title: 'Баланс белого', url: '' }, { kind: 'pdf', title: 'Выдержка', url: '' },
         { kind: 'pdf', title: 'ISO без шума', url: '' }, { kind: 'pdf', title: 'False color', url: '' }
       ],
-      review: { eligible: true, test: true, position: null, limit: 15, left: 15, reviewer: 'baryshovv', sent: false },
+      review: { eligible: true, test: true, position: null, limit: 10, left: 10, reviewer: 'baryshovv', sent: false },
       options: [{ id: 1, title: 'Shot on iPhone — съёмка' }, { id: 2, title: 'Cut by MALIMABI — монтаж' }, { id: 3, title: 'Пакет: съёмка + монтаж' }],
       buy_url: ''
     };
