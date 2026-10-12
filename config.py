@@ -128,6 +128,8 @@ BUNDLE_REVIEW_LIMIT: int = int(os.getenv("BUNDLE_REVIEW_LIMIT", "10"))
 # Кто делает личный разбор для первых покупателей пакета — так в текстах бота
 COURSE_REVIEWER: str = os.getenv("COURSE_REVIEWER", "Миша")
 MINIAPP_URL: str = os.getenv("MINIAPP_URL", "")
+# Где проходит созвон VIP — так в подтверждении и напоминаниях клиенту
+COURSE_CALL_WHERE: str = os.getenv("COURSE_CALL_WHERE", "звонок в Telegram")
 COURSE_OFFER_URL: str = os.getenv("COURSE_OFFER_URL", "") or OFFER_URL
 # Сколько живёт подпись initData мини-приложения
 WEBAPP_AUTH_MAX_AGE: int = int(os.getenv("WEBAPP_AUTH_MAX_AGE", str(24 * 3600)))

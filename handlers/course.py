@@ -383,6 +383,7 @@ async def _app_user(request: web.Request) -> tuple[dict | None, dict]:
 
 
 async def _app_state(user: dict, bot_username: str, preview_open: bool = False) -> dict:
+    from handlers import course_orders
     user_id = user["id"]
     admin = user_id in config.ADMIN_IDS
     owned = await db.get_user_course_sections(user_id)
@@ -419,7 +420,8 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
     position = await db.get_bundle_review_position(user_id)
     taken = await db.count_bundle_reviews()
     review_test = admin and {"shooting", "editing"} <= test_owned
-    last = await db.get_last_course_review_request(user_id)
+    review_order = await db.get_user_course_order(user_id, "review")
+    call_order = await db.get_user_course_order(user_id, "call")
     return {
         "first_name": user.get("first_name") or "",
         "admin": admin,
@@ -441,16 +443,24 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             "limit": config.BUNDLE_REVIEW_LIMIT,
             "left": max(0, config.BUNDLE_REVIEW_LIMIT - taken),
             "reviewer": config.COURSE_REVIEWER,
-            "sent": bool(last),
+            "sent": bool(review_order),
+            # open — ролик у Миши, done — разбор отправлен
+            "status": review_order["status"] if review_order else None,
+            "due": svc.date_text(review_order["due_at"]) if review_order else None,
+            "link": review_order["link"] if review_order else None,
         },
         "vip": {"title": vip["title"], "upgrade": bool(owned),
                 "price": svc.price_for_user(vip, await db.get_user_course_paid(user_id))}
                if vip and not call else None,
         "call": {
             "until": svc.date_text(call["expires_at"]),
-            "expired": svc.now_msk().date().isoformat() > call["expires_at"],
-            "requested": bool(call["requested_at"]),
-            "done": bool(call["done_at"]),
+            "expired": svc.now_msk().date().isoformat() > call["expires_at"] and not call_order,
+            "requested": bool(call_order),
+            "scheduled": course_orders.call_time_text(call_order)
+                         if call_order and call_order.get("scheduled_at") else None,
+            "where": config.COURSE_CALL_WHERE,
+            "done": bool(call_order and call_order["status"] == "done"),
+            "missed": bool(call_order and call_order["status"] == "missed"),
             "test": bool(call["test"]),
         } if call else None,
         "options": [{"id": o["id"], "slug": o["slug"], "title": o["title"]} for o in options]
@@ -493,7 +503,7 @@ async def api_test(request: web.Request) -> web.Response:
 
 
 async def api_review(request: web.Request) -> web.Response:
-    """Заявка на личный разбор: ссылка на видео и вопрос — партнёрам в админ-бот."""
+    """Ролик на разбор → заказ по курсу (см. handlers/course_orders.py)."""
     user, body = await _app_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
@@ -503,48 +513,36 @@ async def api_review(request: web.Request) -> web.Response:
         return web.json_response({"error": "Разбор — для первых покупателей пакета."}, status=403)
     if not state["open"]:
         return web.json_response({"error": f"Заявки откроются {state['open_date']}."}, status=403)
+    if review["status"] == "done":
+        return web.json_response({"error": "Разбор уже отправлен — он в чате с ботом."},
+                                 status=400)
     link = str(body.get("link") or "").strip()[:500]
     question = str(body.get("question") or "").strip()[:2000]
     if not link.lower().startswith(("http://", "https://")):
         return web.json_response({"error": "Нужна ссылка на видео — начинается с https://"},
                                  status=400)
-    test = review["test"]
-    await db.add_course_review_request(user["id"], link, question, test)
-    from handlers.prodamus_webhook import _send_notify
-    from html import escape
-    who = f"@{user['username']}" if user.get("username") else f"id:{user['id']}"
-    place = f"место {review['position']} из {review['limit']}" if review["position"] else "тест"
-    await _send_notify(None, (
-        f"{'🧪 ТЕСТ · ' if test else ''}🎬 <b>Заявка на разбор</b> ({place})\n\n"
-        f"👤 {escape(user.get('first_name') or '—')} {escape(who)}\n"
-        f"🔗 {escape(link)}\n"
-        + (f"❓ {escape(question)}" if question else "")))
-    state["review"]["sent"] = True
-    return web.json_response(state)
+    from handlers import course_orders
+    await course_orders.submit_review(user, link, question, review["test"])
+    return web.json_response(await _app_state(user, request.app.get("bot_username") or "",
+                                              bool(body.get("preview_open"))))
 
 
 async def api_call(request: web.Request) -> web.Response:
-    """VIP: «Договориться о созвоне» — партнёрам в админ-бот, дальше пишут сами."""
+    """VIP: «Договориться о созвоне» → заказ по курсу, админы пишут клиенту сами."""
     user, body = await _app_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
     call = await db.get_user_course_call(user["id"])
     if not call:
         return web.json_response({"error": "Созвон входит в пакет VIP."}, status=403)
-    if call["done_at"]:
+    order = await db.get_user_course_order(user["id"], "call")
+    if order and order["status"] in ("done", "missed"):
         return web.json_response({"error": "Созвон уже прошёл."}, status=400)
-    if svc.now_msk().date().isoformat() > call["expires_at"]:
+    if svc.now_msk().date().isoformat() > call["expires_at"] and not order:
         return web.json_response({"error": "Срок созвона истёк."}, status=400)
     await db.mark_course_call_requested(call["id"])
-    from handlers.prodamus_webhook import _send_notify
-    from html import escape
-    who = f"@{user['username']}" if user.get("username") else f"id:{user['id']}"
-    await _send_notify(None, (
-        f"{'🧪 ТЕСТ · ' if call['test'] else ''}📞 <b>VIP: договориться о созвоне</b>\n\n"
-        f"👤 {escape(user.get('first_name') or '—')} {escape(who)} · "
-        f"<a href=\"tg://user?id={user['id']}\">написать</a>\n"
-        f"⏳ Провести до {svc.date_text(call['expires_at'])}\n\n"
-        f"Напишите человеку и договоритесь о времени (1 час с Мишей)."))
+    from handlers import course_orders
+    await course_orders.request_call(user, call)
     return web.json_response(await _app_state(user, request.app.get("bot_username") or "",
                                               bool(body.get("preview_open"))))
 

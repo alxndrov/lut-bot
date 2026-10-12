@@ -11,7 +11,7 @@ import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds
-from handlers import course, course_admin, friend_order
+from handlers import course, course_admin, course_orders, friend_order
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
 from services.finance_reports import report_loop
@@ -75,6 +75,7 @@ async def main():
     asyncio.create_task(review_push_worker(bot))
     asyncio.create_task(cdek_tracking_worker(bot))
     asyncio.create_task(cdek_retry_worker(bot))
+    asyncio.create_task(course_orders.reminder_loop())
 
     # Запускаем aiohttp-сервер для приёма вебхуков от Prodamus
     webhook_app = create_webhook_app(bot)
@@ -97,6 +98,8 @@ async def main():
         admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
         admin_dp = Dispatcher(storage=MemoryStorage())
         admin_dp.update.outer_middleware(MessageLogMiddleware("админ"))
+        # Первым: ловит ответы на карточки заказов по курсу и ввод времени созвона
+        admin_dp.include_router(course_orders.router)
         admin_dp.include_router(operations_menu.router)
         admin_dp.include_router(order_actions.router)
         admin_dp.include_router(refunds.router)
@@ -124,6 +127,7 @@ async def main():
             await admin_bot.set_my_commands([
                 BotCommand(command="orders", description="📋 Заказы в работе"),
                 BotCommand(command="sentorders", description="📦 Отправленные заказы"),
+                BotCommand(command="courseorders", description="🎓 Заказы по курсу"),
                 BotCommand(command="finance", description="💳 Финансы"),
                 BotCommand(command="stock", description="📦 Расходники"),
                 BotCommand(command="reviews", description="⭐️ Отзывы клиентов"),

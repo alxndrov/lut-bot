@@ -197,5 +197,66 @@ class VipCallTest(unittest.TestCase):
         self.assertEqual(svc.price_for_user(opts[1], 4990), 7500)
 
 
+class CourseOrdersTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        from handlers import course_orders as co
+        self.co = co
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_path = db.DB_PATH
+        db.DB_PATH = os.path.join(self.tmp.name, "test.db")
+        await db.init_db()
+        self.sent = []
+        self.patches = {}
+        async def cards(order_id, note=""): self.sent.append(("cards", order_id))
+        async def admins(text, order_id=None): self.sent.append(("admins", text))
+        async def client(uid, text, app_button=False):
+            self.sent.append(("client", uid, text)); return True
+        for name, fn in (("send_cards", cards), ("_tell_admins", admins), ("_tell_client", client)):
+            self.patches[name] = getattr(co, name)
+            setattr(co, name, fn)
+        async def sync(bot, order_id): pass
+        self.patches["sync_cards"] = co.sync_cards
+        co.sync_cards = sync
+
+    async def asyncTearDown(self):
+        for name, fn in self.patches.items():
+            setattr(self.co, name, fn)
+        db.DB_PATH = self.old_path
+        self.tmp.cleanup()
+
+    async def test_review_resubmit_replaces_video_in_same_order(self):
+        user = {"id": 7, "first_name": "Аня"}
+        first = await self.co.submit_review(user, "https://a", "почему шум", False)
+        second = await self.co.submit_review(user, "https://b", "", False)
+        self.assertEqual(first["id"], second["id"])
+        self.assertEqual(second["link"], "https://b")
+        self.assertEqual([s[0] for s in self.sent], ["cards", "admins"])
+        self.assertIn("К-", self.co.card_text(second))
+
+    async def test_call_request_once_and_reminders(self):
+        msk = svc.MSK
+        user = {"id": 8, "first_name": "Боря"}
+        call = {"expires_at": "2026-12-12", "test": 0}
+        order = await self.co.request_call(user, call)
+        again = await self.co.request_call(user, call)
+        self.assertEqual(order["id"], again["id"])
+        await db.update_course_order(order["id"], status="scheduled", scheduled_at="2026-11-14 19:00")
+        self.sent.clear()
+        await self.co.reminder_tick(datetime(2026, 11, 13, 20, 0, tzinfo=msk))   # за 23 ч
+        await self.co.reminder_tick(datetime(2026, 11, 13, 21, 0, tzinfo=msk))   # повтор — тишина
+        await self.co.reminder_tick(datetime(2026, 11, 14, 18, 0, tzinfo=msk))   # за час
+        kinds = [s[0] for s in self.sent]
+        self.assertEqual(kinds, ["client", "admins", "client", "admins"])
+        self.assertIn("завтра", self.sent[0][2])
+        self.assertIn("Через час", self.sent[2][2])
+
+    def test_parse_call_time(self):
+        now = datetime(2026, 11, 10, 12, 0, tzinfo=svc.MSK)
+        self.assertEqual(self.co.parse_call_time("14.11 19:00", now),
+                         datetime(2026, 11, 14, 19, 0, tzinfo=svc.MSK))
+        self.assertEqual(self.co.parse_call_time("2.01 в 9.30", now).year, 2027)
+        self.assertIsNone(self.co.parse_call_time("завтра вечером", now))
+
+
 if __name__ == "__main__":
     unittest.main()

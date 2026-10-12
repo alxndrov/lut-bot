@@ -79,6 +79,10 @@ async def build(start: datetime, end: datetime) -> str:
                           for r in lookers[:LIST_LIMIT])
         more = f" и ещё {len(lookers) - LIST_LIMIT}" if len(lookers) > LIST_LIMIT else ""
         lines += ["", f"🎬 Впервые смотрели курс и не купили: <b>{len(lookers)}</b> — {names}{more}"]
+    from handlers.course_orders import report_line
+    course_line = await report_line()
+    if course_line:
+        lines += ["", course_line]
     lines += ["", f"Всего в списке незавершённых сейчас: {total_now}",
               "<i>📨 — уже спрашивали. Спросить клиента: админка основного бота → "
               "🛒 Незавершённые заказы.</i>"]

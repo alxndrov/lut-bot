@@ -422,6 +422,8 @@
             '<div class="hero-row"><span class="big-num">1:1</span><div><b>Личный созвон на час</b>' +
             '<small>До или после курса — не позднее ' + esc(c.until) + '</small></div></div>';
     if (c.done) h += '<p class="note ok">✓ Созвон прошёл.</p>';
+    else if (c.missed) h += '<p class="note">Созвон не состоялся. Если это ошибка — напиши в поддержку (/help).</p>';
+    else if (c.scheduled) h += '<p class="note ok">📅 ' + esc(c.scheduled) + ', ' + esc(c.where) + '. Напомним за день и за час.</p>';
     else if (c.expired) h += '<p class="note">Срок созвона истёк ' + esc(c.until) + '.</p>';
     else if (c.requested) h += '<p class="note ok">✓ Запрос отправлен — напишем тебе в Telegram, чтобы договориться о времени.</p>' +
                                '<button class="btn ghost" type="button" data-call>Напомнить ещё раз</button>';
@@ -452,11 +454,18 @@
       h += '<div class="card"><p class="eyebrow">Заявки — с ' + esc(data.open_date) + '</p><p class="note" style="margin:0">Место за тобой. Форма откроется вместе с уроками.</p></div>';
       return h;
     }
+    if (r.status === 'done') {
+      h += '<div class="card"><p class="eyebrow">Готово</p><p class="note ok" style="margin:0">✓ Разбор отправлен — он в чате с ботом.</p></div>';
+      return h;
+    }
+    if (r.status === 'open') {
+      h += '<div class="card"><p class="eyebrow">Ролик у Миши</p><p class="note ok" style="margin:0">✓ Разбор будет до ' + esc(r.due) +
+           '. Пришлём его в чат с ботом.</p><p class="note">Передумал с роликом? Пришли другой ниже — он заменит прежний.</p></div>';
+    }
     h += '<label class="field"><p class="eyebrow">Ссылка на видео · до 3 минут</p><input class="input" id="rv-link" type="url" inputmode="url" placeholder="https://" autocomplete="off"></label>' +
          '<label class="field"><p class="eyebrow">Что хочешь узнать</p><textarea class="input" id="rv-q" maxlength="2000" placeholder="Например: почему картинка шумит ночью"></textarea></label>' +
          '<p class="err" id="rv-err"></p>' +
-         '<button class="btn red" type="button" data-review>Отправить на разбор</button>';
-    if (r.sent) h += '<p class="note ok" style="text-align:center">✓ Заявка отправлена. Можно прислать ещё одну.</p>';
+         '<button class="btn red" type="button" data-review>' + (r.status === 'open' ? 'Заменить ролик' : 'Отправить на разбор') + '</button>';
     return h;
   }
 
@@ -539,7 +548,7 @@
       if (demo) return toast('Демо: заявка ушла бы админам');
       haptic('medium');
       err.textContent = '';
-      run(api('/api/course/review', { link: link, question: q }), 'Заявка отправлена ✓');
+      run(api('/api/course/review', { link: link, question: q }), 'Ролик отправлен Мише ✓');
     }
   });
 
@@ -564,7 +573,7 @@
         { kind: 'pdf', title: 'Баланс белого', url: '' }, { kind: 'pdf', title: 'Выдержка', url: '' },
         { kind: 'pdf', title: 'ISO без шума', url: '' }, { kind: 'pdf', title: 'False color', url: '' }
       ],
-      review: { eligible: true, test: true, position: null, limit: 10, left: 10, reviewer: 'Миша', sent: false },
+      review: { eligible: true, test: true, position: null, limit: 10, left: 10, reviewer: 'Миша', sent: false, status: null },
       options: [{ id: 1, title: 'Shot on iPhone — съёмка' }, { id: 2, title: 'Cut by MALIMABI — монтаж' }, { id: 3, title: 'Пакет: съёмка + монтаж' }],
       buy_url: ''
     };

@@ -480,6 +480,47 @@ async def init_db(existing_cdek_contract: str | None = None):
                 source   TEXT
             )
         """)
+        # Заказы по курсу — то, что мы должны клиенту исполнить: разбор ролика
+        # (kind=review) и созвон VIP (kind=call). Номер для людей — «К-{id}».
+        # status: review — open → done; call — open → scheduled → done | missed;
+        # любой — cancelled. due_at — до какого числа сделать (YYYY-MM-DD, МСК).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_orders (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind             TEXT NOT NULL,
+                user_id          INTEGER NOT NULL,
+                test             INTEGER NOT NULL DEFAULT 0,
+                status           TEXT NOT NULL DEFAULT 'open',
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                due_at           TEXT NOT NULL,
+                link             TEXT,
+                question         TEXT,
+                scheduled_at     TEXT,
+                done_at          TIMESTAMP,
+                done_by          TEXT,
+                result           TEXT,
+                reminded_day_at  TIMESTAMP,
+                reminded_hour_at TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_order_messages (
+                order_id   INTEGER NOT NULL,
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+        """)
+        # Разовые напоминания клиентам по курсу (прислать ролик, запросить созвон)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_nudges (
+                user_id INTEGER NOT NULL,
+                kind    TEXT NOT NULL,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, kind)
+            )
+        """)
         # Право на созвон VIP: одно на покупку, использовать до expires_at
         # (2 месяца с оплаты). requested_at — человек попросил договориться,
         # done_at — созвон проведён (отмечают админы).
@@ -4138,6 +4179,10 @@ async def clear_test_course_access(user_id: int) -> int:
         cur = await db.execute("DELETE FROM course_access WHERE user_id = ? AND test = 1", (user_id,))
         await db.execute("DELETE FROM course_review_requests WHERE user_id = ? AND test = 1", (user_id,))
         await db.execute("DELETE FROM course_calls WHERE user_id = ? AND test = 1", (user_id,))
+        await db.execute("""DELETE FROM course_order_messages WHERE order_id IN
+                            (SELECT id FROM course_orders WHERE user_id = ? AND test = 1)""", (user_id,))
+        await db.execute("DELETE FROM course_orders WHERE user_id = ? AND test = 1", (user_id,))
+        await db.execute("DELETE FROM course_nudges WHERE user_id = ?", (user_id,))
         await db.commit()
         return cur.rowcount
 
@@ -4168,6 +4213,116 @@ async def mark_course_call_requested(call_id: int):
         await db.execute("UPDATE course_calls SET requested_at = CURRENT_TIMESTAMP WHERE id = ?",
                          (call_id,))
         await db.commit()
+
+
+# --- Заказы по курсу ---
+
+COURSE_ORDER_FIELDS = {"status", "link", "question", "scheduled_at", "done_at", "done_by",
+                       "result", "reminded_day_at", "reminded_hour_at", "due_at"}
+
+
+async def create_course_order(kind: str, user_id: int, due_at: str, test: bool,
+                              link: str | None = None, question: str | None = None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT INTO course_orders (kind, user_id, due_at, test, link, question)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (kind, user_id, due_at, 1 if test else 0, link, question))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_course_order(order_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT o.*, u.username, u.first_name FROM course_orders o
+               LEFT JOIN users u ON u.user_id = o.user_id WHERE o.id = ?""", (order_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def update_course_order(order_id: int, **fields):
+    bad = set(fields) - COURSE_ORDER_FIELDS
+    if bad:
+        raise ValueError(bad)
+    sets = ", ".join(f"{k} = ?" for k in fields)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE course_orders SET {sets}, updated_at = CURRENT_TIMESTAMP "
+                         f"WHERE id = ?", (*fields.values(), order_id))
+        await db.commit()
+
+
+async def get_user_course_order(user_id: int, kind: str) -> Optional[dict]:
+    """Последний заказ человека этого вида (любой статус, кроме отменённого)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM course_orders WHERE user_id = ? AND kind = ?
+               AND status != 'cancelled' ORDER BY id DESC LIMIT 1""", (user_id, kind)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def get_open_course_orders() -> list[dict]:
+    """В работе: разборы без отправки, созвоны до проведения. Старые сверху."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT o.*, u.username, u.first_name FROM course_orders o
+               LEFT JOIN users u ON u.user_id = o.user_id
+               WHERE o.status IN ('open', 'scheduled') ORDER BY o.id"""
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def add_course_order_message(order_id: int, chat_id: int, message_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO course_order_messages VALUES (?, ?, ?)",
+                         (order_id, chat_id, message_id))
+        await db.commit()
+
+
+async def get_course_order_messages(order_id: int) -> list[tuple[int, int]]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT chat_id, message_id FROM course_order_messages WHERE order_id = ?", (order_id,)
+        ) as cur:
+            return [(r[0], r[1]) for r in await cur.fetchall()]
+
+
+async def course_order_by_card(chat_id: int, message_id: int) -> Optional[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT order_id FROM course_order_messages WHERE chat_id = ? AND message_id = ?",
+            (chat_id, message_id)
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else None
+
+
+async def mark_course_nudge(user_id: int, kind: str) -> bool:
+    """True — напоминание ещё не отправлялось и теперь отмечено."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("INSERT OR IGNORE INTO course_nudges (user_id, kind) VALUES (?, ?)",
+                               (user_id, kind))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_bundle_review_holders() -> list[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT user_id FROM bundle_review_queue ORDER BY position") as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+async def get_course_calls() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM course_calls ORDER BY id") as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def record_course_view(user_id: int, source: str):
