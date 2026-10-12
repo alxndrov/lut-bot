@@ -106,7 +106,8 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
         lines += ["", schedule]
     if reviews_left and not owned:
         lines.append(f"🎁 Первым {config.BUNDLE_REVIEW_LIMIT}, кто возьмёт пакет, — личный "
-                     f"разбор видео от {config.COURSE_REVIEWER}. Осталось мест: <b>{reviews_left}</b>.")
+                     f"видеоразбор твоего ролика (до 3 минут) от {config.COURSE_REVIEWER}. "
+                     f"Осталось мест: <b>{reviews_left}</b>.")
     if owned:
         names = ", ".join(svc.SECTION_SHORT[s] for s in svc.SECTIONS if s in owned)
         when = ("Уроки уже в приложении." if svc.is_open()
@@ -270,7 +271,8 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
         await bot.send_message(
             user_id,
             f"Ты среди первых {config.BUNDLE_REVIEW_LIMIT}, кто взял пакет, — значит, "
-            f"{config.COURSE_REVIEWER} лично разберёт твоё видео. Подробности пришлём после старта курса."
+            f"{config.COURSE_REVIEWER} запишет тебе видеоразбор твоего ролика (до 3 минут). "
+            f"Ролик пришлёшь во вкладке «Разбор» приложения после старта курса."
             + ("\n\n🧪 В тесте место в очереди не занимается." if test else ""))
     logger.info(f"course: user {user_id} {'ТЕСТ ' if test else ''}оплатил {option['slug']} "
                 f"({amount} ₽, {payment_id}), разделы {sections}, разбор {position}")

@@ -1,7 +1,8 @@
 """Курс в админском боте: кто купил, цены, кодовое слово.
 
 /course            — сводка и последние покупки, кнопка CSV со всеми
-/courseprice slug предпродажа полная — цены опции (shooting/editing/bundle)
+/courseprice slug предпродажа [середина] полная — цены опции (shooting/editing/bundle);
+                     без середины — посередине между предпродажей и полной
 /courseword слово[, слово2] — кодовые слова; без аргумента — показать,
                      «/courseword -» — выключить
 """
@@ -85,18 +86,27 @@ async def cb_csv(callback: CallbackQuery):
 @router.message(Command("courseprice"))
 async def cmd_price(message: Message, command: CommandObject):
     parts = (command.args or "").split()
-    if len(parts) != 3 or not parts[1].isdigit() or not parts[2].isdigit():
+    if len(parts) not in (3, 4) or not all(p.isdigit() for p in parts[1:]):
         options = await db.get_course_options()
         await message.answer(
-            "Формат: <code>/courseprice slug предпродажа полная</code>\n\n" + "\n".join(
-                f"{o['slug']}: {o['price']} / {o['price_full']}" for o in options),
+            "Формат: <code>/courseprice slug предпродажа середина полная</code>\n"
+            f"Предпродажа — до {svc.presale_end_text()}, середина — до "
+            f"{svc.full_price_from_text()}, дальше полная. Без середины она посчитается "
+            "посередине.\n\n" + "\n".join(
+                f"{o['slug']}: {o['price']} / {svc.mid_price(o)} / {o['price_full']}"
+                for o in options),
             parse_mode="HTML")
         return
-    if not await db.set_course_option_prices(parts[0], int(parts[1]), int(parts[2])):
+    nums = [int(p) for p in parts[1:]]
+    price, price_full = nums[0], nums[-1]
+    price_mid = nums[1] if len(nums) == 3 else None
+    if not await db.set_course_option_prices(parts[0], price, price_full, price_mid):
         await message.answer(f"Нет опции «{parts[0]}».")
         return
-    await message.answer(f"✅ {parts[0]}: предпродажа {svc.rub(int(parts[1]))}, "
-                         f"полная {svc.rub(int(parts[2]))}.")
+    mid = price_mid or svc.mid_price({"price": price, "price_full": price_full})
+    await message.answer(f"✅ {parts[0]}: предпродажа {svc.rub(price)}, "
+                         f"с {svc.presale_end_text()} — {svc.rub(mid)}, "
+                         f"с {svc.full_price_from_text()} — {svc.rub(price_full)}.")
 
 
 @router.message(Command("courseword"))

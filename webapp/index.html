@@ -309,7 +309,7 @@
       h += '<div class="card"><p class="eyebrow">' + (data.full_price ? 'Пакет · оба раздела' : (data.price_stage === 'presale' ? 'Предпродажа до ' : 'Цена до ') + esc(data.price_until)) + '</p>' +
            '<div class="hero-row"><span class="big-num">' + (data.sections.length) + '</span><div><b>' + esc(b.title) + '</b>' +
            '<small>' + rub(b.price) + (b.price_full > b.price ? '<span class="price-old">' + rub(b.price_full) + '</span>' : '') + '</small></div></div>' +
-           (data.review.left ? '<p class="note">Первым ' + data.review.limit + ' покупателям пакета — личный разбор видео. Осталось мест: ' + data.review.left + '.</p>' : '') +
+           (data.review.left ? '<p class="note">Первым ' + data.review.limit + ' покупателям пакета — личный видеоразбор их ролика (до 3 минут). Осталось мест: ' + data.review.left + '.</p>' : '') +
            '<button class="btn" type="button" data-buy>Купить в боте</button></div>';
     }
 
@@ -410,7 +410,7 @@
     var h = '<p class="eyebrow red">Первые ' + r.limit + ' · пакет</p>' +
             '<h1 class="display"><span>Разбор</span><span class="dim">твоего видео.</span></h1>';
     if (!r.eligible) {
-      h += '<p class="lead">Первым ' + r.limit + ' покупателям пакета ' + esc(r.reviewer) + ' лично разберёт ролик: съёмку, цвет, монтаж.</p>';
+      h += '<p class="lead">Первым ' + r.limit + ' покупателям пакета ' + esc(r.reviewer) + ' запишет видеоразбор их ролика до 3 минут: съёмку, цвет, монтаж.</p>';
       if (r.left && data.bundle) {
         h += '<div class="card"><p class="eyebrow">Осталось мест</p><div class="hero-row"><span class="big-num">' + pad(r.left) +
              '</span><div><b>из ' + r.limit + '</b><small>' + esc(data.bundle.title) + ' · ' + rub(data.bundle.price) + '</small></div></div>' +
@@ -420,14 +420,14 @@
       }
       return h;
     }
-    h += '<p class="lead">Скинь ссылку на ролик — посмотрю и разберу лично: съёмку, цвет, монтаж.</p>';
+    h += '<p class="lead">Скинь ссылку на ролик до 3 минут — посмотрю и запишу тебе видеоразбор: съёмку, цвет, монтаж. Это видео от меня, не созвон.</p>';
     if (r.test) h += '<p class="note">🧪 Тестовый доступ — заявка уйдёт админам с пометкой «ТЕСТ».</p>';
     else if (r.position) h += '<p class="note">Твоё место в очереди: ' + r.position + ' из ' + r.limit + '.</p>';
     if (!data.open) {
       h += '<div class="card"><p class="eyebrow">Заявки — с ' + esc(data.open_date) + '</p><p class="note" style="margin:0">Место за тобой. Форма откроется вместе с уроками.</p></div>';
       return h;
     }
-    h += '<label class="field"><p class="eyebrow">Ссылка на видео</p><input class="input" id="rv-link" type="url" inputmode="url" placeholder="https://" autocomplete="off"></label>' +
+    h += '<label class="field"><p class="eyebrow">Ссылка на видео · до 3 минут</p><input class="input" id="rv-link" type="url" inputmode="url" placeholder="https://" autocomplete="off"></label>' +
          '<label class="field"><p class="eyebrow">Что хочешь узнать</p><textarea class="input" id="rv-q" maxlength="2000" placeholder="Например: почему картинка шумит ночью"></textarea></label>' +
          '<p class="err" id="rv-err"></p>' +
          '<button class="btn red" type="button" data-review>Отправить на разбор</button>';

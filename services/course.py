@@ -99,7 +99,10 @@ def price_stage(now: datetime | None = None) -> str:
 
 
 def mid_price(option: dict) -> int:
-    """Середина между предпродажей и полной ценой, до десятков рублей."""
+    """Цена с 1 по 7 ноября: заданная (price_mid) или середина между
+    предпродажей и полной, до десятков рублей."""
+    if option.get("price_mid"):
+        return int(option["price_mid"])
     return int(round((option["price"] + option["price_full"]) / 20) * 10)
 
 

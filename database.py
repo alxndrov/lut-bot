@@ -458,6 +458,12 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE course_access ADD COLUMN test INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass
+        # Цена опции с COURSE_MID_PRICE_FROM до COURSE_FULL_PRICE_FROM.
+        # NULL — середина между price и price_full
+        try:
+            await db.execute("ALTER TABLE course_options ADD COLUMN price_mid INTEGER DEFAULT NULL")
+        except Exception:
+            pass
         # Заявки на личный разбор из вкладки «Разбор» мини-приложения
         await db.execute("""
             CREATE TABLE IF NOT EXISTS course_review_requests (
@@ -4004,11 +4010,12 @@ async def add_course_option(product_id: int, slug: str, title: str, sections: st
         return cur.lastrowid
 
 
-async def set_course_option_prices(slug: str, price: int, price_full: int) -> bool:
+async def set_course_option_prices(slug: str, price: int, price_full: int,
+                                   price_mid: int | None = None) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "UPDATE course_options SET price = ?, price_full = ? WHERE slug = ?",
-            (price, price_full, slug),
+            "UPDATE course_options SET price = ?, price_mid = ?, price_full = ? WHERE slug = ?",
+            (price, price_mid, price_full, slug),
         )
         await db.commit()
         return cur.rowcount > 0
