@@ -5,7 +5,9 @@
 статическая страница /app/ и /api/course/me, который отдаёт доступы
 только по проверенному initData.
 """
+import html
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -26,6 +28,7 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 KEYWORDS_SETTING = "course_keywords"
+CAPTION_LIMIT = 1024
 WEBAPP_DIR = Path(__file__).resolve().parent.parent / "webapp"
 
 
@@ -156,10 +159,15 @@ async def send_course(message: Message, user_id: int) -> bool:
         return False
     text, kb = screen
     product = await db.get_course_product()
-    if product and product.get("photo_id"):
+    # Подпись к фото у Telegram — не больше 1024 символов (без учёта HTML-тегов).
+    # Длинный экран: фото отдельно, текст с кнопками — следующим сообщением.
+    fits = len(html.unescape(re.sub(r"<[^>]+>", "", text))) <= CAPTION_LIMIT
+    if product and product.get("photo_id") and fits:
         await message.answer_photo(product["photo_id"], caption=text, reply_markup=kb,
                                    parse_mode="HTML")
     else:
+        if product and product.get("photo_id"):
+            await message.answer_photo(product["photo_id"])
         await message.answer(text, reply_markup=kb, parse_mode="HTML",
                              disable_web_page_preview=True)
     return True
