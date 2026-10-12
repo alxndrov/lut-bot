@@ -116,9 +116,10 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
     if schedule:
         lines += ["", schedule]
     if reviews_left and not owned:
-        lines.append(f"🎁 Первым {config.BUNDLE_REVIEW_LIMIT}, кто возьмёт пакет, — личный "
-                     f"видеоразбор твоего ролика (до 3 минут) от {config.COURSE_REVIEWER}. "
-                     f"Осталось мест: <b>{reviews_left}</b>.")
+        lines += ["", f"🎁 <b>Подарок первым {config.BUNDLE_REVIEW_LIMIT} покупателям пакета</b>\n"
+                      f"{config.COURSE_REVIEWER} лично посмотрит твой ролик и запишет видеоразбор: "
+                      f"съёмка, цвет, монтаж. Свободно мест: <b>{reviews_left} из "
+                      f"{config.BUNDLE_REVIEW_LIMIT}</b>."]
     if owned:
         names = ", ".join(svc.SECTION_SHORT[s] for s in svc.SECTIONS if s in owned)
         when = ("Уроки уже в приложении." if svc.is_open()
