@@ -196,6 +196,7 @@ async def cb_pending_orders(callback: CallbackQuery):
     if not await admin_only(callback):
         return
     orders = await db.get_pending_orders()
+    lookers = len(await db.get_course_lookers(exclude=config.ADMIN_IDS))
     if not orders:
         text = ("🛒 <b>Незавершённые заказы</b>\n\n"
                 "<i>Пусто — все, кто заполнил заказ, оплатили.</i>")
@@ -206,8 +207,35 @@ async def cb_pending_orders(callback: CallbackQuery):
         if len(orders) > 30:
             text += f"\n\n<i>Показаны последние 30 из {len(orders)}.</i>"
     await callback.message.edit_text(
-        text, parse_mode="HTML", reply_markup=pending_orders_keyboard(orders)
+        text, parse_mode="HTML", reply_markup=pending_orders_keyboard(orders, lookers)
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin:course_lookers")
+async def cb_course_lookers(callback: CallbackQuery):
+    """Открывали курс (экран в боте или приложение), но ничего не купили.
+    Только список — без напоминаний: смотреть цены не значит собираться купить."""
+    if not await admin_only(callback):
+        return
+    from html import escape
+    from services.course import msk_text
+    rows = await db.get_course_lookers(exclude=config.ADMIN_IDS)
+    lines = [f"🎬 <b>Смотрели курс, но не купили</b> — <b>{len(rows)}</b>", ""]
+    for r in rows[:40]:
+        who = f"@{r['username']}" if r.get("username") else (r.get("first_name") or f"id:{r['user_id']}")
+        times = f" · {r['views']} раз" if r["views"] > 1 else ""
+        where = " · приложение" if r.get("source") == "app" else ""
+        lines.append(f"• {msk_text(r['last_at'])} · {escape(who)}{times}{where}")
+    if len(rows) > 40:
+        lines.append(f"…и ещё {len(rows) - 40}")
+    if not rows:
+        lines.append("<i>Пока никого — или все, кто смотрел, купили.</i>")
+    lines += ["", "<i>Дата — когда открывали последний раз. Купившие из списка уходят сами.</i>"]
+    await callback.message.edit_text(
+        "\n".join(lines), parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="◀️ Назад", callback_data="admin:pending")]]))
     await callback.answer()
 
 

@@ -23,7 +23,7 @@ def catalog_submenu_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def pending_orders_keyboard(orders: list[dict]) -> InlineKeyboardMarkup:
+def pending_orders_keyboard(orders: list[dict], course_lookers: int = 0) -> InlineKeyboardMarkup:
     """Список незавершённых заказов (опрос заполнен, оплаты нет)."""
     rows = []
     for o in orders[:30]:
@@ -35,6 +35,9 @@ def pending_orders_keyboard(orders: list[dict]) -> InlineKeyboardMarkup:
             text=f"{mark}{day} · {who} · {o.get('product_name') or '—'}",
             callback_data=f"admin:pending_view:{o['user_id']}:{o['product_id']}",
         )])
+    if course_lookers:
+        rows.append([InlineKeyboardButton(text=f"🎬 Смотрели курс, не купили — {course_lookers}",
+                                          callback_data="admin:course_lookers")])
     rows.append([InlineKeyboardButton(text="🔁 Проверить пропущенные оплаты",
                                       callback_data="admin:missed")])
     rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="admin:pending")])

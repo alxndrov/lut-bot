@@ -469,6 +469,17 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE course_options ADD COLUMN call_bonus INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass
+        # Кто открывал курс (экран в боте или приложение) — для «смотрели, но не купили».
+        # Строка на человека: первый и последний раз, сколько раз, откуда.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_views (
+                user_id  INTEGER PRIMARY KEY,
+                first_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                views    INTEGER NOT NULL DEFAULT 1,
+                source   TEXT
+            )
+        """)
         # Право на созвон VIP: одно на покупку, использовать до expires_at
         # (2 месяца с оплаты). requested_at — человек попросил договориться,
         # done_at — созвон проведён (отмечают админы).
@@ -4157,6 +4168,39 @@ async def mark_course_call_requested(call_id: int):
         await db.execute("UPDATE course_calls SET requested_at = CURRENT_TIMESTAMP WHERE id = ?",
                          (call_id,))
         await db.commit()
+
+
+async def record_course_view(user_id: int, source: str):
+    """source: bot — экран курса в боте, app — мини-приложение."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO course_views (user_id, source) VALUES (?, ?)
+               ON CONFLICT(user_id) DO UPDATE SET last_at = CURRENT_TIMESTAMP,
+                   views = views + 1, source = excluded.source""",
+            (user_id, source),
+        )
+        await db.commit()
+
+
+async def get_course_lookers(since: str | None = None, exclude: list[int] | None = None) -> list[dict]:
+    """Смотрели курс, но так ничего и не купили (нет ни одного раздела).
+    since — только те, кто впервые открыл курс начиная с этого момента (UTC).
+    Свежие сверху."""
+    sql = """SELECT v.*, u.username, u.first_name
+             FROM course_views v LEFT JOIN users u ON u.user_id = v.user_id
+             WHERE NOT EXISTS (SELECT 1 FROM course_access a
+                               WHERE a.user_id = v.user_id AND a.revoked_at IS NULL)"""
+    args: list = []
+    if since:
+        sql += " AND v.first_at >= ?"
+        args.append(since)
+    if exclude:
+        sql += f" AND v.user_id NOT IN ({','.join('?' * len(exclude))})"
+        args += exclude
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql + " ORDER BY v.last_at DESC", args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def get_user_course_paid(user_id: int) -> int:

@@ -51,7 +51,9 @@ async def cmd_course(message: Message):
                      f"{len(mine)} шт, {svc.rub(sum(b['amount'] for b in mine))}")
     taken = sum(1 for b in buyers if b["review_position"])
     lines += [f"Всего: {len(buyers)} покупок, {svc.rub(sum(b['amount'] for b in buyers))}",
-              f"🎁 Разборы: {taken} из {config.BUNDLE_REVIEW_LIMIT}", ""]
+              f"🎁 Разборы: {taken} из {config.BUNDLE_REVIEW_LIMIT}",
+              f"👀 Смотрели курс, но не купили: "
+              f"{len(await db.get_course_lookers(exclude=config.ADMIN_IDS))}", ""]
     words = await db.get_setting(KEYWORDS_SETTING) or ""
     lines.append(f"Кодовое слово: {words or 'не задано (/courseword)'}")
     if buyers:

@@ -71,6 +71,14 @@ async def build(start: datetime, end: datetime) -> str:
             lines.append(f"• {when} {escape(who)} · {escape(r.get('product_name') or '—')}{amount}{asked}")
         if len(rows) > LIST_LIMIT:
             lines.append(f"…и ещё {len(rows) - LIST_LIMIT}")
+    lookers = await db.get_course_lookers(since=_utc(start), exclude=config.ADMIN_IDS)
+    lookers = [r for r in lookers if r["first_at"] < _utc(end)]
+    if lookers:
+        names = ", ".join(escape(f"@{r['username']}" if r.get("username")
+                                 else (r.get("first_name") or f"id:{r['user_id']}"))
+                          for r in lookers[:LIST_LIMIT])
+        more = f" и ещё {len(lookers) - LIST_LIMIT}" if len(lookers) > LIST_LIMIT else ""
+        lines += ["", f"🎬 Впервые смотрели курс и не купили: <b>{len(lookers)}</b> — {names}{more}"]
     lines += ["", f"Всего в списке незавершённых сейчас: {total_now}",
               "<i>📨 — уже спрашивали. Спросить клиента: админка основного бота → "
               "🛒 Незавершённые заказы.</i>"]

@@ -159,6 +159,7 @@ async def send_course(message: Message, user_id: int) -> bool:
         await message.answer("Курс скоро появится — следите за анонсом 🤍")
         return False
     text, kb = screen
+    await db.record_course_view(user_id, "bot")
     product = await db.get_course_product()
     # Подпись к фото у Telegram — не больше 1024 символов (без учёта HTML-тегов).
     # Длинный экран: фото отдельно, текст с кнопками — следующим сообщением.
@@ -462,6 +463,7 @@ async def api_me(request: web.Request) -> web.Response:
     user, body = await _app_user(request)
     if not user:
         return web.json_response({"error": "unauthorized"}, status=401)
+    await db.record_course_view(user["id"], "app")
     return web.json_response(await _app_state(user, request.app.get("bot_username") or "",
                                               bool(body.get("preview_open"))))
 

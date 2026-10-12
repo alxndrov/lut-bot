@@ -140,6 +140,15 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
         await db.clear_test_course_access(7)
         self.assertIsNone(await db.get_user_course_call(7))
 
+    async def test_course_lookers_exclude_buyers_and_admins(self):
+        await db.record_course_view(7, "bot")
+        await db.record_course_view(7, "app")
+        await db.record_course_view(8, "bot")
+        await db.record_course_view(9, "bot")
+        await db.grant_course_access(8, ["shooting"], None)
+        rows = await db.get_course_lookers(exclude=[9])
+        self.assertEqual([(r["user_id"], r["views"], r["source"]) for r in rows], [(7, 2, "app")])
+
     async def test_real_payment_overrides_test_and_survives_reset(self):
         await db.grant_course_access(7, ["shooting"], None, test=True)
         purchase_id = await db.add_course_purchase(7, None, 14, self.shoot, "p1", 2490)

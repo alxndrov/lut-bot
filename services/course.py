@@ -132,6 +132,17 @@ def call_expires_at(paid: datetime | None = None) -> str:
     raise ValueError(d)
 
 
+def msk_text(ts: str | None, fmt: str = "%d.%m %H:%M") -> str:
+    """'2026-10-12 11:41:20' (UTC из базы) → '12.10 14:41' по Москве."""
+    if not ts:
+        return ""
+    try:
+        return (datetime.strptime(ts[:19], "%Y-%m-%d %H:%M:%S")
+                .replace(tzinfo=timezone.utc).astimezone(MSK).strftime(fmt))
+    except ValueError:
+        return ts
+
+
 def date_text(date_str: str) -> str:
     """«8 января 2027» — для дат не в этом году с годом."""
     d = _msk_date_start(date_str)
