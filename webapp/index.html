@@ -405,10 +405,33 @@
     return h;
   }
 
+  // VIP: личный созвон с Мишей на 1 час
+  function callBlock() {
+    var c = data.call;
+    if (!c) {
+      if (!data.vip) return '';
+      return '<div class="card"><p class="eyebrow red">VIP · созвон с Мишей</p>' +
+             '<div class="hero-row"><span class="big-num">1:1</span><div><b>Личный созвон на час</b>' +
+             '<small>' + esc(data.vip.title) + ' · ' + rub(data.vip.price) + '</small></div></div>' +
+             '<p class="note">Пакет + час на твои вопросы. Когда созвониться — решаешь сам: до или после курса, в течение 2 месяцев после покупки.</p>' +
+             '<button class="btn" type="button" data-buy>Взять VIP</button></div>';
+    }
+    var h = '<div class="card"><p class="eyebrow red">VIP' + (c.test ? ' · тест' : '') + ' · созвон с Мишей</p>' +
+            '<div class="hero-row"><span class="big-num">1:1</span><div><b>Личный созвон на час</b>' +
+            '<small>До или после курса — не позднее ' + esc(c.until) + '</small></div></div>';
+    if (c.done) h += '<p class="note ok">✓ Созвон прошёл.</p>';
+    else if (c.expired) h += '<p class="note">Срок созвона истёк ' + esc(c.until) + '.</p>';
+    else if (c.requested) h += '<p class="note ok">✓ Запрос отправлен — напишем тебе в Telegram, чтобы договориться о времени.</p>' +
+                               '<button class="btn ghost" type="button" data-call>Напомнить ещё раз</button>';
+    else h += '<button class="btn" type="button" data-call>Договориться о созвоне</button>';
+    return h + '</div>';
+  }
+
   function screenReview() {
     var r = data.review;
     var h = '<p class="eyebrow red">Первые ' + r.limit + ' · пакет</p>' +
             '<h1 class="display"><span>Разбор</span><span class="dim">твоего видео.</span></h1>';
+    if (data.call) h += callBlock();
     if (!r.eligible) {
       h += '<p class="lead">Первым ' + r.limit + ' покупателям пакета ' + esc(r.reviewer) + ' запишет видеоразбор их ролика до 3 минут: съёмку, цвет, монтаж.</p>';
       if (r.left && data.bundle) {
@@ -418,7 +441,7 @@
       } else {
         h += '<p class="empty">Места на разбор закончились.</p>';
       }
-      return h;
+      return h + callBlock();
     }
     h += '<p class="lead">Скинь ссылку на ролик до 3 минут — посмотрю и запишу тебе видеоразбор: съёмку, цвет, монтаж. Это видео от меня, не созвон.</p>';
     if (r.test) h += '<p class="note">🧪 Тестовый доступ — заявка уйдёт админам с пометкой «ТЕСТ».</p>';
@@ -500,6 +523,11 @@
       if (demo) return toast('Демо: в Telegram тут сбросится тест');
       haptic('medium');
       run(api('/api/course/test', { action: 'reset' }), 'Тестовый доступ снят');
+    }
+    else if (el.hasAttribute('data-call')) {
+      if (demo) return toast('Демо: запрос ушёл бы админам');
+      haptic('medium');
+      run(api('/api/course/call'), 'Запрос отправлен — напишем тебе');
     }
     else if (el.hasAttribute('data-review')) {
       var link = document.getElementById('rv-link').value.trim();

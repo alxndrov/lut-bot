@@ -115,6 +115,34 @@ def price_for(option: dict, now: datetime | None = None) -> int:
     return int(option["price"])
 
 
+CALL_MONTHS = 2  # созвон VIP — не позднее чем через 2 месяца после оплаты
+
+
+def call_expires_at(paid: datetime | None = None) -> str:
+    """Последний день для созвона VIP (YYYY-MM-DD): та же дата через CALL_MONTHS
+    месяцев, а если такого числа нет (31-е) — последний день месяца."""
+    d = (paid or now_msk()).date()
+    month = d.month - 1 + CALL_MONTHS
+    year, month = d.year + month // 12, month % 12 + 1
+    for day in (d.day, 30, 29, 28):
+        try:
+            return d.replace(year=year, month=month, day=day).isoformat()
+        except ValueError:
+            continue
+    raise ValueError(d)
+
+
+def date_text(date_str: str) -> str:
+    """«8 января 2027» — для дат не в этом году с годом."""
+    d = _msk_date_start(date_str)
+    text = _date_text(date_str)
+    return text if d.year == now_msk().year else f"{text} {d.year}"
+
+
+def is_call_option(option: dict) -> bool:
+    return bool(option.get("call_bonus"))
+
+
 def option_sections(option: dict) -> list[str]:
     return [s for s in (option.get("sections") or "").split(",") if s]
 

@@ -98,7 +98,8 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
     lines.append("")
     for o in options:
         price = svc.rub(svc.price_for(o))
-        later = "" if full else f" <s>{svc.rub(o['price_full'])}</s>"
+        later = ("" if full or o["price_full"] <= svc.price_for(o)
+                 else f" <s>{svc.rub(o['price_full'])}</s>")
         mark = " ✓ куплено" if set(svc.option_sections(o)) <= owned else ""
         lines.append(f"• <b>{o['title']}</b> — {price}{later}{mark}")
     schedule = svc.price_schedule_text()
@@ -231,6 +232,7 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
     sections = svc.option_sections(option)
     owned_before = await db.get_user_course_sections(user_id)
     position = None
+    purchase_id = None
     if test:
         await db.grant_course_access(user_id, sections, None, test=True)
         if option.get("review_bonus"):
@@ -254,9 +256,17 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
 
         who = f"@{username}" if username else f"id:{user_id}"
         extra = f"\n🎁 Разбор: место {position} из {config.BUNDLE_REVIEW_LIMIT}" if position else ""
+        if svc.is_call_option(option):
+            extra += f"\n📞 Созвон VIP — до {svc.date_text(svc.call_expires_at())}"
         again = "\n♻️ Докупка второго раздела" if owned_before else ""
         await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {user.get('first_name') or '—'} {who}\n"
                           f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}")
+
+    call_until = None
+    if svc.is_call_option(option):
+        expires = svc.call_expires_at()
+        await db.add_course_call(user_id, purchase_id, expires, test)
+        call_until = svc.date_text(expires)
 
     mark = "🧪 <b>Тестовая оплата</b> — денег не было, в финансы не попадёт.\n\n" if test else ""
     if svc.is_open():
@@ -274,6 +284,13 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
             f"{config.COURSE_REVIEWER} запишет тебе видеоразбор твоего ролика (до 3 минут). "
             f"Ролик пришлёшь во вкладке «Разбор» приложения после старта курса."
             + ("\n\n🧪 В тесте место в очереди не занимается." if test else ""))
+    if call_until:
+        await bot.send_message(
+            user_id,
+            "📞 В VIP входит личный созвон с Мишей на 1 час. Когда его провести — "
+            f"решаешь сам: до курса или после, но не позднее {call_until}. "
+            "Чтобы договориться о времени, нажми «Договориться о созвоне» во вкладке "
+            "«Разбор» приложения курса.")
     logger.info(f"course: user {user_id} {'ТЕСТ ' if test else ''}оплатил {option['slug']} "
                 f"({amount} ₽, {payment_id}), разделы {sections}, разбор {position}")
     return True
@@ -361,7 +378,10 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             "lessons": [{"n": i + 1, "title": t, "open": has and is_open}
                         for i, t in enumerate(program["lessons"])],
         })
-    bundle = next((o for o in options if len(svc.option_sections(o)) > 1), None)
+    bundle = next((o for o in options if len(svc.option_sections(o)) > 1
+                   and not svc.is_call_option(o)), None)
+    vip = next((o for o in options if svc.is_call_option(o)), None)
+    call = await db.get_user_course_call(user_id)
     materials = []
     for m in svc.MATERIALS:
         has = bool(set(m["sections"]) & owned)
@@ -397,6 +417,15 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             "reviewer": config.COURSE_REVIEWER,
             "sent": bool(last),
         },
+        "vip": {"title": vip["title"], "price": svc.price_for(vip)}
+               if vip and not owned else None,
+        "call": {
+            "until": svc.date_text(call["expires_at"]),
+            "expired": svc.now_msk().date().isoformat() > call["expires_at"],
+            "requested": bool(call["requested_at"]),
+            "done": bool(call["done_at"]),
+            "test": bool(call["test"]),
+        } if call else None,
         "options": [{"id": o["id"], "slug": o["slug"], "title": o["title"]} for o in options]
                    if admin else [],
         "buy_url": f"https://t.me/{bot_username}?start=course" if bot_username else "",
@@ -466,6 +495,32 @@ async def api_review(request: web.Request) -> web.Response:
     return web.json_response(state)
 
 
+async def api_call(request: web.Request) -> web.Response:
+    """VIP: «Договориться о созвоне» — партнёрам в админ-бот, дальше пишут сами."""
+    user, body = await _app_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    call = await db.get_user_course_call(user["id"])
+    if not call:
+        return web.json_response({"error": "Созвон входит в пакет VIP."}, status=403)
+    if call["done_at"]:
+        return web.json_response({"error": "Созвон уже прошёл."}, status=400)
+    if svc.now_msk().date().isoformat() > call["expires_at"]:
+        return web.json_response({"error": "Срок созвона истёк."}, status=400)
+    await db.mark_course_call_requested(call["id"])
+    from handlers.prodamus_webhook import _send_notify
+    from html import escape
+    who = f"@{user['username']}" if user.get("username") else f"id:{user['id']}"
+    await _send_notify(None, (
+        f"{'🧪 ТЕСТ · ' if call['test'] else ''}📞 <b>VIP: договориться о созвоне</b>\n\n"
+        f"👤 {escape(user.get('first_name') or '—')} {escape(who)} · "
+        f"<a href=\"tg://user?id={user['id']}\">написать</a>\n"
+        f"⏳ Провести до {svc.date_text(call['expires_at'])}\n\n"
+        f"Напишите человеку и договоритесь о времени (1 час с Мишей)."))
+    return web.json_response(await _app_state(user, request.app.get("bot_username") or "",
+                                              bool(body.get("preview_open"))))
+
+
 async def app_index(request: web.Request) -> web.Response:
     return web.FileResponse(WEBAPP_DIR / "index.html", headers={"Cache-Control": "no-cache"})
 
@@ -479,3 +534,4 @@ def setup_web(app: web.Application, bot_username: str = ""):
     app.router.add_post("/api/course/me", api_me)
     app.router.add_post("/api/course/test", api_test)
     app.router.add_post("/api/course/review", api_review)
+    app.router.add_post("/api/course/call", api_call)

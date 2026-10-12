@@ -99,6 +99,11 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
         await db.add_course_option(14, "editing", "Монтаж", "editing", 2990, 3990, 2)
         self.bundle = await db.add_course_option(14, "bundle", "Пакет", "shooting,editing",
                                                  4490, 5990, 3, review_bonus=True)
+        self.vip = await db.add_course_option(14, "vip", "VIP", "shooting,editing",
+                                              12490, 12490, 4, review_bonus=True)
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("UPDATE course_options SET call_bonus = 1 WHERE id = ?", (self.vip,))
+            await conn.commit()
 
     async def asyncTearDown(self):
         db.DB_PATH = self.old_path
@@ -121,6 +126,18 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await db.clear_test_course_access(7), 2)
         self.assertEqual(await db.get_user_course_sections(7), set())
+
+    async def test_test_vip_gives_call_and_reset_removes_it(self):
+        bot = FakeBot()
+        await course_handler.provision(bot, 7, self.vip, "", 0, None, test=True)
+        call = await db.get_user_course_call(7)
+        self.assertTrue(call and call["test"])
+        self.assertTrue(any("созвон" in t for _, t in bot.sent))
+        state = await course_handler._app_state({"id": 7}, "bot")
+        self.assertFalse(state["call"]["expired"])
+        self.assertIsNone(state["vip"])  # уже куплен — не предлагаем
+        await db.clear_test_course_access(7)
+        self.assertIsNone(await db.get_user_course_call(7))
 
     async def test_real_payment_overrides_test_and_survives_reset(self):
         await db.grant_course_access(7, ["shooting"], None, test=True)
@@ -146,9 +163,23 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
         await db.grant_course_access(admin["id"], ["shooting", "editing"], None, test=True)
         state = await course_handler._app_state(admin, "bot", preview_open=True)
         self.assertTrue(state["open"])
-        self.assertEqual(len(state["options"]), 3)
+        self.assertEqual(len(state["options"]), 4)
         self.assertTrue(state["review"]["eligible"] and state["review"]["test"])
         self.assertTrue(all(l["open"] for s in state["sections"] for l in s["lessons"]))
+
+
+class VipCallTest(unittest.TestCase):
+    def test_call_deadline_two_months(self):
+        msk = svc.MSK
+        self.assertEqual(svc.call_expires_at(datetime(2026, 10, 12, tzinfo=msk)), "2026-12-12")
+        self.assertEqual(svc.call_expires_at(datetime(2026, 11, 20, tzinfo=msk)), "2027-01-20")
+        self.assertEqual(svc.call_expires_at(datetime(2026, 12, 31, tzinfo=msk)), "2027-02-28")
+
+    def test_vip_not_offered_after_one_section(self):
+        opts = [{"slug": "shooting", "sections": "shooting"},
+                {"slug": "vip", "sections": "shooting,editing", "call_bonus": 1}]
+        self.assertEqual([o["slug"] for o in svc.available_options(opts, set())], ["shooting", "vip"])
+        self.assertEqual([o["slug"] for o in svc.available_options(opts, {"shooting"})], [])
 
 
 if __name__ == "__main__":

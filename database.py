@@ -464,6 +464,26 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE course_options ADD COLUMN price_mid INTEGER DEFAULT NULL")
         except Exception:
             pass
+        # VIP: опция даёт ещё личный созвон с автором (call_bonus=1)
+        try:
+            await db.execute("ALTER TABLE course_options ADD COLUMN call_bonus INTEGER NOT NULL DEFAULT 0")
+        except Exception:
+            pass
+        # Право на созвон VIP: одно на покупку, использовать до expires_at
+        # (2 месяца с оплаты). requested_at — человек попросил договориться,
+        # done_at — созвон проведён (отмечают админы).
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_calls (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id      INTEGER NOT NULL,
+                purchase_id  INTEGER,
+                test         INTEGER NOT NULL DEFAULT 0,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at   TEXT NOT NULL,
+                requested_at TIMESTAMP,
+                done_at      TIMESTAMP
+            )
+        """)
         # Заявки на личный разбор из вкладки «Разбор» мини-приложения
         await db.execute("""
             CREATE TABLE IF NOT EXISTS course_review_requests (
@@ -4106,8 +4126,37 @@ async def clear_test_course_access(user_id: int) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("DELETE FROM course_access WHERE user_id = ? AND test = 1", (user_id,))
         await db.execute("DELETE FROM course_review_requests WHERE user_id = ? AND test = 1", (user_id,))
+        await db.execute("DELETE FROM course_calls WHERE user_id = ? AND test = 1", (user_id,))
         await db.commit()
         return cur.rowcount
+
+
+async def add_course_call(user_id: int, purchase_id: int | None, expires_at: str, test: bool) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO course_calls (user_id, purchase_id, expires_at, test) VALUES (?, ?, ?, ?)",
+            (user_id, purchase_id, expires_at, 1 if test else 0),
+        )
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_user_course_call(user_id: int) -> Optional[dict]:
+    """Последнее право на созвон VIP (неважно, использовано ли)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM course_calls WHERE user_id = ? ORDER BY id DESC LIMIT 1", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def mark_course_call_requested(call_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE course_calls SET requested_at = CURRENT_TIMESTAMP WHERE id = ?",
+                         (call_id,))
+        await db.commit()
 
 
 async def get_bundle_review_position(user_id: int) -> Optional[int]:
