@@ -190,8 +190,7 @@ def price_schedule_text() -> str:
     """Строка под ценами: что будет дальше. Пусто — цены уже полные."""
     stage = price_stage()
     if stage == "presale":
-        return (f"Цены предпродажи действуют до {presale_end_text()}. "
-                f"С {presale_end_text()} — дороже, с {full_price_from_text()} — полные.")
+        return f"Предпродажа — до {presale_end_text()}, с {full_price_from_text()} — полные цены."
     if stage == "mid":
         return f"С {full_price_from_text()} — полные цены."
     return ""
