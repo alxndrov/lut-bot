@@ -478,8 +478,8 @@ def formula_dashboard(snapshot, legacy, stats, cols):
 
 REFUNDS_TAB = 'Возвраты'
 REFUND_HEADERS = ['Дата возврата', 'Заказ', 'Дата заказа', 'Получатель', 'Telegram',
-                  'Оплачено', 'Возвращено', 'Возврат', 'Причина', 'Обратная доставка',
-                  'Расходники на склад', 'Чек в «Мой налог»', 'Оформил']
+                  'Оплачено', 'Возвращено', 'Возврат', 'Способ', 'Причина', 'Обратная доставка',
+                  'Расходники на склад', 'Чек в «Мой налог»', 'Клиенту', 'Оформил']
 
 
 def refunds_values(refunds):
@@ -501,10 +501,12 @@ def refunds_values(refunds):
             when(r['created_at']), '№' + num, when(r['order_created_at']),
             r.get('recipient_name') or '', '@' + r['username'] if r.get('username') else str(r['user_id']),
             money(r['paid']), money(r['amount']), 'Полный' if r['full'] else 'Частичный',
+            'Перевод со счёта' if r.get('method') == 'transfer' else 'Prodamus',
             r.get('reason') or '',
             '' if r['return_delivery'] is None else money(r['return_delivery']),
             yes_no(r['stock_returned'], 'Не решено') if r.get('shipped_at') else '—',
             'Отменён ' + when(r['receipt_cancelled_at']) if r.get('receipt_cancelled_at') else 'Не отменён',
+            {1: 'Написали', 2: 'Не писали'}.get(r.get('client_notified'), 'Не решено'),
             r.get('created_by_name') or '',
         ])
     total = money(sum(float(r['amount']) for r in refunds))

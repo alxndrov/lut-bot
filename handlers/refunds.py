@@ -402,11 +402,16 @@ async def cb_stock_set(callback: CallbackQuery):
     await _refresh_cards(callback.bot, order["id"])
 
 
-# ── Шаг 5: оформить в Prodamus и подтвердить ────────────────────────────
+# ── Шаг 5: как вернули деньги — и подтвердить ───────────────────────────
+#
+# Prodamus — заявкой в кабинете (бот даёт данные для неё). Перевод со счёта
+# проекта — деньги уже у клиента, в Prodamus ничего не оформляют. В учёте
+# оба способа одинаковы: возврат уменьшает выручку и прибыль периода.
 
-async def _show_confirm(message: Message, state: FSMContext, edit: bool = False):
-    data = await state.get_data()
-    order = await db.get_order(data["oid"])
+METHODS = {"p": "prodamus", "t": "transfer"}
+
+
+async def _summary_lines(data: dict, order: dict) -> list[str]:
     amount, delivery, stock = data["amount"], data.get("delivery"), data.get("stock")
     lines = [
         f"💸 <b>Возврат по заказу №{_num(order)}</b>",
@@ -422,10 +427,65 @@ async def _show_confirm(message: Message, state: FSMContext, edit: bool = False)
     else:
         lines.append("Заказ ещё не отправлен — он уйдёт из очереди заказов." if data["full"]
                      else "Заказ ещё не отправлен — останется в очереди.")
+    return lines
+
+
+async def _show_confirm(message: Message, state: FSMContext, edit: bool = False):
+    """Сводка и выбор: через Prodamus или уже перевели со счёта."""
+    data = await state.get_data()
+    order = await db.get_order(data["oid"])
+    oid = order["id"]
+    lines = await _summary_lines(data, order) + ["", "<b>Как возвращаем деньги?</b>"]
+    kb = _kb([("🏦 Через Prodamus", f"rf:via:{oid}:p")],
+             [("💳 Уже перевели со счёта", f"rf:via:{oid}:t")],
+             [("❌ Отмена", f"rf:cancel:{oid}")])
+    if edit:
+        await message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+    else:
+        await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("rf:via:"))
+async def cb_via(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    if not _same_order(data, callback) or "reason" not in data:
+        await callback.answer("Начните заново кнопкой в карточке заказа.", show_alert=True)
+        return
+    choice = callback.data.split(":")[3]
+    await callback.answer()
+    if choice == "back":
+        await state.update_data(method=None)
+        await _show_confirm(callback.message, state, edit=True)
+        return
+    method = METHODS.get(choice)
+    if not method:
+        return
+    await state.update_data(method=method)
+    data = await state.get_data()
+    order = await db.get_order(data["oid"])
+    lines = await _summary_lines(data, order) + [""]
+    if method == "prodamus":
+        lines += _prodamus_steps(order, data)
+        done = "✅ Возврат в Prodamus оформлен"
+    else:
+        lines += [
+            f"💳 Деньги клиенту уже перевели со счёта проекта — в Prodamus ничего "
+            f"не оформляем (иначе вернём второй раз).",
+            "",
+            "Нажмите кнопку ниже — бот запишет возврат.",
+        ]
+        done = "✅ Записать возврат"
+    kb = _kb([(done, f"rf:done:{order['id']}")],
+             [("◀️ Другой способ", f"rf:via:{order['id']}:back")],
+             [("❌ Отмена", f"rf:cancel:{order['id']}")])
+    await callback.message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+def _prodamus_steps(order: dict, data: dict) -> list[str]:
     created = order.get("created_at") or ""
-    lines += [
-        "",
-        "<b>Теперь оформите возврат в кабинете Prodamus:</b>",
+    amount = data["amount"]
+    return [
+        "<b>Оформите возврат в кабинете Prodamus:</b>",
         f"1. «Список платежей» → платёж <code>{html.escape(order.get('prodamus_order_id') or '')}</code>"
         + (f" от {created[8:10]}.{created[5:7]}" if created else "")
         + f" на {_rub(data['paid'])}",
@@ -435,18 +495,21 @@ async def _show_confirm(message: Message, state: FSMContext, edit: bool = False)
         "",
         "Когда заявка создана — нажмите кнопку ниже. До этого в учёте ничего не меняется.",
     ]
-    kb = _kb([("✅ Возврат в Prodamus оформлен", f"rf:done:{order['id']}")],
-             [("❌ Отмена", f"rf:cancel:{order['id']}")])
-    if edit:
-        await message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+
+def client_text(refund: dict) -> str:
+    """Сообщение клиенту о возврате — своё для каждого способа."""
+    num = (re.findall(r"\d+", refund.get("order_code") or "") or [str(refund["order_id"])])[-1]
+    if refund.get("method") == "transfer":
+        text = f"Возврат по заказу №{num} оформлен — деньги переведены вам на карту."
     else:
-        await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+        text = (f"Возврат по заказу №{num} оформлен: <b>{_rub(refund['amount'])}</b> вернутся "
+                f"на карту, с которой вы платили. Обычно это 1–5 рабочих дней, но иногда "
+                f"банку нужно больше времени.")
+    return text + "\n\nЕсли будут вопросы — просто напишите сюда."
 
 
-async def _notify_client(order: dict, amount: float) -> bool:
-    text = (f"Возврат по заказу №{_num(order)} оформлен: <b>{_rub(amount)}</b> вернутся "
-            f"на карту, с которой вы платили. Обычно это 1–5 рабочих дней, но иногда "
-            f"банку нужно больше времени.\n\nЕсли будут вопросы — просто напишите сюда.")
+async def _notify_client(order: dict, text: str) -> bool:
     main_bot = Bot(token=config.BOT_TOKEN)
     try:
         await main_bot.send_message(order["user_id"], text, parse_mode="HTML")
@@ -473,9 +536,13 @@ async def cb_done(callback: CallbackQuery, state: FSMContext):
         return
     order = await db.get_order(data["oid"])
     actor = _actor(callback)
+    if not data.get("method"):
+        await callback.answer("Выберите, как вернули деньги.", show_alert=True)
+        return
     refund_id = await db.add_refund(
         order["id"], data["amount"], data["paid"], data["full"], data["reason"],
-        data.get("delivery"), data.get("stock"), callback.from_user.id, actor)
+        data.get("delivery"), data.get("stock"), callback.from_user.id, actor,
+        method=data["method"])
     await state.clear()
     if refund_id is None:
         await callback.answer("Возврат по этому заказу уже записан.", show_alert=True)
@@ -487,9 +554,6 @@ async def cb_done(callback: CallbackQuery, state: FSMContext):
     if data.get("stock"):
         await _return_stock(callback.from_user.id, order)
     await _drop_review_push(order)
-    notified = await _notify_client(order, data["amount"])
-    if notified:
-        await db.set_refund_field(order["id"], "client_notified", 1)
     _sync_finance()
     await _refresh_cards(callback.bot, order["id"])
 
@@ -500,8 +564,7 @@ async def cb_done(callback: CallbackQuery, state: FSMContext):
         "• Выручка, налог и прибыль текущего периода уменьшены — делёж 60/40 "
         "считается уже с учётом возврата",
         "• В таблице: строка на листе операций и запись на листе «Возвраты»",
-        "• Клиенту отправлено сообщение о возврате" if notified
-        else "• ⚠️ Клиенту написать не удалось (заблокировал бота?) — напишите сами",
+        "• Способ: " + ("перевод со счёта" if refund.get("method") == "transfer" else "Prodamus"),
         "",
         receipt_text(refund),
     ]
@@ -511,6 +574,44 @@ async def cb_done(callback: CallbackQuery, state: FSMContext):
         lines.append("<i>Когда посылка приедет — решите про расходники кнопкой в карточке.</i>")
     await callback.message.edit_text("\n".join(lines), parse_mode="HTML",
                                      reply_markup=_receipt_kb(order["id"]))
+    # Писать ли клиенту — решает админ: деньги могли уже обсудить в личке
+    await callback.message.answer(
+        "✉️ <b>Написать клиенту о возврате?</b>\n\nТекст:\n<i>" + client_text(refund) + "</i>",
+        parse_mode="HTML",
+        reply_markup=_kb([("✉️ Написать", f"rf:ntf:{order['id']}")],
+                         [("🙅 Не писать", f"rf:nntf:{order['id']}")]))
+
+
+@router.callback_query(F.data.startswith("rf:ntf:") | F.data.startswith("rf:nntf:"))
+async def cb_notify_choice(callback: CallbackQuery):
+    order = await _load(callback)
+    if not order:
+        return
+    refund = next((r for r in await db.get_refunds() if r["order_id"] == order["id"]), None)
+    if not refund:
+        await callback.answer("Возврат не найден.", show_alert=True)
+        return
+    if refund.get("client_notified"):
+        await callback.answer("Уже решено.", show_alert=True)
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        return
+    if callback.data.startswith("rf:nntf:"):
+        await db.set_refund_field(order["id"], "client_notified", 2)
+        await callback.answer("Ок, не пишем")
+        await callback.message.edit_text("🙅 Клиенту о возврате не писали.")
+    else:
+        text = client_text(refund)
+        if not await _notify_client(order, text):
+            await callback.answer("Не получилось — клиент заблокировал бота?", show_alert=True)
+            return
+        await db.set_refund_field(order["id"], "client_notified", 1)
+        await callback.answer("Отправлено ✅")
+        await callback.message.edit_text("✉️ Клиенту отправлено:\n<i>" + text + "</i>",
+                                         parse_mode="HTML")
+    _sync_finance()
 
 
 # ── Чек в «Мой налог» ───────────────────────────────────────────────────

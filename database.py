@@ -401,6 +401,12 @@ async def init_db(existing_cdek_contract: str | None = None):
                 created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Как вернули деньги: prodamus — заявкой в кабинете Prodamus,
+        # transfer — переводом клиенту со счёта проекта
+        try:
+            await db.execute("ALTER TABLE refunds ADD COLUMN method TEXT DEFAULT 'prodamus'")
+        except Exception:
+            pass
         # Порядок товаров в каталоге (меньше — выше). NULL у старых товаров
         # заполняется их id, чтобы исходный порядок не поменялся.
         try:
@@ -2397,18 +2403,20 @@ async def order_paid_amount(order: dict) -> float:
 
 async def add_refund(order_id: int, amount: float, paid: float, full: bool,
                      reason: str, return_delivery: float | None,
-                     stock_returned: bool | None, by_id: int, by_name: str) -> int | None:
+                     stock_returned: bool | None, by_id: int, by_name: str,
+                     method: str = "prodamus") -> int | None:
     """Записывает возврат. None — по заказу возврат уже есть (двойной клик)."""
     async with aiosqlite.connect(DB_PATH) as db:
         try:
             cur = await db.execute(
                 """INSERT INTO refunds (order_id, amount, paid, full, reason,
-                       return_delivery, stock_returned, created_by_id, created_by_name)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       return_delivery, stock_returned, created_by_id, created_by_name,
+                       method)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (order_id, round(amount, 2), round(paid, 2), int(full), reason,
                  None if return_delivery is None else round(return_delivery, 2),
                  None if stock_returned is None else int(stock_returned),
-                 by_id, by_name),
+                 by_id, by_name, method),
             )
         except aiosqlite.IntegrityError:
             return None
