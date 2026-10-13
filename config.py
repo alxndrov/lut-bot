@@ -79,6 +79,22 @@ PRODAMUS_SECRET_PHYSICAL_OLD: str = os.getenv("PRODAMUS_SECRET_PHYSICAL_OLD", ""
 
 PRODAMUS_FEE_PERCENT: float = float(os.getenv("PRODAMUS_FEE_PERCENT", "3.5"))
 
+# ЮKassa — второй способ оплаты. Какой из двух отдаёт ссылка, решает
+# настройка в malimadmins (/payments), см. handlers/pay_router.py.
+# Ключи физтоваров, если не заданы, — те же, что у основного магазина.
+YOOKASSA_SHOP_ID: str = os.getenv("YOOKASSA_SHOP_ID", "")
+YOOKASSA_SECRET_KEY: str = os.getenv("YOOKASSA_SECRET_KEY", "")
+YOOKASSA_SHOP_ID_PHYSICAL: str = os.getenv("YOOKASSA_SHOP_ID_PHYSICAL", "") or YOOKASSA_SHOP_ID
+YOOKASSA_SECRET_KEY_PHYSICAL: str = os.getenv("YOOKASSA_SECRET_KEY_PHYSICAL", "") or YOOKASSA_SECRET_KEY
+YOOKASSA_ENABLED: bool = bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+# Ссылки на оплату ведут на наш адрес (/pay/…), а он уже отправляет в
+# Prodamus или ЮKassa — так видно переход и работает переключение. Пусто —
+# ссылки по-старому, прямо на Prodamus. По умолчанию — домен мини-приложения.
+PAY_BASE_URL: str = (os.getenv("PAY_BASE_URL", "")
+                     or "/".join(os.getenv("MINIAPP_URL", "").split("/")[:3])).rstrip("/")
+# Через сколько минут после перехода на Prodamus без оплаты предложить ЮKassa
+PAY_BACKUP_DELAY_MIN: int = int(os.getenv("PAY_BACKUP_DELAY_MIN", "3"))
+
 # Условия с партнёром. Физтовары (микрофоны): Даня получает процент от
 # стоимости товара плюс фиксированную сумму за каждую напечатанную им ручку,
 # Миша — весь остаток прибыли. Цифровые товары делятся по-старому.

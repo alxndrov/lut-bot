@@ -12,6 +12,7 @@ from handlers import start, catalog, payment, admin, delivery, waitlist_handler,
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds
 from handlers import course, course_admin, course_orders, course_invoice, friend_order
+from handlers import pay_router, payments_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
 from services.finance_reports import report_loop
@@ -86,6 +87,8 @@ async def main():
         logging.warning(f"get_me не удался: {e}")
         bot_username = ""
     course.setup_web(webhook_app, bot_username)
+    pay_router.setup_web(webhook_app, bot_username)
+    asyncio.create_task(pay_router.pay_worker(bot))
     # Кнопка приложения курса: до анонса — только админам
     await course.sync_menu_button(bot)
     runner = web.AppRunner(webhook_app)
@@ -108,6 +111,7 @@ async def main():
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)
         admin_dp.include_router(finance.router)
+        admin_dp.include_router(payments_admin.router)
         admin_dp.include_router(debug_cmd.router)
         admin_dp.include_router(consumables.router)
         admin_dp.include_router(reviews.router)
@@ -130,6 +134,7 @@ async def main():
                 BotCommand(command="sentorders", description="📦 Отправленные заказы"),
                 BotCommand(command="courseorders", description="🎓 Заказы по курсу"),
                 BotCommand(command="finance", description="💳 Финансы"),
+                BotCommand(command="payments", description="🔀 Оплата: Prodamus / ЮKassa"),
                 BotCommand(command="stock", description="📦 Расходники"),
                 BotCommand(command="reviews", description="⭐️ Отзывы клиентов"),
                 # Остальные команды работают, но в меню не выносятся, чтобы

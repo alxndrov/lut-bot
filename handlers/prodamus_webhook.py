@@ -61,14 +61,17 @@ async def handle_webhook(request: web.Request, secret: str | list = "") -> web.R
         order_num = raw.get("order_num", "")
         if order_num:
             try:
-                parts = order_num.split("_", 2)
-                user_id = int(parts[1])
-                await bot.send_message(
-                    user_id,
-                    "😔 К сожалению, оплата не прошла.\n\n"
-                    "Попробуйте ещё раз — вернитесь в каталог и нажмите «Купить».",
-                    reply_markup=_back_to_catalog_keyboard(),
-                )
+                # Есть ЮKassa — сразу запасная ссылка на тот же заказ
+                from handlers.pay_router import offer_after_failure
+                if not await offer_after_failure(bot, order_num):
+                    parts = order_num.split("_", 2)
+                    user_id = int(parts[1])
+                    await bot.send_message(
+                        user_id,
+                        "😔 К сожалению, оплата не прошла.\n\n"
+                        "Попробуйте ещё раз — вернитесь в каталог и нажмите «Купить».",
+                        reply_markup=_back_to_catalog_keyboard(),
+                    )
             except Exception:
                 pass
         return web.Response(text="ok")
@@ -109,6 +112,43 @@ async def handle_webhook(request: web.Request, secret: str | list = "") -> web.R
 async def provision_payment(bot: Bot, user_id: int, product_id: int, order_type: str,
                             prodamus_order_id: str, amount: int,
                             gift: bool = False) -> bool | None:
+    """Проводит оплаченный заказ — см. _provision_payment. Здесь же ловим
+    вторую оплату того же заказа: клиент оплатил в Prodamus и по запасной
+    ссылке ЮKassa (или наоборот). Товар второй раз не выдаём, админам —
+    вернуть деньги."""
+    order_num = f"{order_type}_{user_id}_{product_id}"
+    click = await db.get_pay_click(order_num) if prodamus_order_id and not gift else None
+    if (click and click["paid_at"] and click["paid_payment_id"] != prodamus_order_id
+            and click["clicked_at"] <= click["paid_at"]
+            and datetime.strptime(click["paid_at"][:19], "%Y-%m-%d %H:%M:%S")
+            >= datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
+            and not await db.get_purchase_by_payment_id(prodamus_order_id)):
+        logger.warning(f"оплата: {order_num} оплачен второй раз ({prodamus_order_id}, "
+                       f"первый — {click['paid_payment_id']})")
+        await _send_notify(bot, (
+            f"⚠️ <b>Заказ оплачен дважды</b>\n\n"
+            f"{order_num} · {amount} ₽\n"
+            f"Первая оплата: {click['paid_payment_id']}\n"
+            f"Вторая: {prodamus_order_id}\n\n"
+            f"Товар второй раз не выдан. Вторую оплату нужно вернуть клиенту "
+            f"({'кабинет ЮKassa' if prodamus_order_id.startswith('yk-') else 'кабинет Prodamus'})."))
+        try:
+            await bot.send_message(user_id, (
+                "Похоже, заказ оплачен дважды — вторую оплату мы вернём, "
+                "команда уже в курсе 🤍"))
+        except Exception:
+            pass
+        return None
+    result = await _provision_payment(bot, user_id, product_id, order_type,
+                                      prodamus_order_id, amount, gift)
+    if result and prodamus_order_id:
+        await db.mark_pay_paid(order_num, prodamus_order_id)
+    return result
+
+
+async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type: str,
+                             prodamus_order_id: str, amount: int,
+                             gift: bool = False) -> bool | None:
     """Проводит оплаченный заказ: покупка, уведомление админам, выдача товара.
 
     gift — заказ для друга в подарок (handlers/friend_order.py): заказ уходит

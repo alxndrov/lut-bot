@@ -20,6 +20,8 @@ import logging
 import re
 from urllib.parse import quote
 
+import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -109,8 +111,27 @@ def build_payment_url(
     на link.payform.ru/?orderId=<uuid>, создав заказ. Ломает её только
     эмодзи в названии товара — их снимает clean_product_name.
     """
+    if config.PAY_BASE_URL:
+        # Через наш адрес: там решается, Prodamus или ЮKassa, и виден переход
+        # (см. handlers/pay_router.py). Ссылку Prodamus собирает prodamus_url.
+        from services.paylinks import link
+        return link(f"{order_type}_{user_id}_{product_id}", price, product_name)
     params = _payment_params(product_name, price, user_id, product_id,
                              order_type, secret, notification_url, do="pay")
+    return shop_url.rstrip("/") + "/?" + _urlencode(params)
+
+
+def prodamus_url(order_num: str, price: int, product_name: str) -> str:
+    """Прямая ссылка Prodamus по номеру заказа: физтовары ('p_…') — в свой
+    магазин, остальное — в основной, как и раньше выбирали вызывающие."""
+    order_type, user_id, product_id = order_num.split("_", 2)
+    physical = order_type == "p"
+    shop_url = config.PRODAMUS_SHOP_URL_PHYSICAL if physical else config.PRODAMUS_SHOP_URL
+    params = _payment_params(
+        product_name, price, int(user_id), int(product_id), order_type,
+        config.PRODAMUS_SECRET_PHYSICAL if physical else config.PRODAMUS_SECRET,
+        config.PRODAMUS_WEBHOOK_URL_PHYSICAL if physical else config.PRODAMUS_WEBHOOK_URL,
+        do="pay")
     return shop_url.rstrip("/") + "/?" + _urlencode(params)
 
 

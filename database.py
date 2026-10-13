@@ -553,6 +553,39 @@ async def init_db(existing_cdek_contract: str | None = None):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Переходы по нашим ссылкам на оплату (/pay/…) — строка на заказ
+        # (order_num). provider — куда отправили; paid_at — когда пришла
+        # оплата; backup_sent_at — когда предложили запасную ссылку ЮKassa
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pay_clicks (
+                order_num       TEXT PRIMARY KEY,
+                user_id         INTEGER NOT NULL,
+                amount          INTEGER NOT NULL,
+                name            TEXT NOT NULL,
+                provider        TEXT NOT NULL,
+                clicks          INTEGER NOT NULL DEFAULT 1,
+                clicked_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid_at         TIMESTAMP,
+                paid_payment_id TEXT,
+                backup_sent_at  TIMESTAMP
+            )
+        """)
+        # Платежи ЮKassa, созданные ботом: по ним опрашиваем статус и по
+        # ним же узнаём магазин (kind) для уведомления
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS yk_payments (
+                id               TEXT PRIMARY KEY,
+                order_num        TEXT NOT NULL,
+                kind             TEXT NOT NULL,
+                amount           INTEGER NOT NULL,
+                confirmation_url TEXT,
+                status           TEXT NOT NULL DEFAULT 'pending',
+                income           REAL,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                checked_at       TIMESTAMP,
+                done_at          TIMESTAMP
+            )
+        """)
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -4471,3 +4504,159 @@ async def get_user(user_id: int) -> Optional[dict]:
         async with db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+# ── Ссылки на оплату и ЮKassa (handlers/pay_router.py) ───────────────────────
+
+async def record_pay_click(order_num: str, user_id: int, amount: int, name: str,
+                           provider: str):
+    """Переход по ссылке на оплату. Переход после уже пришедшей оплаты —
+    новая покупка того же: прошлую оплату и запасную ссылку забываем. Через
+    сутки запасную ссылку снова можно предложить."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO pay_clicks (order_num, user_id, amount, name, provider)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(order_num) DO UPDATE SET
+                   amount = excluded.amount, name = excluded.name,
+                   provider = excluded.provider, clicks = clicks + 1,
+                   backup_sent_at = CASE WHEN paid_at IS NOT NULL
+                       OR clicked_at < datetime('now', '-1 day')
+                       THEN NULL ELSE backup_sent_at END,
+                   paid_payment_id = CASE WHEN paid_at IS NOT NULL THEN NULL
+                       ELSE paid_payment_id END,
+                   paid_at = NULL,
+                   clicked_at = CURRENT_TIMESTAMP""",
+            (order_num, user_id, amount, name, provider),
+        )
+        await db.commit()
+
+
+async def get_pay_click(order_num: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM pay_clicks WHERE order_num = ?",
+                              (order_num,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def mark_pay_paid(order_num: str, payment_id: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE pay_clicks SET paid_at = CURRENT_TIMESTAMP, paid_payment_id = ?
+               WHERE order_num = ?""", (payment_id, order_num))
+        await db.commit()
+
+
+async def due_pay_backups(delay_min: int) -> list[dict]:
+    """Перешли на Prodamus delay_min+ минут назад (но не больше 2 часов) и не
+    оплатили, запасную ссылку ещё не предлагали."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM pay_clicks
+               WHERE provider = 'prodamus' AND paid_at IS NULL AND backup_sent_at IS NULL
+                 AND clicked_at <= datetime('now', ?) AND clicked_at >= datetime('now', '-2 hours')""",
+            (f"-{int(delay_min)} minutes",),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def claim_pay_backup(order_num: str) -> bool:
+    """Отмечает, что запасная ссылка отправлена. False — её уже отправили."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """UPDATE pay_clicks SET backup_sent_at = CURRENT_TIMESTAMP
+               WHERE order_num = ? AND backup_sent_at IS NULL""", (order_num,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def pay_stats(hours: int = 24) -> dict:
+    since = f"-{int(hours)} hours"
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT COUNT(*), SUM(paid_at IS NOT NULL),
+                      SUM(backup_sent_at >= datetime('now', ?))
+               FROM pay_clicks WHERE clicked_at >= datetime('now', ?)""",
+            (since, since)) as cur:
+            clicks, paid, backups = await cur.fetchone()
+        async with db.execute(
+            """SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM yk_payments
+               WHERE status = 'succeeded' AND done_at >= datetime('now', ?)""",
+            (since,)) as cur:
+            yk_count, yk_sum = await cur.fetchone()
+    return {"clicks": clicks or 0, "paid": paid or 0, "backups": backups or 0,
+            "yk_count": yk_count or 0, "yk_sum": yk_sum or 0}
+
+
+async def add_yk_payment(payment_id: str, order_num: str, kind: str, amount: int,
+                         confirmation_url: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO yk_payments (id, order_num, kind, amount, confirmation_url)
+               VALUES (?, ?, ?, ?, ?)""",
+            (payment_id, order_num, kind, amount, confirmation_url))
+        await db.commit()
+
+
+async def get_yk_payment(payment_id: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM yk_payments WHERE id = ?", (payment_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def fresh_yk_payment(order_num: str, amount: int, minutes: int = 20) -> Optional[dict]:
+    """Неоплаченный платёж ЮKassa на тот же заказ и сумму, созданный только
+    что, — повторный переход ведём на него, а не плодим новые."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM yk_payments
+               WHERE order_num = ? AND amount = ? AND status = 'pending'
+                 AND confirmation_url IS NOT NULL
+                 AND created_at >= datetime('now', ?)
+               ORDER BY created_at DESC LIMIT 1""",
+            (order_num, amount, f"-{int(minutes)} minutes")) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def yk_payments_to_check() -> list[dict]:
+    """Ждущие оплаты платежи ЮKassa: первый час — каждый проход опроса,
+    потом до двух суток — не чаще раза в 10 минут."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM yk_payments
+               WHERE status = 'pending' AND created_at >= datetime('now', '-2 days')
+                 AND (created_at >= datetime('now', '-1 hour') OR checked_at IS NULL
+                      OR checked_at <= datetime('now', '-10 minutes'))"""
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_yk_status(payment_id: str, status: str, income: float | None = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE yk_payments SET status = ?, income = COALESCE(?, income),
+                   checked_at = CURRENT_TIMESTAMP,
+                   done_at = CASE WHEN ? != 'pending' THEN CURRENT_TIMESTAMP ELSE done_at END
+               WHERE id = ?""",
+            (status, income, status, payment_id))
+        await db.commit()
+
+
+async def claim_yk_payment(payment_id: str) -> bool:
+    """Берёт оплаченный платёж в выдачу ровно один раз (опрос и уведомление
+    ЮKassa могут прийти одновременно). False — его уже взяли."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """UPDATE yk_payments SET status = 'succeeded', done_at = CURRENT_TIMESTAMP,
+                   checked_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status != 'succeeded'""", (payment_id,))
+        await db.commit()
+        return cur.rowcount > 0
