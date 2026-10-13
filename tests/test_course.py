@@ -149,6 +149,22 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
         rows = await db.get_course_lookers(exclude=[9])
         self.assertEqual([(r["user_id"], r["views"], r["source"]) for r in rows], [(7, 2, "app")])
 
+    async def test_invoice_options_for_new_and_existing_client(self):
+        from handlers import course_invoice
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("INSERT INTO users(user_id, username, first_name) VALUES (7, 'anya', 'Аня')")
+            await conn.commit()
+        self.assertEqual((await db.get_user_by_username("Anya"))["user_id"], 7)
+        text, kb = await course_invoice.options_screen(7)
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertEqual(len(labels), 5)            # 4 варианта + «В меню»
+        pid = await db.add_course_purchase(7, "anya", 14, self.bundle, "p1", 4490)
+        await db.grant_course_access(7, ["shooting", "editing"], pid)
+        text, kb = await course_invoice.options_screen(7)
+        labels = [b.text for row in kb.inline_keyboard for b in row]
+        self.assertEqual(labels[0], "Переход на VIP · 8 000 ₽")   # 12 490 − 4 490
+        self.assertIn("cinv:opt:7:", kb.inline_keyboard[0][0].callback_data)
+
     async def test_real_payment_overrides_test_and_survives_reset(self):
         await db.grant_course_access(7, ["shooting"], None, test=True)
         purchase_id = await db.add_course_purchase(7, None, 14, self.shoot, "p1", 2490)

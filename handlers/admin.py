@@ -231,11 +231,17 @@ async def cb_course_lookers(callback: CallbackQuery):
         lines.append(f"…и ещё {len(rows) - 40}")
     if not rows:
         lines.append("<i>Пока никого — или все, кто смотрел, купили.</i>")
-    lines += ["", "<i>Дата — когда открывали последний раз. Купившие из списка уходят сами.</i>"]
+    lines += ["", "<i>Дата — когда открывали последний раз. Купившие из списка уходят сами. "
+                  "Нажми на человека, чтобы выставить ему счёт.</i>"]
+    buttons = []
+    for r in rows[:20]:
+        who = f"@{r['username']}" if r.get("username") else (r.get("first_name") or f"id:{r['user_id']}")
+        buttons.append([InlineKeyboardButton(text=f"🧾 {who} — выставить счёт",
+                                             callback_data=f"admin:cinv_user:{r['user_id']}")])
+    buttons.append([InlineKeyboardButton(text="◀️ Назад", callback_data="admin:pending")])
     await callback.message.edit_text(
         "\n".join(lines), parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="◀️ Назад", callback_data="admin:pending")]]))
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await callback.answer()
 
 

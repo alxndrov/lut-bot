@@ -4454,6 +4454,17 @@ async def get_course_buyers() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def get_user_by_username(username: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM users WHERE lower(username) = lower(?) ORDER BY last_seen DESC LIMIT 1",
+            (username,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
 async def get_user(user_id: int) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
