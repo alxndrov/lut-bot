@@ -186,8 +186,7 @@ async def check_yk_payment(bot: Bot, row: dict):
 BACKUP_TEXT = (
     "Получилось оплатить? 🙂\n\n"
     "Если страница оплаты не открылась или карта не проходит, вот запасной способ — "
-    "через ЮKassa: карта, СБП или SberPay. Сумма та же, {amount} ₽.\n\n"
-    "А если уже оплатили, ничего делать не нужно: подтверждение придёт сюда."
+    "через ЮKassa: карта, СБП или SberPay. Сумма та же, {amount} ₽."
 )
 FAILED_TEXT = (
     "😔 Оплата не прошла. Так бывает: банк иногда отклоняет платёж.\n\n"
@@ -224,7 +223,9 @@ async def _send_backups(bot: Bot):
     for click in await db.due_pay_backups(config.PAY_BACKUP_DELAY_MIN):
         if not await db.claim_pay_backup(click["order_num"]):
             continue
-        if not await _backup_allowed(click):
+        # Оплата могла прийти, пока шёл обход, — спрашиваем только неоплативших
+        fresh = await db.get_pay_click(click["order_num"])
+        if not fresh or fresh["paid_at"] or not await _backup_allowed(fresh):
             continue
         try:
             await bot.send_message(
