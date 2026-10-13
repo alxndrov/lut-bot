@@ -128,6 +128,7 @@ GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "google-serv
 # Нужна, чтобы бот считал свободные деньги на счету так же, как таблица.
 EARLY_PAYOUTS: float = float(os.getenv("EARLY_PAYOUTS", "8967.44"))
 GOOGLE_SHEET_FINANCE_TAB: str = os.getenv("GOOGLE_SHEET_FINANCE_TAB", "Финансы")
+METRICS_SHEET_ID: str = os.getenv("METRICS_SHEET_ID", "")
 GSHEETS_ENABLED: bool = bool(GOOGLE_SHEET_ID)
 DAILY_REPORT_HOUR_MSK: int = int(os.getenv("DAILY_REPORT_HOUR_MSK", "9"))
 
