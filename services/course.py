@@ -154,12 +154,26 @@ def is_call_option(option: dict) -> bool:
     return bool(option.get("call_bonus"))
 
 
-def price_for_user(option: dict, paid: int, now: datetime | None = None) -> int:
-    """Цена опции для человека. На VIP уже купившие доплачивают разницу:
-    цена VIP минус всё, что заплачено за курс раньше."""
+def bundle_option(options: list[dict]) -> dict | None:
+    """Пакет — вариант с обоими разделами, но без созвона."""
+    return next((o for o in options if len(option_sections(o)) > 1
+                 and not is_call_option(o)), None)
+
+
+def price_for_user(option: dict, paid: int, bundle: dict | None = None,
+                   now: datetime | None = None) -> int:
+    """Цена опции для человека, который уже что-то купил (paid — сколько
+    заплатил за курс раньше):
+    • VIP — цена VIP минус всё заплаченное;
+    • второй раздел (или пакет) — цена пакета минус заплаченное за первый,
+      но не дороже, чем раздел стоит сам по себе."""
     price = price_for(option, now)
-    if is_call_option(option) and paid:
+    if not paid:
+        return price
+    if is_call_option(option):
         return max(0, price - paid)
+    if bundle:
+        return max(0, min(price, price_for(bundle, now) - paid))
     return price
 
 

@@ -94,6 +94,7 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
     paid = await db.get_user_course_paid(user_id)
     has_call = bool(await db.get_user_course_call(user_id))
     full = svc.is_full_price()
+    bundle = svc.bundle_option(options)
     reviews_left = max(0, config.BUNDLE_REVIEW_LIMIT - await db.count_bundle_reviews())
 
     lines = [f"<b>{product['name']}</b>"]
@@ -109,8 +110,12 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
             topup = svc.price_for_user(o, paid)
             mark = (" ✓ куплено" if has_call else
                     f" · тебе доплата {svc.rub(topup)}" if owned and topup < svc.price_for(o) else "")
+        elif set(svc.option_sections(o)) <= owned:
+            mark = " ✓ куплено"
         else:
-            mark = " ✓ куплено" if set(svc.option_sections(o)) <= owned else ""
+            topup = svc.price_for_user(o, paid, bundle)
+            mark = (f" · тебе {svc.rub(topup)}" if owned and len(svc.option_sections(o)) == 1
+                    and topup < svc.price_for(o) else "")
         lines.append(f"• <b>{o['title']}</b> — {price}{later}{mark}")
     schedule = svc.price_schedule_text()
     if schedule:
@@ -125,6 +130,8 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
         when = ("Уроки уже в приложении." if svc.is_open()
                 else f"Уроки откроются {svc.open_date_text()} — пришлём сообщение.")
         lines += ["", f"У тебя открыто: <b>{names}</b>. {when}"]
+        if bundle and len(owned) == 1:
+            lines.append("Второй раздел — по цене пакета минус то, что ты уже заплатил.")
     if config.COURSE_OFFER_URL:
         lines += ["", f'Оплачивая, ты принимаешь <a href="{config.COURSE_OFFER_URL}">оферту</a>.']
     if admin and not product.get("active"):
@@ -133,7 +140,7 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
     rows = []
     if config.PRODAMUS_SHOP_URL:
         for o in svc.available_options(options, owned, has_call):
-            price = svc.price_for_user(o, paid)
+            price = svc.price_for_user(o, paid, bundle)
             if not price:
                 continue
             if owned and svc.is_call_option(o):
@@ -392,6 +399,8 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
     options = await db.get_course_options(product["id"]) if product else []
     # Админ может посмотреть приложение «как после старта» до открытия
     is_open = svc.is_open() or (admin and preview_open)
+    bundle = svc.bundle_option(options)
+    paid = await db.get_user_course_paid(user_id)
     sections = []
     for slug, title in svc.SECTIONS.items():
         program = svc.PROGRAM[slug]
@@ -400,13 +409,14 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
         sections.append({
             "slug": slug, "title": title, "name": program["name"], "lead": program["lead"],
             "owned": has, "test": slug in test_owned,
-            "price": svc.price_for(option) if option else None,
-            "price_full": option["price_full"] if option else None,
+            # Докупка второго раздела — по цене пакета минус заплаченное,
+            # зачёркнутой показываем обычную цену раздела
+            "price": svc.price_for_user(option, paid, bundle) if option else None,
+            "price_full": (svc.price_for(option) if paid else option["price_full"])
+                          if option else None,
             "lessons": [{"n": i + 1, "title": t, "open": has and is_open}
                         for i, t in enumerate(program["lessons"])],
         })
-    bundle = next((o for o in options if len(svc.option_sections(o)) > 1
-                   and not svc.is_call_option(o)), None)
     vip = next((o for o in options if svc.is_call_option(o)), None)
     call = await db.get_user_course_call(user_id)
     materials = []
@@ -450,7 +460,7 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             "link": review_order["link"] if review_order else None,
         },
         "vip": {"title": vip["title"], "upgrade": bool(owned),
-                "price": svc.price_for_user(vip, await db.get_user_course_paid(user_id))}
+                "price": svc.price_for_user(vip, paid)}
                if vip and not call else None,
         "call": {
             "until": svc.date_text(call["expires_at"]),

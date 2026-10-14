@@ -212,6 +212,27 @@ class VipCallTest(unittest.TestCase):
         self.assertEqual(svc.price_for_user(opts[1], 0), 12490)
         self.assertEqual(svc.price_for_user(opts[1], 4990), 7500)
 
+    def test_second_section_is_bundle_minus_paid(self):
+        shoot = {"slug": "shooting", "sections": "shooting",
+                 "price": 2990, "price_mid": 3990, "price_full": 4990}
+        edit = {"slug": "editing", "sections": "editing",
+                "price": 3490, "price_mid": 4790, "price_full": 5990}
+        bundle = {"slug": "bundle", "sections": "shooting,editing",
+                  "price": 4990, "price_mid": 6990, "price_full": 8990}
+        pre = datetime(2026, 10, 20, tzinfo=svc.MSK)
+        full = datetime(2026, 11, 10, tzinfo=svc.MSK)
+        # Ничего не куплено — обычная цена
+        self.assertEqual(svc.price_for_user(edit, 0, bundle, now=pre), 3490)
+        # Купил съёмку за 2 990 → монтаж = 4 990 − 2 990
+        self.assertEqual(svc.price_for_user(edit, 2990, bundle, now=pre), 2000)
+        # Купил монтаж за 3 490 → съёмка = 4 990 − 3 490
+        self.assertEqual(svc.price_for_user(shoot, 3490, bundle, now=pre), 1500)
+        # Полные цены, раздел куплен за полную: 8 990 − 4 990
+        self.assertEqual(svc.price_for_user(edit, 4990, bundle, now=full), 4000)
+        # Куплен на предпродаже, докупает после 8.11: 8 990 − 2 990 = 6 000,
+        # но не дороже самого раздела (5 990)
+        self.assertEqual(svc.price_for_user(edit, 2990, bundle, now=full), 5990)
+
 
 class CourseOrdersTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

@@ -82,7 +82,7 @@ async def options_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | Non
         done = has_call if is_call else set(svc.option_sections(o)) <= owned
         if done:
             continue
-        price = svc.price_for_user(o, paid)
+        price = svc.price_for_user(o, paid, svc.bundle_option(options))
         label = ("Переход на VIP" if is_call and owned else o["title"])
         rows.append([InlineKeyboardButton(text=f"{label} · {svc.rub(price)}",
                                           callback_data=f"cinv:opt:{user_id}:{o['id']}")])
@@ -172,7 +172,9 @@ async def cb_option(callback: CallbackQuery):
     if not option:
         await callback.answer("Вариант не найден.", show_alert=True)
         return
-    price = svc.price_for_user(option, await db.get_user_course_paid(int(uid)))
+    options = await db.get_course_options(option["product_id"])
+    price = svc.price_for_user(option, await db.get_user_course_paid(int(uid)),
+                               svc.bundle_option(options))
     await callback.answer()
     await _link_message(callback.message, int(uid), int(oid), price)
 
