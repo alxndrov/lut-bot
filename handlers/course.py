@@ -293,7 +293,7 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
             again = ("\n⬆️ Переход на VIP — доплата" if svc.is_call_option(option)
                      else "\n♻️ Докупка второго раздела")
         await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {user.get('first_name') or '—'} {who}\n"
-                          f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}")
+                          f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}", sale=payment_id)
 
     call_until = None
     if svc.is_call_option(option):

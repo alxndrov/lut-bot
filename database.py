@@ -860,6 +860,22 @@ async def init_db(existing_cdek_contract: str | None = None):
             if existing_cdek_contract:
                 await db.execute("UPDATE orders SET cdek_contract = ?",
                                  (existing_cdek_contract,))
+        # Строка о чеке «Мой налог» в карточке заказа (оплаты ЮKassa) и
+        # уведомления о продаже курса/цифры, которые потом дописываем
+        # строкой о чеке (services/npd_receipts.update_sale_messages)
+        try:
+            await db.execute("ALTER TABLE orders ADD COLUMN receipt_line TEXT DEFAULT NULL")
+        except Exception:
+            pass
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sale_messages (
+                payment_id TEXT NOT NULL,
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                text       TEXT NOT NULL,
+                PRIMARY KEY (payment_id, chat_id)
+            )
+        """)
         # Заказ для друга (оформляет админ, см. handlers/friend_order.py):
         # friend_by — кто оформил, pickup — самовывоз без накладной СДЭК
         for table in ("pending_deliveries", "orders"):
@@ -4687,6 +4703,36 @@ async def add_yk_payment(payment_id: str, order_num: str, kind: str, amount: int
             """INSERT OR IGNORE INTO yk_payments (id, order_num, kind, amount, confirmation_url)
                VALUES (?, ?, ?, ?, ?)""",
             (payment_id, order_num, kind, amount, confirmation_url))
+        await db.commit()
+
+
+async def add_sale_message(payment_id: str, chat_id: int, message_id: int, text: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO sale_messages(payment_id, chat_id, message_id, text) "
+            "VALUES (?, ?, ?, ?)", (payment_id, chat_id, message_id, text))
+        await db.commit()
+
+
+async def get_sale_messages(payment_id: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM sale_messages WHERE payment_id = ?",
+                              (payment_id,)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_order_id_by_payment(payment_id: str) -> Optional[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id FROM orders WHERE prodamus_order_id = ? "
+                              "ORDER BY id LIMIT 1", (payment_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
+
+
+async def set_order_receipt_line(order_id: int, line: str | None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET receipt_line = ? WHERE id = ?", (line, order_id))
         await db.commit()
 
 

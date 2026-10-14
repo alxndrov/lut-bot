@@ -85,6 +85,33 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[-1], ("cancel", "uuid1", "Возврат средств"))
 
 
+class SaleMessageTest(NpdReceiptsTest):
+    async def test_sale_message_gets_receipt_line(self):
+        from unittest import mock
+        edits = []
+
+        class FakeAdminBot:
+            def __init__(self, token):
+                self.session = mock.AsyncMock()
+
+            async def edit_message_text(self, text, chat_id, message_id, **kw):
+                edits.append((chat_id, message_id, text))
+        await db.add_sale_message("yk-9", 111, 5, "🎓 <b>Курс оплачен</b>")
+        with mock.patch.object(npd_receipts, "Bot", FakeAdminBot):
+            await npd_receipts.issue_for_payment(FakeBot(), "yk-9", 7, "Курс", 4990.0, None)
+        self.assertEqual(edits[-1][:2], (111, 5))
+        self.assertIn("Курс оплачен", edits[-1][2])
+        self.assertIn("отправлен клиенту", edits[-1][2])
+
+        class BlockedBot(FakeBot):
+            async def send_message(self, chat_id, text, **kwargs):
+                raise RuntimeError("bot was blocked by the user")
+        await db.add_sale_message("yk-10", 111, 6, "💰 Новая покупка")
+        with mock.patch.object(npd_receipts, "Bot", FakeAdminBot):
+            await npd_receipts.issue_for_payment(BlockedBot(), "yk-10", 7, "LUT", 399.0, None)
+        self.assertIn("не доставлен", edits[-1][2])
+
+
 class ProdamusWatchTest(NpdReceiptsTest):
     async def test_missing_and_schedule(self):
         async with aiosqlite.connect(db.DB_PATH) as conn:

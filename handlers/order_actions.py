@@ -258,6 +258,8 @@ def _order_text(order: dict, prints: list | None = None) -> str:
         text += f"\n📦 <b>Трек-номер СДЭК:</b> <code>{order['cdek_number']}</code>"
     from handlers.refunds import refund_line
     text += refund_line(order)
+    if order.get("receipt_line"):   # чек «Мой налог» за оплату ЮKassa
+        text += f"\n\n{order['receipt_line']}"
     return text
 
 

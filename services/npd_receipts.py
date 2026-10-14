@@ -22,6 +22,17 @@ from services import npd
 logger = logging.getLogger(__name__)
 
 RETRY_EVERY = 600
+# Строка о чеке внизу уведомления о продаже / карточки заказа (оплаты ЮKassa)
+LINE_PENDING = "🧾 Чек: пробиваю в «Мой налог»…"
+LINE_FAILED = "⚠️ Чек ещё не пробит — бот повторяет сам, статус в /nalog"
+LINE_CANCELLED = "🧾 Чек отменён — возврат"
+
+
+def line_issued(url: str, delivered: bool) -> str:
+    link = f'<a href="{url}">Чек</a>'
+    return (f"🧾 {link} отправлен клиенту" if delivered else
+            f"⚠️ {link} пробит, но клиенту не доставлен (бот у него заблокирован?) — "
+            f"отправьте ссылку вручную")
 # Сверка: дошли ли до «Мой налог» чеки Продамуса. С 08.10.2026 Продамус перестал
 # их передавать — ждём неделю (до 21.10), потом напоминаем раз в неделю, пока не починят.
 S_PRODAMUS_FROM = "npd_prodamus_watch_from"   # с какой даты сверять оплаты (YYYY-MM-DD, МСК)
@@ -47,6 +58,39 @@ async def _notify_admins(text: str):
     await _send_notify(None, text)
 
 
+async def update_sale_messages(payment_id: str, line: str):
+    """Дописывает строку о чеке под уведомлением о продаже у всех админов:
+    курс и цифра — сообщение «Курс оплачен»/«Новая покупка», физтовар —
+    карточка заказа. Ошибка здесь не мешает самому чеку."""
+    try:
+        messages = await db.get_sale_messages(payment_id)
+        if messages:
+            admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+            try:
+                for m in messages:
+                    try:
+                        await admin_bot.edit_message_text(
+                            f"{m['text']}\n\n{line}", chat_id=m["chat_id"],
+                            message_id=m["message_id"], parse_mode="HTML",
+                            disable_web_page_preview=True)
+                    except Exception as e:
+                        logger.info(f"npd: уведомление {m['chat_id']}/{m['message_id']} "
+                                    f"не обновлено: {e}")
+            finally:
+                await admin_bot.session.close()
+        order_id = await db.get_order_id_by_payment(payment_id)
+        if order_id:
+            await db.set_order_receipt_line(order_id, line)
+            from handlers.order_actions import _sync_order_messages
+            admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+            try:
+                await _sync_order_messages(admin_bot, await db.get_order(order_id))
+            finally:
+                await admin_bot.session.close()
+    except Exception:
+        logger.exception(f"npd: строка о чеке для {payment_id} не обновлена")
+
+
 async def _try_issue(bot: Bot, row: dict) -> bool:
     paid = None
     if row.get("paid_at"):
@@ -58,12 +102,15 @@ async def _try_issue(bot: Bot, row: dict) -> bool:
     await db.set_npd_receipt(row["payment_id"], "issued", receipt_uuid=uuid)
     url = await npd.print_url(uuid)
     logger.info(f"npd: чек {uuid} за {row['payment_id']} — {row['amount']} ₽")
+    delivered = False
     if row.get("user_id"):
         try:
             await bot.send_message(row["user_id"], f'🧾 <a href="{url}">Чек об оплате</a> — '
                                                    f'{row["amount"]:.0f} ₽', parse_mode="HTML")
+            delivered = True
         except Exception as e:
             logger.info(f"npd: чек клиенту {row['user_id']} не отправлен: {e}")
+    await update_sale_messages(row["payment_id"], line_issued(url, delivered))
     return True
 
 
@@ -78,6 +125,7 @@ async def issue_for_payment(bot: Bot, payment_id: str, user_id: int | None, name
     except Exception as e:
         await db.set_npd_receipt(payment_id, "failed", error=str(e)[:300])
         logger.warning(f"npd: чек за {payment_id} не пробит: {e}")
+        await update_sale_messages(payment_id, LINE_FAILED)
         hint = ("Подключи «Мой налог» командой /nalog — бот пробьёт чек сам."
                 if isinstance(e, npd.NpdNotConnected) else
                 "Бот повторит сам каждые 10 минут; статус — /nalog.")
@@ -115,6 +163,7 @@ async def cancel_for_refund(payment_id: str) -> bool:
         logger.warning(f"npd: чек {row['receipt_uuid']} не отменён: {e}")
         return False
     await db.set_npd_receipt(payment_id, "cancelled")
+    await update_sale_messages(payment_id, LINE_CANCELLED)
     logger.info(f"npd: чек {row['receipt_uuid']} отменён (возврат {payment_id})")
     return True
 

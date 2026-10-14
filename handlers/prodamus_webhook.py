@@ -222,7 +222,7 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
             f"🛍 {product['name']}\n"
             f"💵 {amount} ₽\n"
             f"🕐 {now}"
-        ))
+        ), sale=prodamus_order_id)
 
         await bot.send_message(user_id, "✅ Оплата прошла! Спасибо за покупку 🎉")
 
@@ -338,6 +338,11 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
             pickup=bool(pending.get("pickup")),
             friend_by=pending.get("friend_by"),
         )
+        if prodamus_order_id and prodamus_order_id.startswith("yk-"):
+            # Чек за ЮKassa пробивает бот — в карточке видно, отправлен ли он клиенту
+            from services.npd_receipts import LINE_PENDING
+            await db.set_order_receipt_line(order_row_id, LINE_PENDING)
+            summary += f"\n\n{LINE_PENDING}"
 
         # Заказ сразу за тем, кто его печатает — ничейных заказов быть не должно.
         # Печатающих может быть несколько: заказ покажется каждому из них.
@@ -879,12 +884,21 @@ async def _deliver_infobiz(bot: Bot, user_id: int, product: dict, purchase_num: 
         )
 
 
-async def _send_notify(bot: Bot, text: str):
+async def _send_notify(bot: Bot, text: str, sale: str | None = None):
+    """sale — id платежа, если это уведомление о продаже: запоминаем
+    сообщения, чтобы дописать в них строку о чеке «Мой налог» (ЮKassa)."""
     try:
         notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+        if sale and sale.startswith("yk-"):
+            from services.npd_receipts import LINE_PENDING
+            full = f"{text}\n\n{LINE_PENDING}"
+        else:
+            full, sale = text, None   # по Prodamus чек делает Prodamus — дописывать нечего
         for admin_id in config.ADMIN_IDS:
             try:
-                await notify_bot.send_message(admin_id, text, parse_mode="HTML")
+                sent = await notify_bot.send_message(admin_id, full, parse_mode="HTML")
+                if sale:
+                    await db.add_sale_message(sale, admin_id, sent.message_id, text)
             except Exception as e:
                 logger.error(f"Notify admin {admin_id} failed: {e}")
         await notify_bot.session.close()
