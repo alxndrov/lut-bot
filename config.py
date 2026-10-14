@@ -52,6 +52,9 @@ CDEK_INSURANCE_PERCENT: float = float(os.getenv("CDEK_INSURANCE_PERCENT", "0.75"
 # НПД самозанятого. Платится со ВСЕЙ принятой суммы, включая доставку,
 # поэтому цену доставки для клиента поднимаем и на него тоже.
 NPD_PERCENT: float = float(os.getenv("NPD_PERCENT", "4"))
+# «Мой налог» (lknpd.nalog.ru) не пускает зарубежные IP — запросы к нему идут
+# через российский прокси: http://user:pass@host:port
+NPD_PROXY: str = os.getenv("NPD_PROXY", "")
 
 WAITLIST_BOT_TOKEN: str = os.getenv("WAITLIST_BOT_TOKEN", "")
 WAITLIST_CHAT_ID: int = int(os.getenv("WAITLIST_CHAT_ID", "0") or "0") or (ADMIN_IDS[0] if ADMIN_IDS else 0)
