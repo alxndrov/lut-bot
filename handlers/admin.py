@@ -2166,10 +2166,15 @@ async def cb_stats_monthly(callback: CallbackQuery):
         spent = (await _expenses_for(
             f"{y:04d}-{mth:02d}-01",
             f"{y:04d}-{mth:02d}-{_cal.monthrange(y, mth)[1]:02d}"))["total"]
+        from services.payout import fee_for
+        yk = await db.get_yk_fees(
+            f"{y:04d}-{mth:02d}-01",
+            f"{y:04d}-{mth:02d}-{_cal.monthrange(y, mth)[1]:02d}")
         net_after_tax = _money(
             gross, delivery, fee_pct, spent,
             delivery_cost=float(r["delivery_cost"] or 0),
             delivery_legacy=float(r["delivery_legacy"] or 0),
+            fee=fee_for(gross, yk, fee_pct / 100),
         )["net"]
         misha = net_after_tax * 0.80
         danya = net_after_tax * 0.20

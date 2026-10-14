@@ -171,11 +171,15 @@ class PayRouteTest(_DbCase):
         paid = {"status": "succeeded", "amount": {"value": "2990.00"},
                 "income_amount": {"value": "2885.35"}, "metadata": {"order_num": "c_7_3"}}
         provision = mock.AsyncMock(return_value=True)
+        from services import npd_receipts
+        issue = mock.AsyncMock()   # иначе тест шлёт настоящим админам «чек не пробит»
         with mock.patch.object(pay_router.yookassa, "get_payment", mock.AsyncMock(return_value=paid)), \
-             mock.patch.object(prodamus_webhook, "provision_payment", provision):
+             mock.patch.object(prodamus_webhook, "provision_payment", provision), \
+             mock.patch.object(npd_receipts, "issue_for_payment", issue):
             await pay_router.check_yk_payment(mock.AsyncMock(), row)
             await pay_router.check_yk_payment(mock.AsyncMock(), row)
         provision.assert_awaited_once()
+        issue.assert_awaited_once()
         self.assertEqual(provision.await_args.args[1:], (7, 3, "c", "yk-yk1", 2990))
         self.assertEqual((await db.get_yk_payment("yk1"))["income"], 2885.35)
         self.assertEqual(await db.yk_payments_to_check(), [])

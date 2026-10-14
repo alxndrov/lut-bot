@@ -22,9 +22,16 @@ _SHARES = [("Миша", 0.80), ("Даня", 0.20)]
 NPD_RATE = config.NPD_PERCENT / 100
 
 
+def fee_label(fee_pct: float, yk_gross: float = 0.0) -> str:
+    """Подпись комиссии: у Prodamus процент, у ЮKassa — фактическая."""
+    if yk_gross:
+        return f"Комиссия (Prodamus {fee_pct}%, ЮKassa по факту)"
+    return f"Комиссия Prodamus ({fee_pct}%)"
+
+
 def _money(gross: float, delivery: float, fee_pct: float,
            expenses: float = 0.0, delivery_cost: float = 0.0,
-           delivery_legacy: float | None = None) -> dict:
+           delivery_legacy: float | None = None, fee: float | None = None) -> dict:
     """Раскладка денег по одному заказу или периоду.
 
     Комиссия Prodamus и НПД считаются от ВСЕЙ принятой суммы: агрегатор берёт
@@ -40,7 +47,8 @@ def _money(gross: float, delivery: float, fee_pct: float,
     """
     from services.payout import delivery_out as _delivery_out
 
-    fee = gross * fee_pct / 100
+    if fee is None:   # фактическая комиссия (с ЮKassa) — если её посчитали заранее
+        fee = gross * fee_pct / 100
     npd = gross * NPD_RATE
     out = _delivery_out(
         delivery_cost,
@@ -119,8 +127,11 @@ async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
             delivery_legacy = float(row[4] or 0)
 
     fee_pct = config.PRODAMUS_FEE_PERCENT
+    from services.payout import fee_for
+    yk = await db.get_yk_fees(dt_from, dt_to)
     m = _money(gross, delivery, fee_pct,
-               delivery_cost=delivery_cost, delivery_legacy=delivery_legacy)
+               delivery_cost=delivery_cost, delivery_legacy=delivery_legacy,
+               fee=fee_for(gross, yk, fee_pct / 100))
     from services.tax_account import accrued_for_period
     tax = await accrued_for_period(dt_from, dt_to)
     m["net"] += m["npd"] - tax
@@ -136,6 +147,7 @@ async def fetch_payments_summary(dt_from: str, dt_to: str) -> dict:
         "npd": m["npd"],
         "vat": 0.0,          # не выделяем отдельно
         "fee_pct": round(fee_pct, 2),
+        "yk_gross": yk["gross"],
     }
 
 
@@ -162,6 +174,7 @@ def _build_report(date_str: str, data: dict) -> str:
     if share:
         money["npd"] = share["npd"]
         money["net"] = share["net"]
+        money["fee"] = share["fee"]
     share_lines = (payout.format_shares(share) if share else [
         f"  {name} ({int(pct * 100)}%): <b>{money['net'] * pct:,.2f} ₽</b>"
         for name, pct in _SHARES
@@ -177,7 +190,7 @@ def _build_report(date_str: str, data: dict) -> str:
         f"🛍 Продаж: <b>{count}</b>",
         f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
         "",
-        f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
+        f"🏦 {fee_label(fee_pct, (share or {}).get('yk_gross', 0))}: −{money['fee']:,.2f} ₽",
         f"📋 НПД с учётом исправлений: −{money['npd']:,.2f} ₽",
         *delivery_lines,
         "─" * 30,
@@ -302,6 +315,7 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
     if share:
         money["npd"] = share["npd"]
         money["net"] = share["net"]
+        money["fee"] = share["fee"]
     net_after_tax = money["net"]
 
     lines = [
@@ -321,7 +335,7 @@ def _build_monthly_report(year: int, month: int, data: dict) -> str:
     lines += [
         "",
         f"💰 Принято платежей: <b>{total_gross:,.2f} ₽</b>",
-        f"🏦 Комиссия Prodamus ({fee_pct}%): −{money['fee']:,.2f} ₽",
+        f"🏦 {fee_label(fee_pct, (share or {}).get('yk_gross', 0))}: −{money['fee']:,.2f} ₽",
         f"📋 НПД с учётом исправлений: −{money['npd']:,.2f} ₽",
     ]
     if delivery:

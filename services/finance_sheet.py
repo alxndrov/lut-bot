@@ -118,13 +118,23 @@ async def _build_snapshot(year, now, monthly_split=True):
             ON p.telegram_payment_id=o.prodamus_order_id GROUP BY o.id""") as cur:
             delivery_customer = dict(await cur.fetchall())
     assessment = {m['month']: m for m in months}
+    # Комиссия по строке: у оплат ЮKassa — фактическая из платежа (3,5% + НДС),
+    # у Prodamus — его процент. Возврат комиссию не возвращает — у строки её нет.
+    yk_fees = await db.get_yk_fee_by_code()
+    for row in rows:
+        if row['kind'] == 'Приход':
+            row['fee'] = (0.0 if row.get('refund') else
+                          money(yk_fees[str(row['code'])]) if str(row['code']) in yk_fees else
+                          float(row['amount']) * config.PRODAMUS_FEE_PERCENT / 100)
     for row in rows:
         row['tax_month'] = tax_months.get(row['code'], '')
         if row['kind'] == 'Приход' and not row.get('refund'):
             m = assessment.get(msk_date(row['created_at']).strftime('%Y-%m'), {})
             rate = m.get('accrued', 0) / m['gross'] if m.get('gross') else 0
+            fee_rate = (row['fee'] / float(row['amount']) if float(row['amount'])
+                        else config.PRODAMUS_FEE_PERCENT / 100)
             goods = float(row['amount']) - delivery_customer.get(row['code'], 0)
-            row['partner_base'] = goods * (1 - config.PRODAMUS_FEE_PERCENT / 100 - rate) - float(row.get('delivery_legacy') or 0) * rate
+            row['partner_base'] = goods * (1 - fee_rate - rate) - float(row.get('delivery_legacy') or 0) * rate
     payments = await db.get_payouts_for_finance_export()
     recipients = {f"payout-{p['id']}": p['recipient'] for p in payments}
     for row in rows:
@@ -140,8 +150,7 @@ async def _build_snapshot(year, now, monthly_split=True):
     # Возвраты — приходы с минусом: уменьшают принятое, но не комиссию —
     # Prodamus её при возврате не отдаёт
     gross = sum(float(r['amount']) for r in rows if r['kind'] == 'Приход')
-    fee = sum(float(r['amount']) for r in rows
-              if r['kind'] == 'Приход' and not r.get('refund')) * config.PRODAMUS_FEE_PERCENT / 100
+    fee = sum(r['fee'] for r in rows if r['kind'] == 'Приход')
     # Share the bot's remittance calendar, including its documented limitations.
     from handlers.finance import _pending_gross
     pending_gross = await _pending_gross('1900-01-01 00:00:00',
@@ -246,7 +255,7 @@ def header_columns(header):
 def operation_values(row):
     income = row['kind'] == 'Приход'
     amount = float(row['amount'])
-    fee = amount * config.PRODAMUS_FEE_PERCENT / 100 if income else None
+    fee = (row['fee'] if 'fee' in row else amount * config.PRODAMUS_FEE_PERCENT / 100) if income else None
     if row.get('refund'):
         fee = 0.0
     tax = row.get('tax', 0) if income else None

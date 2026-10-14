@@ -81,6 +81,10 @@ PRODAMUS_WEBHOOK_URL_PHYSICAL: str = os.getenv("PRODAMUS_WEBHOOK_URL_PHYSICAL", 
 PRODAMUS_SECRET_PHYSICAL_OLD: str = os.getenv("PRODAMUS_SECRET_PHYSICAL_OLD", "")
 
 PRODAMUS_FEE_PERCENT: float = float(os.getenv("PRODAMUS_FEE_PERCENT", "3.5"))
+# Комиссия ЮKassa: 3,5% + НДС 22% с комиссии = 4,27% (реестр платежей за 13.10.2026).
+# Фактическую комиссию бот берёт из самого платежа (income_amount); этот процент —
+# только запасной, если ЮKassa сумму после комиссии не вернула.
+YOOKASSA_FEE_PERCENT: float = float(os.getenv("YOOKASSA_FEE_PERCENT", "4.27"))
 
 # ЮKassa — второй способ оплаты. Какой из двух отдаёт ссылка, решает
 # настройка в malimadmins (/payments), см. handlers/pay_router.py.

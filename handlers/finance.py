@@ -15,7 +15,7 @@ import config
 import database as db
 from handlers.expenses import MSK, _msk, _parse_amount
 from services import payout
-from services.daily_report import fetch_payments_summary
+from services.daily_report import fee_label, fetch_payments_summary
 from services import tax_account
 
 router = Router()
@@ -45,7 +45,7 @@ def _fmt_period(label: str, s: dict) -> str:
     return (
         f"{label}\n"
         f"  Продаж: <b>{s['count']}</b>  |  Брутто: <b>{s['gross']:,.2f} ₽</b>\n"
-        f"  Комиссия ({s['fee_pct']}%): −{s['fee']:,.2f} ₽  |  НДС: {s['vat']:,.2f} ₽\n"
+        f"  {fee_label(s['fee_pct'], s.get('yk_gross', 0))}: −{s['fee']:,.2f} ₽  |  НДС: {s['vat']:,.2f} ₽\n"
         f"  Чистыми: <b>{s['net']:,.2f} ₽</b>\n"
     )
 
@@ -77,7 +77,7 @@ def _fmt_debt_screen(s: dict | None, last_settlement: dict | None) -> str:
         lines.append(f"  доставка: {s['delivery']:,.2f} ₽")
     if s.get("refunds"):
         lines.append(f"Возвраты покупателям: −{s['refunds']:,.2f} ₽")
-    lines.append(f"Комиссия {s['fee_pct']}%: −{s['fee']:,.2f} ₽")
+    lines.append(f"{fee_label(s['fee_pct'], s.get('yk_gross', 0))}: −{s['fee']:,.2f} ₽")
     lines.append(f"НПД с учётом исправлений: −{s['npd']:,.2f} ₽")
     if s["delivery"]:
         lines.append(f"Доставка в СДЭК: −{s['delivery_out']:,.2f} ₽")

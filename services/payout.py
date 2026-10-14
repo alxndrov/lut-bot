@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 NPD_RATE = config.NPD_PERCENT / 100
 
 
+def fee_for(gross: float, yk: dict, fee_rate: float, digital: bool = False) -> float:
+    """Комиссия с принятого: Prodamus — процентом, ЮKassa — фактическая,
+    из самих платежей (у неё 3,5% + НДС, а не процент Prodamus)."""
+    yk_gross, yk_fee = ((yk["digital"], yk["digital_fee"]) if digital
+                        else (yk["gross"], yk["fee"]))
+    return (gross - yk_gross) * fee_rate + yk_fee
+
+
 def delivery_out(delivery_cost: float, delivery_legacy: float,
                  fee_pct: float) -> float:
     """Сколько из принятой за доставку суммы реально ушло в СДЭК.
@@ -73,8 +81,8 @@ def _before(moment: str) -> str:
 
 
 _EMPTY_ERA = {"gross": 0.0, "physical": 0.0, "digital": 0.0, "delivery": 0.0,
-              "count": 0, "fee": 0.0, "refunds": 0.0, "npd": 0.0, "out": 0.0, "expenses": 0.0,
-              "net": 0.0, "legacy": 0.0}
+              "count": 0, "fee": 0.0, "digital_fee": 0.0, "yk_gross": 0.0, "refunds": 0.0,
+              "npd": 0.0, "out": 0.0, "expenses": 0.0, "net": 0.0, "legacy": 0.0}
 
 
 async def era_totals(dt_from: str, dt_to: str, fee_rate: float, fee_pct: float) -> dict:
@@ -96,13 +104,15 @@ async def era_totals(dt_from: str, dt_to: str, fee_rate: float, fee_pct: float) 
     # возвращается — поэтому считается с принятого, а не с остатка
     refunds = float(goods.get("refunds", 0))
     expenses = (await db.get_expenses_summary(dt_from, dt_to))["total"]
-    fee = gross * fee_rate
+    yk = await db.get_yk_fees(dt_from, dt_to)
+    fee = fee_for(gross, yk, fee_rate)
     from services.tax_account import accrued_for_period
     npd = await accrued_for_period(dt_from, dt_to)
     out = delivery_out(float(goods["delivery_cost"]), legacy, fee_pct)
     return {"gross": gross, "physical": physical, "digital": digital,
             "delivery": delivery, "count": int(goods["count"]),
-            "fee": fee, "npd": npd, "out": out, "expenses": expenses,
+            "fee": fee, "digital_fee": fee_for(digital, yk, fee_rate, digital=True),
+            "yk_gross": yk["gross"], "npd": npd, "out": out, "expenses": expenses,
             "refunds": refunds,
             "net": gross - refunds - fee - npd - out - expenses, "legacy": legacy}
 
@@ -153,7 +163,7 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     digital_tax = await accrued_for_period(dt_from, old_end, "digital")
     legacy_tax = await accrued_for_period(dt_from, old_end, "legacy")
     physical_net_was = was["physical"] * (1 - fee_rate) - physical_tax - legacy_tax
-    digital_net_was = was["digital"] * (1 - fee_rate) - digital_tax
+    digital_net_was = was["digital"] - was["digital_fee"] - digital_tax
 
     partner_goods = physical_net_was * config.PARTNER_GOODS_PERCENT / 100
     partner_print = printed_paid * config.PARTNER_PRINT_FEE
@@ -165,7 +175,7 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     new_from = max(dt_from, cut)
     digital_tax_now = (await accrued_for_period(new_from, dt_to, "digital")
                        if new_from <= dt_to else 0.0)
-    digital_net_now = now["digital"] * (1 - fee_rate) - digital_tax_now
+    digital_net_now = now["digital"] - now["digital_fee"] - digital_tax_now
     partner_digital = ((digital_net_was + digital_net_now)
                        * config.PARTNER_DIGITAL_PERCENT / 100)
     partner_new = ((now["net"] - digital_net_now)
@@ -188,6 +198,7 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
         "gross": gross, "physical": physical, "digital": digital,
         "delivery": delivery, "count": was["count"] + now["count"],
         "fee": fee, "fee_pct": fee_pct, "npd": npd,
+        "yk_gross": was["yk_gross"] + now["yk_gross"],
         "delivery_out": out, "expenses": expenses, "refunds": refunds,
         "net": net,
         "printed": printed, "print_credits": credits,

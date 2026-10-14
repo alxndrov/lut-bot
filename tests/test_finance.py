@@ -3,6 +3,7 @@ import io
 import json
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,6 +121,30 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         summary = await fetch_payments_summary('2026-08-01T00:00:00.000Z', '2026-08-31T23:59:59.999Z')
         self.assertEqual(summary['npd'], 20)
         self.assertAlmostEqual(summary['net'], expected_net)
+
+    async def test_yookassa_fee_is_actual_not_prodamus_percent(self):
+        from services.daily_report import fetch_payments_summary
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("INSERT INTO products(id, name, description, price, category) VALUES (2, 'Курс', '', 4990, 'digital')")
+            # ЮKassa: 4 990 → пришло 4 776,93 (3,5% + НДС с комиссии = 213,07)
+            await conn.execute("INSERT INTO yk_payments(id, order_num, kind, amount, status, income) "
+                               "VALUES ('abc', 'c_1_3', 'c', 4990, 'succeeded', 4776.93)")
+            await conn.execute("INSERT INTO purchases(user_id, product_id, amount, created_at, telegram_payment_id) "
+                               "VALUES (1, 2, 4990, '2026-10-13 15:00:00', 'yk-abc')")
+            await conn.execute("INSERT INTO purchases(user_id, product_id, amount, created_at, telegram_payment_id) "
+                               "VALUES (1, 2, 1000, '2026-10-13 16:00:00', '01a-prodamus')")
+            await conn.commit()
+        prodamus_fee = 1000 * config.PRODAMUS_FEE_PERCENT / 100
+        split = await payout.split('2026-10-01', '2026-10-31')
+        self.assertAlmostEqual(split['fee'], 213.07 + prodamus_fee, places=2)
+        summary = await fetch_payments_summary('2026-10-01T00:00:00.000Z', '2026-10-31T23:59:59.999Z')
+        self.assertAlmostEqual(summary['fee'], 213.07 + prodamus_fee, places=2)
+        self.assertEqual(await db.get_yk_fee_by_code(), {'yk-abc': unittest.mock.ANY})
+        self.assertAlmostEqual((await db.get_yk_fee_by_code())['yk-abc'], 213.07, places=2)
+        # Цифра делится 80/20 с чистой части — тоже после фактической комиссии
+        digital_net = 5990 - (213.07 + prodamus_fee) - split['npd']
+        self.assertAlmostEqual(split['partner_digital'],
+                               digital_net * config.PARTNER_DIGITAL_PERCENT / 100, places=2)
 
     async def test_report_without_sales_keeps_expenses_and_actual_cdek(self):
         end = datetime(2026, 9, 30, config.DAILY_REPORT_HOUR_MSK, tzinfo=reports.MSK)

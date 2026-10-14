@@ -2913,6 +2913,63 @@ def period_bounds(dt_from: str, dt_to: str) -> tuple[str, str]:
     return dt_from, dt_to
 
 
+def _yk_fee_rate_sql() -> str:
+    """Доля комиссии в платеже ЮKassa: фактическая (сумма − пришло после
+    комиссии и НДС), а если ЮKassa её не вернула — запасной процент."""
+    import config
+    return (f"""(CASE WHEN y.income IS NOT NULL AND y.amount > 0
+                     THEN (y.amount - y.income) * 1.0 / y.amount
+                     ELSE {float(config.YOOKASSA_FEE_PERCENT) / 100} END)""")
+
+
+_YK_JOIN = "LEFT JOIN yk_payments y ON pu.telegram_payment_id = 'yk-' || y.id"
+
+
+async def get_yk_fees(dt_from: str, dt_to: str) -> dict:
+    """Оплаты ЮKassa за период и их фактическая комиссия — она у ЮKassa своя
+    (3,5% + НДС), а не процент Prodamus. {gross, fee, digital, digital_fee}:
+    gross/fee — все покупки, digital* — только цифровые (лут, курс)."""
+    dt_from, dt_to = period_bounds(dt_from, dt_to)
+    rate = _yk_fee_rate_sql()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"""SELECT COALESCE(SUM(pu.amount), 0),
+                       COALESCE(SUM(pu.amount * {rate}), 0),
+                       COALESCE(SUM(CASE WHEN COALESCE(pr.category, '') != 'physical'
+                                         THEN pu.amount - COALESCE(pu.delivery_amount, 0)
+                                         ELSE 0 END), 0),
+                       COALESCE(SUM(CASE WHEN COALESCE(pr.category, '') != 'physical'
+                                         THEN (pu.amount - COALESCE(pu.delivery_amount, 0)) * {rate}
+                                         ELSE 0 END), 0)
+                FROM purchases pu
+                {_YK_JOIN}
+                LEFT JOIN products pr ON pr.id = pu.product_id
+                WHERE pu.telegram_payment_id LIKE 'yk-%'
+                  AND datetime(pu.created_at) BETWEEN datetime(?) AND datetime(?)""",
+            (dt_from, dt_to),
+        ) as cur:
+            gross, fee, digital, digital_fee = await cur.fetchone()
+    return {"gross": float(gross), "fee": float(fee),
+            "digital": float(digital), "digital_fee": float(digital_fee)}
+
+
+async def get_yk_fee_by_code() -> dict:
+    """{код строки финансового листа: фактическая комиссия ЮKassa}. Код у
+    цифры — id платежа, у физтовара — номер заказа (как в листе)."""
+    rate = _yk_fee_rate_sql()
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"""SELECT COALESCE(o.order_code, o.prodamus_order_id, pu.telegram_payment_id),
+                       SUM(pu.amount * {rate})
+                FROM purchases pu
+                {_YK_JOIN}
+                LEFT JOIN orders o ON o.prodamus_order_id = pu.telegram_payment_id
+                WHERE pu.telegram_payment_id LIKE 'yk-%'
+                GROUP BY 1"""
+        ) as cur:
+            return {str(code): float(fee) for code, fee in await cur.fetchall()}
+
+
 async def get_period_revenue(dt_from: str, dt_to: str) -> dict:
     """Выручка за период по линейкам: физтовары, цифра и доставка отдельно.
 
