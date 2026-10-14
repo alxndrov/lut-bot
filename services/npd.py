@@ -22,6 +22,11 @@ import aiohttp
 import config
 import database as db
 
+try:
+    from python_socks import ProxyError as _ProxyError
+except ImportError:
+    _ProxyError = OSError
+
 logger = logging.getLogger(__name__)
 
 API = "https://lknpd.nalog.ru/api"
@@ -60,14 +65,24 @@ async def _device_info() -> dict:
             "metaDetails": {"userAgent": HEADERS["User-Agent"]}}
 
 
+def _session() -> aiohttp.ClientSession:
+    """Сессия к налоговой. NPD_PROXY=socks5://… — туннель с домашнего компа
+    (имена резолвит та сторона: DNS Oracle налоговую не видит), http://… — обычный прокси."""
+    proxy = config.NPD_PROXY
+    if proxy.startswith("socks"):
+        from aiohttp_socks import ProxyConnector
+        return aiohttp.ClientSession(timeout=TIMEOUT,
+                                     connector=ProxyConnector.from_url(proxy, rdns=True))
+    return aiohttp.ClientSession(timeout=TIMEOUT, proxy=proxy or None)
+
+
 async def _post(path: str, payload: dict, token: str | None = None, version: str = "v1") -> dict:
     headers = dict(HEADERS)
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        async with aiohttp.ClientSession(timeout=TIMEOUT) as s:
-            async with s.post(f"{API}/{version}{path}", json=payload, headers=headers,
-                              proxy=config.NPD_PROXY or None) as r:
+        async with _session() as s:
+            async with s.post(f"{API}/{version}{path}", json=payload, headers=headers) as r:
                 try:
                     data = await r.json(content_type=None)
                 except Exception:
@@ -75,9 +90,11 @@ async def _post(path: str, payload: dict, token: str | None = None, version: str
                 if r.status >= 400:
                     raise NpdError(f"{r.status}: {(data or {}).get('message') or data}")
                 return data or {}
-    except (aiohttp.ClientConnectionError, TimeoutError) as e:
+    except (aiohttp.ClientConnectionError, TimeoutError, OSError, _ProxyError) as e:
         # Сервер за границей: налоговая режет зарубежные IP (и даже DNS)
-        hint = ("прокси NPD_PROXY не отвечает" if config.NPD_PROXY else
+        hint = ("туннель с домашнего компа не на связи (комп выключен или без интернета?)"
+                if config.NPD_PROXY.startswith("socks") else
+                "прокси NPD_PROXY не отвечает" if config.NPD_PROXY else
                 "налоговая не пускает зарубежные IP — нужен российский прокси (NPD_PROXY)")
         raise NpdError(f"нет связи с «Мой налог»: {hint} ({type(e).__name__})") from e
 

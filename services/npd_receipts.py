@@ -22,7 +22,7 @@ from services import npd
 logger = logging.getLogger(__name__)
 
 RETRY_EVERY = 600
-MAX_ATTEMPTS = 30
+MAX_ATTEMPTS = 6 * 24 * 14   # повторяем раз в 10 минут две недели — домашний комп мог быть выключен
 _reminded_day: dict = {"day": None}
 
 
@@ -121,10 +121,15 @@ async def retry_loop(bot: Bot):
             if done:
                 await _notify_admins(f"🧾 Пробил отложенные чеки в «Мой налог»: {done}"
                                      + (f", осталось {left}" if left else ""))
-            # Раз в день — если чеки висят, а вход в «Мой налог» не работает
+            # Раз в день — если чеки висят: не подключён вход или нет связи
             today = datetime.now(timezone(timedelta(hours=3))).date()
-            if left and not await npd.connected() and _reminded_day["day"] != today:
+            if left and _reminded_day["day"] != today:
                 _reminded_day["day"] = today
-                await _notify_admins(f"🧾 {left} чек(ов) ждут, пока подключат «Мой налог»: /nalog")
+                if not await npd.connected():
+                    await _notify_admins(f"🧾 {left} чек(ов) ждут, пока подключат «Мой налог»: /nalog")
+                else:
+                    rows = await db.get_npd_receipts(("pending", "failed"))
+                    why = escape((rows[0].get("error") or "")[:200]) if rows else ""
+                    await _notify_admins(f"🧾 {left} чек(ов) всё ещё не пробиты.\n{why}\n/nalog")
         except Exception:
             logger.exception("npd: повтор чеков упал")
