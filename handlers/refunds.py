@@ -557,6 +557,13 @@ async def cb_done(callback: CallbackQuery, state: FSMContext):
     _sync_finance()
     await _refresh_cards(callback.bot, order["id"])
 
+    # Оплата через ЮKassa: чек пробивал сам бот — при полном возврате и отменяет сам
+    auto_cancelled = False
+    pay_id = order.get("prodamus_order_id") or ""
+    if data["full"] and pay_id.startswith("yk-"):
+        from services import npd_receipts
+        if await npd_receipts.cancel_for_refund(pay_id):
+            auto_cancelled = await db.mark_receipt_cancelled(order["id"])
     refund = next(r for r in await db.get_refunds() if r["order_id"] == order["id"])
     lines = [
         f"✅ <b>Возврат по заказу №{_num(order)} записан: {_rub(data['amount'])}</b>",
@@ -566,14 +573,15 @@ async def cb_done(callback: CallbackQuery, state: FSMContext):
         "• В таблице: строка на листе операций и запись на листе «Возвраты»",
         "• Способ: " + ("перевод со счёта" if refund.get("method") == "transfer" else "Prodamus"),
         "",
-        receipt_text(refund),
+        "🧾 Чек в «Мой налог» отменён автоматически (оплата была через ЮKassa)."
+        if auto_cancelled else receipt_text(refund),
     ]
     if order.get("shipped_at") and data.get("delivery") is None:
         lines.append("<i>Обратную доставку укажите кнопкой в карточке, когда станет известна.</i>")
     if order.get("shipped_at") and data.get("stock") is None and _consumables_label(order):
         lines.append("<i>Когда посылка приедет — решите про расходники кнопкой в карточке.</i>")
     await callback.message.edit_text("\n".join(lines), parse_mode="HTML",
-                                     reply_markup=_receipt_kb(order["id"]))
+                                     reply_markup=None if auto_cancelled else _receipt_kb(order["id"]))
     # Писать ли клиенту — решает админ: деньги могли уже обсудить в личке
     await callback.message.answer(
         "✉️ <b>Написать клиенту о возврате?</b>\n\nТекст:\n<i>" + client_text(refund) + "</i>",

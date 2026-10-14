@@ -1,0 +1,96 @@
+import os
+import tempfile
+import unittest
+
+import aiosqlite
+
+import database as db
+from services import npd, npd_receipts
+
+
+class FakeBot:
+    def __init__(self):
+        self.sent = []
+
+    async def send_message(self, chat_id, text, **kwargs):
+        self.sent.append((chat_id, text))
+
+
+class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old_path = db.DB_PATH
+        db.DB_PATH = os.path.join(self.tmp.name, "test.db")
+        await db.init_db()
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("INSERT INTO products(id, name, description, price, category) "
+                               "VALUES (5, 'MALIMABI LUT', '-', 399, 'digital')")
+            await conn.commit()
+        self.calls = []
+        self.fail = None
+        self.orig = {n: getattr(npd, n) for n in ("create_receipt", "cancel_receipt", "print_url")}
+
+        async def create(name, amount, when=None):
+            if self.fail:
+                raise self.fail
+            self.calls.append(("create", name, amount))
+            return f"uuid{len(self.calls)}"
+
+        async def cancel(uuid, comment=npd.CANCEL_REFUND):
+            self.calls.append(("cancel", uuid, comment))
+
+        async def url(uuid):
+            return f"https://lknpd/{uuid}"
+        npd.create_receipt, npd.cancel_receipt, npd.print_url = create, cancel, url
+        self.notes = []
+
+        async def notify(text):
+            self.notes.append(text)
+        self.orig_notify = npd_receipts._notify_admins
+        npd_receipts._notify_admins = notify
+
+    async def asyncTearDown(self):
+        for n, f in self.orig.items():
+            setattr(npd, n, f)
+        npd_receipts._notify_admins = self.orig_notify
+        db.DB_PATH = self.old_path
+        self.tmp.cleanup()
+
+    async def test_issue_sends_link_once(self):
+        bot = FakeBot()
+        name = await npd_receipts.receipt_name("d", 5)
+        self.assertEqual(name, "MALIMABI LUT")
+        await npd_receipts.issue_for_payment(bot, "yk-1", 7, name, 399.0, "2026-10-14T09:00:00.000Z")
+        await npd_receipts.issue_for_payment(bot, "yk-1", 7, name, 399.0, None)   # повтор вебхука
+        self.assertEqual(self.calls, [("create", "MALIMABI LUT", 399.0)])
+        self.assertIn("Чек об оплате", bot.sent[0][1])
+        self.assertEqual((await db.get_npd_receipt("yk-1"))["status"], "issued")
+
+    async def test_not_connected_then_retry(self):
+        bot = FakeBot()
+        self.fail = npd.NpdNotConnected("не подключён")
+        await npd_receipts.issue_for_payment(bot, "yk-2", 7, "Курс", 4990.0, None)
+        self.assertEqual((await db.get_npd_receipt("yk-2"))["status"], "failed")
+        self.assertIn("/nalog", self.notes[0])
+        self.fail = None
+        done, left = await npd_receipts.retry_failed(bot)
+        self.assertEqual((done, left), (1, 0))
+
+    async def test_cancel_on_refund(self):
+        bot = FakeBot()
+        await npd_receipts.issue_for_payment(bot, "yk-3", 7, "Курс", 2990.0, None)
+        self.assertTrue(await npd_receipts.cancel_for_refund("yk-3"))
+        self.assertFalse(await npd_receipts.cancel_for_refund("yk-3"))   # уже отменён
+        self.assertFalse(await npd_receipts.cancel_for_refund("yk-404"))
+        self.assertEqual(self.calls[-1], ("cancel", "uuid1", "Возврат средств"))
+
+
+class PhoneTest(unittest.TestCase):
+    def test_normalize(self):
+        self.assertEqual(npd.normalize_phone("+7 (912) 345-67-89"), "79123456789")
+        self.assertEqual(npd.normalize_phone("89123456789"), "79123456789")
+        self.assertIsNone(npd.normalize_phone("12345"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -179,6 +179,15 @@ async def check_yk_payment(bot: Bot, row: dict):
         logger.exception(f"yookassa: выдача {order_num} упала: {e}")
         await _send_notify(bot, f"🔴 <b>Оплата ЮKassa пришла, но заказ не провёлся</b>\n"
                                 f"{order_num}, {amount} ₽, платёж {row['id']}\n{escape(str(e))}")
+    # Чек в «Мой налог» — за любые полученные деньги, даже если выдача упала:
+    # доход есть в любом случае. ЮKassa чеки самозанятых больше не делает.
+    try:
+        from services import npd_receipts
+        name = await npd_receipts.receipt_name(order_type, int(product_id))
+        await npd_receipts.issue_for_payment(bot, f"yk-{row['id']}", int(user_id), name,
+                                             float(p["amount"]["value"]), p.get("captured_at"))
+    except Exception as e:
+        logger.exception(f"yookassa: чек за {row['id']} не заведён: {e}")
 
 
 # ── Запасная ссылка ────────────────────────────────────────────────────────────

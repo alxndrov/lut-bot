@@ -573,6 +573,24 @@ async def init_db(existing_cdek_contract: str | None = None):
         # Платежи ЮKassa, созданные ботом: по ним опрашиваем статус и по
         # ним же узнаём магазин (kind) для уведомления
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS npd_receipts (
+                payment_id   TEXT PRIMARY KEY,
+                user_id      INTEGER,
+                name         TEXT NOT NULL,
+                amount       REAL NOT NULL,
+                paid_at      TEXT,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                receipt_uuid TEXT,
+                attempts     INTEGER NOT NULL DEFAULT 0,
+                error        TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                issued_at    TIMESTAMP,
+                cancelled_at TIMESTAMP
+            )
+        """)
+        # Чеки «Мой налог» за оплаты ЮKassa (services/npd_receipts.py).
+        # status: pending → issued → cancelled; failed — не вышло, повторяем.
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS yk_payments (
                 id               TEXT PRIMARY KEY,
                 order_num        TEXT NOT NULL,
@@ -4598,6 +4616,54 @@ async def add_yk_payment(payment_id: str, order_num: str, kind: str, amount: int
             """INSERT OR IGNORE INTO yk_payments (id, order_num, kind, amount, confirmation_url)
                VALUES (?, ?, ?, ?, ?)""",
             (payment_id, order_num, kind, amount, confirmation_url))
+        await db.commit()
+
+
+async def add_npd_receipt(payment_id: str, user_id: int | None, name: str, amount: float,
+                          paid_at: str | None) -> bool:
+    """False — по этому платежу чек уже заведён."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """INSERT OR IGNORE INTO npd_receipts (payment_id, user_id, name, amount, paid_at)
+               VALUES (?, ?, ?, ?, ?)""", (payment_id, user_id, name, amount, paid_at))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_npd_receipt(payment_id: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM npd_receipts WHERE payment_id = ?", (payment_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def get_npd_receipts(statuses: tuple[str, ...] | None = None) -> list[dict]:
+    sql = "SELECT * FROM npd_receipts"
+    args: tuple = ()
+    if statuses:
+        sql += f" WHERE status IN ({','.join('?' * len(statuses))})"
+        args = statuses
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql + " ORDER BY created_at", args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_npd_receipt(payment_id: str, status: str, receipt_uuid: str | None = None,
+                          error: str | None = None):
+    sets = ["status = ?", "error = ?", "attempts = attempts + (? = 'failed')"]
+    args: list = [status, error, status]
+    if receipt_uuid:
+        sets.append("receipt_uuid = ?")
+        args.append(receipt_uuid)
+    if status == "issued":
+        sets.append("issued_at = CURRENT_TIMESTAMP")
+    if status == "cancelled":
+        sets.append("cancelled_at = CURRENT_TIMESTAMP")
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE npd_receipts SET {', '.join(sets)} WHERE payment_id = ?",
+                         (*args, payment_id))
         await db.commit()
 
 
