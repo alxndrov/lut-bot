@@ -196,6 +196,28 @@ async def cancel_receipt(uuid: str, comment: str = CANCEL_REFUND):
                 token=await _token())
 
 
+async def list_incomes(since: datetime, until: datetime) -> list[dict]:
+    """Все чеки за период (и наши, и от партнёров вроде Продамуса)."""
+    token = await _token()
+    headers = dict(HEADERS, Authorization=f"Bearer {token}")
+    result, offset = [], 0
+    try:
+        async with _session() as s:
+            while True:
+                params = {"from": _iso(since), "to": _iso(until), "offset": offset,
+                          "sortBy": "operation_time:asc", "limit": 50}
+                async with s.get(f"{API}/v1/incomes", params=params, headers=headers) as r:
+                    data = await r.json(content_type=None)
+                    if r.status >= 400:
+                        raise NpdError(f"{r.status}: {(data or {}).get('message') or data}")
+                result += data.get("content") or []
+                if not data.get("hasMore"):
+                    return result
+                offset += 50
+    except (aiohttp.ClientConnectionError, TimeoutError, OSError, _ProxyError) as e:
+        raise NpdError(f"нет связи с «Мой налог» ({type(e).__name__})") from e
+
+
 async def print_url(uuid: str) -> str:
     inn = await db.get_setting(S_INN) or ""
     return f"{API}/v1/receipt/{inn}/{uuid}/print"

@@ -2080,6 +2080,20 @@ async def get_waitlist_entry(user_id: int, product_id: int) -> Optional[dict]:
             return dict(row) if row else None
 
 
+async def get_purchases_between(since: "datetime", until: "datetime") -> list[dict]:
+    """Покупки за период (UTC) с названием товара — для сверки чеков."""
+    fmt = "%Y-%m-%d %H:%M:%S"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT p.*, pr.name AS pname FROM purchases p
+               LEFT JOIN products pr ON pr.id = p.product_id
+               WHERE p.created_at >= ? AND p.created_at < ? ORDER BY p.created_at""",
+            (since.strftime(fmt), until.strftime(fmt))
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def get_setting(key: str) -> Optional[str]:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT value FROM settings WHERE key = ?", (key,)) as cursor:

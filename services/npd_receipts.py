@@ -22,6 +22,12 @@ from services import npd
 logger = logging.getLogger(__name__)
 
 RETRY_EVERY = 600
+# Сверка: дошли ли до «Мой налог» чеки Продамуса. С 08.10.2026 Продамус перестал
+# их передавать — ждём неделю (до 21.10), потом напоминаем раз в неделю, пока не починят.
+S_PRODAMUS_FROM = "npd_prodamus_watch_from"   # с какой даты сверять оплаты (YYYY-MM-DD, МСК)
+S_PRODAMUS_NEXT = "npd_prodamus_next_check"   # когда сверять в следующий раз (YYYY-MM-DD)
+PRODAMUS_GRACE = timedelta(days=2)            # свежим оплатам даём время
+MSK = timezone(timedelta(hours=3))
 MAX_ATTEMPTS = 6 * 24 * 14   # повторяем раз в 10 минут две недели — домашний комп мог быть выключен
 _reminded_day: dict = {"day": None}
 
@@ -113,6 +119,78 @@ async def cancel_for_refund(payment_id: str) -> bool:
     return True
 
 
+def _is_prodamus(payment_id: str) -> bool:
+    return not payment_id.startswith(("yk-", "manual", "test"))
+
+
+async def prodamus_missing() -> list[dict]:
+    """Оплаты Продамуса без чека в «Мой налог»: [{payment_id, amount, paid, users, names}]."""
+    since_s = await db.get_setting(S_PRODAMUS_FROM)
+    if not since_s:
+        return []
+    since = datetime.fromisoformat(since_s).replace(tzinfo=MSK)
+    until = datetime.now(timezone.utc) - PRODAMUS_GRACE
+    groups: dict[str, dict] = {}
+    for p in await db.get_purchases_between(since.astimezone(timezone.utc), until):
+        pid = str(p["telegram_payment_id"] or "")
+        if not _is_prodamus(pid):
+            continue
+        g = groups.setdefault(pid, {"payment_id": pid, "amount": 0, "users": set(), "names": [],
+                                    "paid": datetime.strptime(p["created_at"][:19], "%Y-%m-%d %H:%M:%S")})
+        g["amount"] += p["amount"]
+        g["users"].add(p.get("username") or str(p["user_id"]))
+        g["names"].append(p.get("pname") or "")
+    if not groups:
+        return []
+    incomes = [i for i in await npd.list_incomes(since - timedelta(days=1), datetime.now(MSK))
+               if not i.get("cancellationInfo")]
+    used: set[int] = set()
+
+    def when(i):   # у Продамуса operationTime по факту в UTC, хоть и с «+03:00»
+        return datetime.fromisoformat(i["operationTime"]).replace(tzinfo=None)
+    missing = []
+    for g in sorted(groups.values(), key=lambda g: g["paid"]):
+        cands = [(abs(when(i) - g["paid"]), n) for n, i in enumerate(incomes)
+                 if n not in used and abs(float(i["totalAmount"]) - g["amount"]) < 0.01
+                 and abs(when(i) - g["paid"]) <= timedelta(days=1)]
+        if cands:
+            used.add(min(cands)[1])
+        else:
+            missing.append(g)
+    return missing
+
+
+async def check_prodamus(force: bool = False) -> list[dict] | None:
+    """Раз в день смотрит, не пора ли сверить. None — не пора или нет связи."""
+    today = datetime.now(MSK).date()
+    next_s = await db.get_setting(S_PRODAMUS_NEXT)
+    if not force and (not next_s or today < datetime.fromisoformat(next_s).date()):
+        return None
+    try:
+        missing = await prodamus_missing()
+    except Exception as e:
+        logger.warning(f"npd: сверка Продамуса не вышла: {e}")
+        return None   # повторим через 10 минут
+    if missing:
+        total = sum(g["amount"] for g in missing)
+        lines = [f"⚠️ <b>Продамус всё ещё не передаёт чеки в «Мой налог»</b>",
+                 f"Без чека {len(missing)} оплат на {total:,.0f} ₽".replace(",", " ") + ":", ""]
+        for g in missing[:25]:
+            paid = (g["paid"] + timedelta(hours=3)).strftime("%d.%m")
+            lines.append(f"• {paid} — {g['amount']:.0f} ₽ · "
+                         + ", ".join("@" + u for u in sorted(g["users"])))
+        if len(missing) > 25:
+            lines.append(f"… и ещё {len(missing) - 25}")
+        lines += ["", "Проверь в кабинете Продамуса настройки чеков для самозанятых и в «Мой налог» "
+                      "→ партнёры, подключён ли Продамус. Если чинить не будут — скажи Claude, "
+                      "пробьём эти чеки через бота. Следующая сверка — через неделю."]
+        await _notify_admins("\n".join(lines))
+        await db.set_setting(S_PRODAMUS_NEXT, (today + timedelta(days=7)).isoformat())
+    else:
+        await db.set_setting(S_PRODAMUS_NEXT, (today + timedelta(days=1)).isoformat())
+    return missing
+
+
 async def retry_loop(bot: Bot):
     while True:
         await asyncio.sleep(RETRY_EVERY)
@@ -121,6 +199,8 @@ async def retry_loop(bot: Bot):
             if done:
                 await _notify_admins(f"🧾 Пробил отложенные чеки в «Мой налог»: {done}"
                                      + (f", осталось {left}" if left else ""))
+            if await npd.connected():
+                await check_prodamus()
             # Раз в день — если чеки висят: не подключён вход или нет связи
             today = datetime.now(timezone(timedelta(hours=3))).date()
             if left and _reminded_day["day"] != today:

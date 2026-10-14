@@ -85,6 +85,34 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[-1], ("cancel", "uuid1", "Возврат средств"))
 
 
+class ProdamusWatchTest(NpdReceiptsTest):
+    async def test_missing_and_schedule(self):
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            for pid, amount, at in (("01a-1", 399, "2026-10-09 15:24:00"),   # чек есть
+                                    ("01a-2", 999, "2026-10-09 10:16:00"),   # чека нет
+                                    ("yk-3", 4990, "2026-10-09 11:00:00")):  # ЮKassa — не наше
+                await conn.execute("INSERT INTO purchases(user_id, username, product_id, "
+                                   "telegram_payment_id, amount, created_at) VALUES (7, 'u', 5, ?, ?, ?)",
+                                   (pid, amount, at))
+            await conn.commit()
+        await db.set_setting(npd_receipts.S_PRODAMUS_FROM, "2026-10-08")
+
+        async def incomes(since, until):
+            return [{"totalAmount": 399, "operationTime": "2026-10-09T15:24:30+03:00",
+                     "cancellationInfo": None}]
+        orig = npd.list_incomes
+        npd.list_incomes = incomes
+        try:
+            missing = await npd_receipts.prodamus_missing()
+            self.assertEqual([g["payment_id"] for g in missing], ["01a-2"])
+            await db.set_setting(npd_receipts.S_PRODAMUS_NEXT, "2099-01-01")
+            self.assertIsNone(await npd_receipts.check_prodamus())   # ещё не пора
+            self.assertEqual(len(await npd_receipts.check_prodamus(force=True)), 1)
+            self.assertIn("999 ₽", self.notes[-1])
+        finally:
+            npd.list_incomes = orig
+
+
 class PhoneTest(unittest.TestCase):
     def test_normalize(self):
         self.assertEqual(npd.normalize_phone("+7 (912) 345-67-89"), "79123456789")
