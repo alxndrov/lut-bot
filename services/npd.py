@@ -17,6 +17,8 @@ import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
+import asyncio
+
 import aiohttp
 
 import config
@@ -30,7 +32,8 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 API = "https://lknpd.nalog.ru/api"
-TIMEOUT = aiohttp.ClientTimeout(total=20)
+# Сервер слабый и под нагрузкой бывает медленным, налоговая тоже — 20 с не хватало
+TIMEOUT = aiohttp.ClientTimeout(total=60)
 HEADERS = {"Referrer": "https://lknpd.nalog.ru/auth/login",
            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                          "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"}
@@ -50,6 +53,13 @@ class NpdError(Exception):
 
 class NpdNotConnected(NpdError):
     pass
+
+
+TIMEOUT_MSG = "«Мой налог» не ответил вовремя — повторю"
+
+
+class NpdTimeout(NpdError):
+    """Ответа не дождались: запрос мог и пройти (чек создан)."""
 
 
 async def _device_id() -> str:
@@ -92,6 +102,10 @@ async def _post(path: str, payload: dict, token: str | None = None, version: str
                 return data or {}
     except (aiohttp.ClientConnectionError, TimeoutError, OSError, _ProxyError) as e:
         # Сервер за границей: налоговая режет зарубежные IP (и даже DNS)
+        if isinstance(e, (TimeoutError, asyncio.TimeoutError)):
+            # Туннель живой, просто налоговая (или сервер) долго отвечает —
+            # чек при этом мог и создаться: retry сперва ищет его (npd_receipts)
+            raise NpdTimeout(TIMEOUT_MSG) from e
         hint = ("туннель с домашнего компа не на связи (комп выключен или без интернета?)"
                 if config.NPD_PROXY.startswith("socks") else
                 "прокси NPD_PROXY не отвечает" if config.NPD_PROXY else

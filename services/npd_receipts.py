@@ -91,6 +91,23 @@ async def update_sale_messages(payment_id: str, line: str):
         logger.exception(f"npd: строка о чеке для {payment_id} не обновлена")
 
 
+async def _already_issued(row: dict, paid: datetime | None) -> str | None:
+    """Прошлая попытка могла создать чек, но ответ не дошёл (таймаут). Перед
+    повтором ищем в «Мой налог» чек с той же суммой, названием и временем
+    оплаты, ещё не привязанный к другой оплате, — чтобы не пробить второй."""
+    when = paid or datetime.now(timezone.utc)
+    known = {r["receipt_uuid"] for r in await db.get_npd_receipts() if r.get("receipt_uuid")}
+    for i in await npd.list_incomes(when - timedelta(days=1), datetime.now(timezone.utc)):
+        if (not i.get("cancellationInfo") and i.get("approvedReceiptUuid") not in known
+                and abs(float(i["totalAmount"]) - float(row["amount"])) < 0.01
+                and i.get("name") == row["name"]
+                and (not paid or abs(datetime.fromisoformat(i["operationTime"]) - paid)
+                     < timedelta(minutes=2))):
+            logger.info(f"npd: чек за {row['payment_id']} уже есть — {i['approvedReceiptUuid']}")
+            return i["approvedReceiptUuid"]
+    return None
+
+
 async def _try_issue(bot: Bot, row: dict) -> bool:
     paid = None
     if row.get("paid_at"):
@@ -98,7 +115,11 @@ async def _try_issue(bot: Bot, row: dict) -> bool:
             paid = datetime.fromisoformat(row["paid_at"].replace("Z", "+00:00"))
         except ValueError:
             paid = None
-    uuid = await npd.create_receipt(row["name"], row["amount"], paid)
+    # Только после таймаута: тогда чек мог создаться без ответа нам
+    timed_out = npd.TIMEOUT_MSG in (row.get("error") or "")
+    uuid = await _already_issued(row, paid) if timed_out else None
+    if not uuid:
+        uuid = await npd.create_receipt(row["name"], row["amount"], paid)
     await db.set_npd_receipt(row["payment_id"], "issued", receipt_uuid=uuid)
     url = await npd.print_url(uuid)
     logger.info(f"npd: чек {uuid} за {row['payment_id']} — {row['amount']} ₽")

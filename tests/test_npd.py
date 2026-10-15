@@ -76,6 +76,24 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
         done, left = await npd_receipts.retry_failed(bot)
         self.assertEqual((done, left), (1, 0))
 
+    async def test_retry_after_timeout_adopts_existing_receipt(self):
+        bot = FakeBot()
+        self.fail = npd.NpdTimeout(npd.TIMEOUT_MSG)
+        await npd_receipts.issue_for_payment(bot, "yk-5", 7, "Курс", 4990.0, "2026-10-15T07:10:57Z")
+        self.fail = None
+
+        async def incomes(since, until):   # налоговая чек всё-таки создала
+            return [{"approvedReceiptUuid": "real1", "totalAmount": 4990, "name": "Курс",
+                     "operationTime": "2026-10-15T10:10:57+03:00", "cancellationInfo": None}]
+        orig = npd.list_incomes
+        npd.list_incomes = incomes
+        try:
+            self.assertEqual(await npd_receipts.retry_failed(bot), (1, 0))
+        finally:
+            npd.list_incomes = orig
+        self.assertEqual(self.calls, [])   # второй чек не создавали
+        self.assertEqual((await db.get_npd_receipt("yk-5"))["receipt_uuid"], "real1")
+
     async def test_cancel_on_refund(self):
         bot = FakeBot()
         await npd_receipts.issue_for_payment(bot, "yk-3", 7, "Курс", 2990.0, None)
