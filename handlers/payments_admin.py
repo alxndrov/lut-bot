@@ -58,6 +58,8 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
                                           callback_data="pay:test")])
     rows.append([InlineKeyboardButton(text="📨 Разослать новые ссылки",
                                       callback_data="pay:bc")])
+    rows.append([InlineKeyboardButton(text="📣 Оплата работает + зарубежные карты",
+                                      callback_data="pay:fbc")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -111,6 +113,26 @@ COURSE_TEXT = (
 )
 
 
+# Рассылка «оплата работает, принимаем зарубежные карты» (17.10.2026: Prodamus
+# подключил зарубежные карты; кто из неоплативших хотел платить ими — неизвестно,
+# поэтому пишем всем, универсально)
+ORDER_FOREIGN_TEXT = (
+    "Привет! 👋\n"
+    "Оплата в боте работает в штатном режиме — а ещё теперь можно оплатить "
+    "зарубежной картой (Visa, Mastercard).\n\n"
+    "Ваш заказ «{name}» сохранился — ответы, пункт выдачи и сумма, {amount} ₽. "
+    "Если он ещё актуален, оплатить можно кнопкой ниже. А если передумали, "
+    "просто не обращайте внимания на это сообщение 🙂"
+)
+COURSE_FOREIGN_TEXT = (
+    "Привет! 👋\n"
+    "Вы заглядывали в курс «Shot on iPhone + Cut by MALIMABI». Оплата работает "
+    "в штатном режиме — а ещё теперь можно оплатить зарубежной картой "
+    "(Visa, Mastercard).\n\n"
+    "Если курс ещё интересен, открыть его можно кнопкой ниже 🙂"
+)
+
+
 async def _recent_orders() -> list[dict]:
     from datetime import datetime, timedelta, timezone
     since = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
@@ -148,6 +170,31 @@ async def cb_broadcast(callback: CallbackQuery):
         ]))
 
 
+@router.callback_query(F.data == "pay:fbc")
+async def cb_foreign_broadcast(callback: CallbackQuery):
+    await callback.answer()
+    orders, lookers = await _recent_orders(), await _course_lookers()
+    sample = ORDER_FOREIGN_TEXT.format(name="Microphone Handled Kit", amount=1351)
+    await callback.message.answer(
+        "📣 <b>Оплата работает + зарубежные карты</b>\n\n"
+        f"• Незавершённые заказы за {RECENT_DAYS} дней: <b>{len(orders)}</b> — кнопки "
+        "«Оплатить» (куда выбрано в /payments), «Оплатить зарубежной картой» (всегда "
+        "Prodamus) и «Есть вопрос».\n"
+        f"• Смотрели курс и не купили: <b>{len(lookers)}</b> — кнопка «Открыть курс».\n\n"
+        f"<b>Текст для заказов:</b>\n<blockquote>{escape(sample)}</blockquote>\n"
+        f"<b>Текст для курса:</b>\n<blockquote>{escape(COURSE_FOREIGN_TEXT)}</blockquote>\n"
+        "⚠️ Перед отправкой убедись, что зарубежные карты включены в обоих магазинах "
+        "Prodamus: физтовары — malimabi-store, курс — baryshovv.\n\n"
+        "Отправка — после кнопки ниже, по одному разу каждому.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text=f"📣 Заказам ({len(orders)})",
+                                  callback_data="pay:bcgo:forders")],
+            [InlineKeyboardButton(text=f"📣 Курсу ({len(lookers)})",
+                                  callback_data="pay:bcgo:fcourse")],
+        ]))
+
+
 @router.callback_query(F.data.startswith("pay:bcgo:"))
 async def cb_broadcast_go(callback: CallbackQuery):
     audience = callback.data.split(":")[2]
@@ -155,13 +202,17 @@ async def cb_broadcast_go(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
     if audience == "orders":
         sent, failed = await _send_orders()
+    elif audience == "forders":
+        sent, failed = await _send_orders(ORDER_FOREIGN_TEXT, foreign=True)
+    elif audience == "fcourse":
+        sent, failed = await _send_course(COURSE_FOREIGN_TEXT)
     else:
         sent, failed = await _send_course()
     await callback.message.answer(
         f"✅ Отправлено: {sent}" + (f", не дошло: {failed} (бот заблокирован)" if failed else ""))
 
 
-async def _send_orders() -> tuple[int, int]:
+async def _send_orders(text: str = ORDER_TEXT, foreign: bool = False) -> tuple[int, int]:
     from handlers.admin import _pending_payment_name
     main_bot = Bot(token=config.BOT_TOKEN)
     sent = failed = 0
@@ -170,15 +221,19 @@ async def _send_orders() -> tuple[int, int]:
             product = await db.get_product(o["product_id"])
             name = await _pending_payment_name(o, product)
             amount = int(o["amount"])
-            url = paylinks.link(f"p_{o['user_id']}_{o['product_id']}", amount, name)
+            order_num = f"p_{o['user_id']}_{o['product_id']}"
+            url = paylinks.link(order_num, amount, name)
+            rows = [[InlineKeyboardButton(text=f"💳 Оплатить {amount} ₽", url=url)]]
+            if foreign:   # зарубежные карты принимает только Prodamus
+                rows.append([InlineKeyboardButton(
+                    text="🌍 Оплатить зарубежной картой",
+                    url=paylinks.link(order_num, amount, name, via="pd"))])
+            rows.append([InlineKeyboardButton(text="💬 Есть вопрос",
+                                              callback_data=f"pn:ask:{o['product_id']}")])
             try:
                 await main_bot.send_message(
-                    o["user_id"], ORDER_TEXT.format(name=name, amount=amount),
-                    reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                        [InlineKeyboardButton(text=f"💳 Оплатить {amount} ₽", url=url)],
-                        [InlineKeyboardButton(text="💬 Есть вопрос",
-                                              callback_data=f"pn:ask:{o['product_id']}")],
-                    ]))
+                    o["user_id"], text.format(name=name, amount=amount),
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
                 await db.mark_pending_nudged(o["user_id"], o["product_id"])
                 sent += 1
             except Exception as e:
@@ -190,14 +245,14 @@ async def _send_orders() -> tuple[int, int]:
     return sent, failed
 
 
-async def _send_course() -> tuple[int, int]:
+async def _send_course(text: str = COURSE_TEXT) -> tuple[int, int]:
     main_bot = Bot(token=config.BOT_TOKEN)
     sent = failed = 0
     try:
         for v in await _course_lookers():
             try:
                 await main_bot.send_message(
-                    v["user_id"], COURSE_TEXT,
+                    v["user_id"], text,
                     reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                         InlineKeyboardButton(text="🎬 Открыть курс", callback_data="course:show")]]))
                 sent += 1
