@@ -50,37 +50,46 @@ def backup_keyboard(order_num: str, amount: int, name: str) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"💳 Оплатить через ЮKassa · {amount} ₽",
                               url=paylinks.link(order_num, amount, name, via="yk"))],
-        # ЮKassa и Prodamus у нас принимают только российские карты — такого
-        # покупателя ведёт команда вручную
+        # Зарубежные карты принимает Prodamus — в обычные поля карты на его странице
         [InlineKeyboardButton(text="🌍 У меня зарубежная карта",
                               callback_data=f"payforeign:{order_num}")],
     ])
 
 
-FOREIGN_REPLY = ("Поняли 🤍 Оплату зарубежной картой подключаем — команда уже в курсе "
-                 "и напишет вам здесь, как оплатить.")
+FOREIGN_TEXT = (
+    "Зарубежной картой можно оплатить на странице Prodamus: откройте ссылку ниже "
+    "и введите данные карты — номер, срок и CVC — в поля карты.\n\n"
+    "Сумма {amount} ₽ — банк спишет её в валюте вашей карты по своему курсу."
+)
 
 
 @router.callback_query(F.data.startswith("payforeign:"))
 async def cb_foreign_card(callback: CallbackQuery):
     order_num = callback.data.split(":", 1)[1]
     await callback.answer()
-    await callback.message.answer(FOREIGN_REPLY)
-    # Одно уведомление на заказ — повторные нажатия не спамят админов
+    click = await db.get_pay_click(order_num)
+    if not click or click["paid_at"]:
+        await callback.message.answer("Этот заказ уже оплачен или устарел — "
+                                      "откройте товар в каталоге заново 🤍")
+        return
+    await callback.message.answer(
+        FOREIGN_TEXT.format(amount=click["amount"]),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text=f"🌍 Оплатить зарубежной картой · {click['amount']} ₽",
+            url=paylinks.link(order_num, click["amount"], click["name"], via="pd"))]]))
+    # Админам — одно сообщение на заказ, для сведения
     key = f"foreign_card:{order_num}"
     if await db.get_setting(key):
         return
     await db.set_setting(key, datetime.now(timezone.utc).isoformat())
-    click = await db.get_pay_click(order_num) or {}
     u = callback.from_user
     who = f"@{u.username}" if u.username else f"id:{u.id}"
     from handlers.prodamus_webhook import _send_notify
     await _send_notify(callback.bot, (
-        f"🌍 <b>Клиент хочет оплатить зарубежной картой</b>\n\n"
+        f"🌍 <b>Клиент платит зарубежной картой</b>\n\n"
         f"👤 {escape(u.full_name or '—')} {who}\n"
-        f"🛍 {escape(click.get('name') or order_num)} — {click.get('amount', '?')} ₽\n\n"
-        f"Напишите клиенту, как оплатить. Российские карты, СБП, SberPay и T-Pay у него, "
-        f"судя по всему, не проходят."))
+        f"🛍 {escape(click['name'] or order_num)} — {click['amount']} ₽\n\n"
+        f"Бот дал ему ссылку Prodamus. Если оплата не придёт — напишите клиенту."))
     logger.info(f"pay: зарубежная карта — {order_num} ({who})")
 
 
@@ -126,8 +135,9 @@ async def handle_pay(request: web.Request) -> web.Response:
                          "Оплата по этому заказу уже пришла. Подтверждение — в боте.",
                          bot_username)
 
-    provider = "yookassa" if link["via"] == "yk" and config.YOOKASSA_ENABLED \
-        else await current_provider()
+    # via: yk — запасная ЮKassa, pd — только Prodamus (зарубежные карты принимает он)
+    provider = ("yookassa" if link["via"] == "yk" and config.YOOKASSA_ENABLED
+                else "prodamus" if link["via"] == "pd" else await current_provider())
     shop = config.PRODAMUS_SHOP_URL_PHYSICAL if link["kind"] == "p" else config.PRODAMUS_SHOP_URL
     if not shop and config.YOOKASSA_ENABLED:
         provider = "yookassa"

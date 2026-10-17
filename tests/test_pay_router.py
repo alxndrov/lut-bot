@@ -153,6 +153,12 @@ class PayRouteTest(_DbCase):
         self.assertEqual(create.await_args.args[:3], ("c", "c_7_3", 2990))
         self.assertEqual((await db.get_pay_click("c_7_3"))["provider"], "yookassa")
 
+    async def test_foreign_card_link_goes_to_prodamus_even_in_yookassa_mode(self):
+        await db.set_setting(pay_router.PROVIDER_SETTING, "yookassa")
+        r = await self._go(via="pd")
+        self.assertEqual(r.status, 302)
+        self.assertTrue(r.headers["Location"].startswith("https://digital/?do=pay"))
+
     async def test_yookassa_failure_falls_back_to_prodamus(self):
         await db.set_setting(pay_router.PROVIDER_SETTING, "yookassa")
         create = mock.AsyncMock(side_effect=pay_router.yookassa.YooKassaError("401"))
