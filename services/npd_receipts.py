@@ -37,6 +37,9 @@ def line_issued(url: str, delivered: bool) -> str:
 # их передавать — ждём неделю (до 21.10), потом напоминаем раз в неделю, пока не починят.
 S_PRODAMUS_FROM = "npd_prodamus_watch_from"   # с какой даты сверять оплаты (YYYY-MM-DD, МСК)
 S_PRODAMUS_NEXT = "npd_prodamus_next_check"   # когда сверять в следующий раз (YYYY-MM-DD)
+# В этот день спросить Даню о результате, даже если всё в порядке (решение Дани:
+# Продамус обещал выдать чеки за 08–12.10 — 07.11 проверить; крайний срок 09.11)
+S_PRODAMUS_ASK = "npd_prodamus_ask_on"
 PRODAMUS_GRACE = timedelta(days=2)            # свежим оплатам даём время
 MSK = timezone(timedelta(hours=3))
 MAX_ATTEMPTS = 6 * 24 * 14   # повторяем раз в 10 минут две недели — домашний комп мог быть выключен
@@ -206,6 +209,7 @@ async def prodamus_missing() -> list[dict]:
         if not _is_prodamus(pid):
             continue
         g = groups.setdefault(pid, {"payment_id": pid, "amount": 0, "users": set(), "names": [],
+                                    "user_id": p["user_id"], "option_id": p.get("course_option_id"),
                                     "paid": datetime.strptime(p["created_at"][:19], "%Y-%m-%d %H:%M:%S")})
         g["amount"] += p["amount"]
         g["users"].add(p.get("username") or str(p["user_id"]))
@@ -230,8 +234,33 @@ async def prodamus_missing() -> list[dict]:
     return missing
 
 
+async def _notify_admins_kb(text: str, kb):
+    admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+    try:
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await admin_bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=kb)
+            except Exception as e:
+                logger.warning(f"npd: админу {admin_id} не отправлено: {e}")
+    finally:
+        await admin_bot.session.close()
+
+
+def _missing_lines(missing: list[dict]) -> list[str]:
+    total = sum(g["amount"] for g in missing)
+    lines = [f"Без чека {len(missing)} оплат на {total:,.0f} ₽".replace(",", " ") + ":", ""]
+    for g in missing[:25]:
+        paid = (g["paid"] + timedelta(hours=3)).strftime("%d.%m")
+        lines.append(f"• {paid} — {g['amount']:.0f} ₽ · "
+                     + ", ".join("@" + u for u in sorted(g["users"])))
+    if len(missing) > 25:
+        lines.append(f"… и ещё {len(missing) - 25}")
+    return lines
+
+
 async def check_prodamus(force: bool = False) -> list[dict] | None:
     """Раз в день смотрит, не пора ли сверить. None — не пора или нет связи."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
     today = datetime.now(MSK).date()
     next_s = await db.get_setting(S_PRODAMUS_NEXT)
     if not force and (not next_s or today < datetime.fromisoformat(next_s).date()):
@@ -241,24 +270,49 @@ async def check_prodamus(force: bool = False) -> list[dict] | None:
     except Exception as e:
         logger.warning(f"npd: сверка Продамуса не вышла: {e}")
         return None   # повторим через 10 минут
+    ask_s = await db.get_setting(S_PRODAMUS_ASK)
+    asking = bool(ask_s) and today >= datetime.fromisoformat(ask_s).date()
     if missing:
-        total = sum(g["amount"] for g in missing)
-        lines = [f"⚠️ <b>Продамус всё ещё не передаёт чеки в «Мой налог»</b>",
-                 f"Без чека {len(missing)} оплат на {total:,.0f} ₽".replace(",", " ") + ":", ""]
-        for g in missing[:25]:
-            paid = (g["paid"] + timedelta(hours=3)).strftime("%d.%m")
-            lines.append(f"• {paid} — {g['amount']:.0f} ₽ · "
-                         + ", ".join("@" + u for u in sorted(g["users"])))
-        if len(missing) > 25:
-            lines.append(f"… и ещё {len(missing) - 25}")
-        lines += ["", "Проверь в кабинете Продамуса настройки чеков для самозанятых и в «Мой налог» "
-                      "→ партнёры, подключён ли Продамус. Если чинить не будут — скажи Claude, "
-                      "пробьём эти чеки через бота. Следующая сверка — через неделю."]
-        await _notify_admins("\n".join(lines))
-        await db.set_setting(S_PRODAMUS_NEXT, (today + timedelta(days=7)).isoformat())
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+            text=f"🧾 Пробить эти {len(missing)} чеков через бота", callback_data="npd:prodamus_issue")]])
+        if asking:
+            head = ["🧾 <b>Проверка чеков Продамуса — выдал ли он все?</b>",
+                    "Нет, не все. Крайний срок — 9 ноября."]
+            tail = ["", "Пробить оставшиеся через бота? Клиенты получат ссылку на чек. "
+                        "Если Продамус вот-вот дошлёт — не нажимай, спрошу завтра снова."]
+            nxt = today + timedelta(days=1)
+        else:
+            head = ["⚠️ <b>Продамус не передаёт чеки в «Мой налог»</b>"]
+            tail = ["", "Следующая сверка — через неделю."]
+            nxt = today + timedelta(days=7)
+        await _notify_admins_kb("\n".join(head + _missing_lines(missing) + tail), kb)
+        await db.set_setting(S_PRODAMUS_NEXT, nxt.isoformat())
     else:
+        if asking:
+            await _notify_admins("✅ <b>Проверка чеков Продамуса:</b> все оплаты через Продамус "
+                                 "с чеками в «Мой налог» — всё сработало.")
+            await db.set_setting(S_PRODAMUS_ASK, "")
         await db.set_setting(S_PRODAMUS_NEXT, (today + timedelta(days=1)).isoformat())
     return missing
+
+
+async def issue_prodamus_missing(bot: Bot) -> tuple[int, int]:
+    """Пробивает чеки за оплаты Продамуса, по которым он их не выдал.
+    Возвращает (пробито, не вышло)."""
+    done = failed = 0
+    for g in await prodamus_missing():
+        if g.get("option_id"):
+            name = await receipt_name("c", g["option_id"])
+        else:
+            name = ", ".join(dict.fromkeys(n for n in g["names"] if n)) or "Оплата заказа"
+        await issue_for_payment(bot, g["payment_id"], g["user_id"], name, float(g["amount"]),
+                                g["paid"].strftime("%Y-%m-%dT%H:%M:%SZ"))
+        row = await db.get_npd_receipt(g["payment_id"])
+        if row and row["status"] == "issued":
+            done += 1
+        else:
+            failed += 1
+    return done, failed
 
 
 async def retry_loop(bot: Bot):

@@ -152,3 +152,22 @@ async def cb_off(callback: CallbackQuery):
     await callback.answer("Отключено")
     text, kb = await status_screen()
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "npd:prodamus_issue")
+async def cb_prodamus_issue(callback: CallbackQuery):
+    """Продамус не выдал чеки — пробиваем их сами (кнопка из сверки)."""
+    if not _admin(callback.from_user.id):
+        await callback.answer()
+        return
+    await callback.answer("Пробиваю…")
+    await callback.message.edit_reply_markup(reply_markup=None)
+    main_bot = Bot(token=config.BOT_TOKEN)
+    try:
+        done, failed = await npd_receipts.issue_prodamus_missing(main_bot)
+    finally:
+        await main_bot.session.close()
+    await db.set_setting(npd_receipts.S_PRODAMUS_ASK, "")
+    await callback.message.answer(
+        f"🧾 Пробито чеков: {done}" + (f", не вышло: {failed} — бот повторит сам, статус в /nalog"
+                                       if failed else ". Клиентам отправлены ссылки."))

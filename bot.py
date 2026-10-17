@@ -52,6 +52,7 @@ async def main():
     dp.include_router(delivery.router)      # before payment!
     dp.include_router(waitlist_handler.router)
     dp.include_router(payment.router)
+    dp.include_router(pay_router.router)     # «У меня зарубежная карта»
     dp.include_router(feedback.router)
     dp.include_router(support.router)
     dp.include_router(pending_nudge.router)

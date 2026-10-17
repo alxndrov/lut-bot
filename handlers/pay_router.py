@@ -17,11 +17,12 @@
 import asyncio
 import logging
 import time
+from datetime import datetime, timezone
 from html import escape
 
 from aiohttp import web
-from aiogram import Bot
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram import Bot, F, Router
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 import config
 import database as db
@@ -29,6 +30,7 @@ from services import paylinks, yookassa
 from services.prodamus import prodamus_url
 
 logger = logging.getLogger(__name__)
+router = Router()   # кнопка «У меня зарубежная карта» в основном боте
 
 PROVIDER_SETTING = "pay_provider"   # 'prodamus' | 'yookassa'
 POLL_SECONDS = 20
@@ -45,9 +47,41 @@ async def current_provider() -> str:
 
 
 def backup_keyboard(order_num: str, amount: int, name: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
-        text=f"💳 Оплатить через ЮKassa · {amount} ₽",
-        url=paylinks.link(order_num, amount, name, via="yk"))]])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"💳 Оплатить через ЮKassa · {amount} ₽",
+                              url=paylinks.link(order_num, amount, name, via="yk"))],
+        # ЮKassa и Prodamus у нас принимают только российские карты — такого
+        # покупателя ведёт команда вручную
+        [InlineKeyboardButton(text="🌍 У меня зарубежная карта",
+                              callback_data=f"payforeign:{order_num}")],
+    ])
+
+
+FOREIGN_REPLY = ("Поняли 🤍 Оплату зарубежной картой подключаем — команда уже в курсе "
+                 "и напишет вам здесь, как оплатить.")
+
+
+@router.callback_query(F.data.startswith("payforeign:"))
+async def cb_foreign_card(callback: CallbackQuery):
+    order_num = callback.data.split(":", 1)[1]
+    await callback.answer()
+    await callback.message.answer(FOREIGN_REPLY)
+    # Одно уведомление на заказ — повторные нажатия не спамят админов
+    key = f"foreign_card:{order_num}"
+    if await db.get_setting(key):
+        return
+    await db.set_setting(key, datetime.now(timezone.utc).isoformat())
+    click = await db.get_pay_click(order_num) or {}
+    u = callback.from_user
+    who = f"@{u.username}" if u.username else f"id:{u.id}"
+    from handlers.prodamus_webhook import _send_notify
+    await _send_notify(callback.bot, (
+        f"🌍 <b>Клиент хочет оплатить зарубежной картой</b>\n\n"
+        f"👤 {escape(u.full_name or '—')} {who}\n"
+        f"🛍 {escape(click.get('name') or order_num)} — {click.get('amount', '?')} ₽\n\n"
+        f"Напишите клиенту, как оплатить. Российские карты, СБП, SberPay и T-Pay у него, "
+        f"судя по всему, не проходят."))
+    logger.info(f"pay: зарубежная карта — {order_num} ({who})")
 
 
 # ── Переход по ссылке ──────────────────────────────────────────────────────────
@@ -195,12 +229,14 @@ async def check_yk_payment(bot: Bot, row: dict):
 BACKUP_TEXT = (
     "Получилось оплатить? 🙂\n\n"
     "Если страница оплаты не открылась или карта не проходит, вот запасной способ — "
-    "через ЮKassa: карта, SberPay или T-Pay. Сумма та же, {amount} ₽."
+    "через ЮKassa: карта, SberPay или T-Pay. Сумма та же, {amount} ₽.\n\n"
+    "Карта зарубежного банка? Нажмите кнопку ниже — поможем оплатить."
 )
 FAILED_TEXT = (
     "😔 Оплата не прошла. Так бывает: банк иногда отклоняет платёж.\n\n"
     "Попробуйте запасной способ — через ЮKassa: карта, SberPay или T-Pay. "
-    "Сумма та же, {amount} ₽."
+    "Сумма та же, {amount} ₽.\n\n"
+    "Карта зарубежного банка? Нажмите кнопку ниже — поможем оплатить."
 )
 
 

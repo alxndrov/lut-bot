@@ -80,7 +80,8 @@ PRODAMUS_WEBHOOK_URL_PHYSICAL: str = os.getenv("PRODAMUS_WEBHOOK_URL_PHYSICAL", 
 # старая страница будет окончательно выключена.
 PRODAMUS_SECRET_PHYSICAL_OLD: str = os.getenv("PRODAMUS_SECRET_PHYSICAL_OLD", "")
 
-PRODAMUS_FEE_PERCENT: float = float(os.getenv("PRODAMUS_FEE_PERCENT", "3.5"))
+# Комиссия Prodamus 3,8% — столько он присылает в каждом уведомлении об оплате
+PRODAMUS_FEE_PERCENT: float = float(os.getenv("PRODAMUS_FEE_PERCENT", "3.8"))
 # Комиссия ЮKassa: 3,5% + НДС 22% с комиссии = 4,27% (реестр платежей за 13.10.2026).
 # Фактическую комиссию бот берёт из самого платежа (income_amount); этот процент —
 # только запасной, если ЮKassa сумму после комиссии не вернула.

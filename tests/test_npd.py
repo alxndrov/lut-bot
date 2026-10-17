@@ -49,10 +49,16 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
         self.orig_notify = npd_receipts._notify_admins
         npd_receipts._notify_admins = notify
 
+        async def notify_kb(text, kb):
+            self.notes.append(text)
+        self.orig_notify_kb = npd_receipts._notify_admins_kb
+        npd_receipts._notify_admins_kb = notify_kb
+
     async def asyncTearDown(self):
         for n, f in self.orig.items():
             setattr(npd, n, f)
         npd_receipts._notify_admins = self.orig_notify
+        npd_receipts._notify_admins_kb = self.orig_notify_kb
         db.DB_PATH = self.old_path
         self.tmp.cleanup()
 
@@ -154,6 +160,15 @@ class ProdamusWatchTest(NpdReceiptsTest):
             self.assertIsNone(await npd_receipts.check_prodamus())   # ещё не пора
             self.assertEqual(len(await npd_receipts.check_prodamus(force=True)), 1)
             self.assertIn("999 ₽", self.notes[-1])
+            # День вопроса: всё на месте — всё равно пишем, что сработало
+            async def all_there(since, until):
+                return [{"totalAmount": a, "operationTime": t, "cancellationInfo": None}
+                        for a, t in ((399, "2026-10-09T15:24:30+03:00"),
+                                     (999, "2026-10-09T10:16:10+03:00"))]
+            npd.list_incomes = all_there
+            await db.set_setting(npd_receipts.S_PRODAMUS_ASK, "2020-01-01")   # день вопроса настал
+            await npd_receipts.check_prodamus(force=True)
+            self.assertIn("всё сработало", self.notes[-1])
         finally:
             npd.list_incomes = orig
 
