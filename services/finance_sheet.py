@@ -30,6 +30,7 @@ HEADERS = [
     'Налог', 'Отложено на СДЭК', 'К выплате', 'Комментарий', 'Товар',
     'Печатал', 'Позиций напечатал Даня', 'Получатель', 'Статус синхронизации',
     'Движение денег', 'Налоговый месяц', 'База процента партнёра', 'Кто внёс расход',
+    'Платёжная система',   # Prodamus / ЮKassa — у них разный график выплат
 ]
 # Типы строк cashflow, которые считаются в выручку: возврат — приход с минусом,
 # но с собственным типом «Возврат», чтобы его было видно (решение Дани 19.10.2026)
@@ -125,6 +126,8 @@ async def _build_snapshot(year, now, monthly_split=True):
     # у Prodamus — его процент. Возврат комиссию не возвращает — у строки её нет.
     yk_fees = await db.get_yk_fee_by_code()
     for row in rows:
+        if row['kind'] in INCOME and not row.get('refund'):
+            row['provider'] = 'ЮKassa' if str(row['code']) in yk_fees else 'Prodamus'
         if row['kind'] in INCOME:
             row['fee'] = (0.0 if row.get('refund') else
                           money(yk_fees[str(row['code'])]) if str(row['code']) in yk_fees else
@@ -271,7 +274,7 @@ def operation_values(row):
         row.get('recipient', ''), 'Сверено',
         'Взаимозачёт — без движения денег' if row.get('noncash') else 'Денежная операция',
         row.get('tax_month', ''), row.get('partner_base') if income and not row.get('refund') else None,
-        row.get('paid_by', ''),
+        row.get('paid_by', ''), row.get('provider', ''),
     ]))
 
 
