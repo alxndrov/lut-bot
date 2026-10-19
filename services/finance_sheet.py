@@ -31,6 +31,9 @@ HEADERS = [
     'Печатал', 'Позиций напечатал Даня', 'Получатель', 'Статус синхронизации',
     'Движение денег', 'Налоговый месяц', 'База процента партнёра', 'Кто внёс расход',
 ]
+# Типы строк cashflow, которые считаются в выручку: возврат — приход с минусом,
+# но с собственным типом «Возврат», чтобы его было видно (решение Дани 19.10.2026)
+INCOME = ('Приход', 'Возврат')
 RENAMES = {'Дата заказа': 'Дата операции', 'Номер заказа': 'Номер операции', 'Оплата': 'Сумма'}
 MONTHS = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
           'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь']
@@ -79,7 +82,7 @@ def allocate_tax(rows, months):
     """Allocate corrected monthly NPD to receipts, preserving exact cents."""
     groups = defaultdict(list)
     for row in rows:
-        if row['kind'] == 'Приход':
+        if row['kind'] in INCOME:
             groups[msk_date(row['created_at']).strftime('%Y-%m')].append(row)
     for month in months:
         group = groups.get(month['month'], [])
@@ -122,13 +125,13 @@ async def _build_snapshot(year, now, monthly_split=True):
     # у Prodamus — его процент. Возврат комиссию не возвращает — у строки её нет.
     yk_fees = await db.get_yk_fee_by_code()
     for row in rows:
-        if row['kind'] == 'Приход':
+        if row['kind'] in INCOME:
             row['fee'] = (0.0 if row.get('refund') else
                           money(yk_fees[str(row['code'])]) if str(row['code']) in yk_fees else
                           float(row['amount']) * config.PRODAMUS_FEE_PERCENT / 100)
     for row in rows:
         row['tax_month'] = tax_months.get(row['code'], '')
-        if row['kind'] == 'Приход' and not row.get('refund'):
+        if row['kind'] in INCOME and not row.get('refund'):
             m = assessment.get(msk_date(row['created_at']).strftime('%Y-%m'), {})
             rate = m.get('accrued', 0) / m['gross'] if m.get('gross') else 0
             fee_rate = (row['fee'] / float(row['amount']) if float(row['amount'])
@@ -149,8 +152,8 @@ async def _build_snapshot(year, now, monthly_split=True):
     expenses = await db.get_expenses_summary('1900-01-01', '2100-12-31')
     # Возвраты — приходы с минусом: уменьшают принятое, но не комиссию —
     # Prodamus её при возврате не отдаёт
-    gross = sum(float(r['amount']) for r in rows if r['kind'] == 'Приход')
-    fee = sum(r['fee'] for r in rows if r['kind'] == 'Приход')
+    gross = sum(float(r['amount']) for r in rows if r['kind'] in INCOME)
+    fee = sum(r['fee'] for r in rows if r['kind'] in INCOME)
     # Share the bot's remittance calendar, including its documented limitations.
     from handlers.finance import _pending_gross
     pending_gross = await _pending_gross('1900-01-01 00:00:00',
@@ -253,7 +256,7 @@ def header_columns(header):
 
 
 def operation_values(row):
-    income = row['kind'] == 'Приход'
+    income = row['kind'] in INCOME
     amount = float(row['amount'])
     fee = (row['fee'] if 'fee' in row else amount * config.PRODAMUS_FEE_PERCENT / 100) if income else None
     if row.get('refund'):
@@ -397,7 +400,9 @@ def formula_dashboard(snapshot, legacy, stats, cols):
     def quoted(value):
         return '"' + str(value).replace('"', '""') + '"'
     def total(column='Сумма', kind='Приход', filters=()):
-        args = [ref(column), ref('Статус синхронизации'), '"Сверено"', ref('Тип'), quoted(kind)]
+        # «Приход» в сводке — вся выручка, включая возвраты (они с минусом)
+        crit = '"<>Расход"' if kind == 'Приход' else quoted(kind)
+        args = [ref(column), ref('Статус синхронизации'), '"Сверено"', ref('Тип'), crit]
         for name, condition in filters:
             args.extend([ref(name), condition])
         return 'SUMIFS(' + ';'.join(args) + ')'
@@ -435,7 +440,7 @@ def formula_dashboard(snapshot, legacy, stats, cols):
     put(40, 'ROUND(' + ('+'.join(credits) or '0') + ';2)')
     put(39, f'ROUND(MAX(0;B4-{total("Отложено на СДЭК")});2)')
     date = ref('Дата операции')
-    pending = (f'SUMPRODUCT(({ref("Тип")}="Приход")*({ref("Статус синхронизации")}="Сверено")*'
+    pending = (f'SUMPRODUCT(({ref("Тип")}<>"Расход")*({ref("Статус синхронизации")}="Сверено")*'
                f'({ref("Движение денег")}="Денежная операция")*'
                f'(INT({date})+CHOOSE(WEEKDAY({date};2);2;2;2;4;3;2;2)>TODAY())*'
                f'({ref("Сумма")}-{ref("Комиссия Prodamus")}))')

@@ -3701,15 +3701,15 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
             "goods_type": "Цифровой", "printer": "",
         })
 
-    # Возврат — приход с минусом: так его сами учитывают формулы сводки
-    # (выручка, налог, СДЭК, доли по месяцам). Комиссию Prodamus при
+    # Возврат — приход с минусом и своим типом «Возврат»: формулы сводки
+    # считают выручку как всё, что не «Расход» (выручка, налог, СДЭК, доли). Комиссию Prodamus при
     # возврате не возвращают — у строки её нет (см. operation_values).
     for r in await get_refunds():
         num = (re.findall(r"\d+", r["order_code"] or "") or [str(r["order_id"])])[-1]
         comment = f"Возврат по заказу №{num}" + (f": {r['reason']}" if r["reason"] else "")
         rows.append({
             "code": f"refund-{r['id']}", "created_at": r["created_at"],
-            "amount": -float(r["amount"]), "kind": "Приход", "comment": comment,
+            "amount": -float(r["amount"]), "kind": "Возврат", "comment": comment,
             "delivery_cost": float(r["return_delivery"] or 0), "delivery_legacy": 0.0,
             "goods_type": "Возврат", "printer": "", "refund": True,
         })
