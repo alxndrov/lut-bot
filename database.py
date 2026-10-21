@@ -374,6 +374,13 @@ async def init_db(existing_cdek_contract: str | None = None):
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        # Отзыв в магазине (кнопка «Отзывы покупателей» в каталоге): админ
+        # публикует отзыв, текст можно поправить — показывается обезличенно
+        for col in ("published INTEGER DEFAULT 0", "public_text TEXT", "published_at TIMESTAMP"):
+            try:
+                await db.execute(f"ALTER TABLE reviews ADD COLUMN {col}")
+            except Exception:
+                pass
         # Возвраты денег покупателю (кнопка «Провести возврат» в карточке).
         # Сам возврат проводится в кабинете Prodamus — API для него нет;
         # строка появляется, когда админ подтвердил, что заявка оформлена.
@@ -1422,6 +1429,52 @@ async def get_reviews(limit: int = 10, offset: int = 0) -> list[dict]:
             (limit, offset),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_review(review_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.*, p.name AS product_name FROM reviews r
+               LEFT JOIN products p ON p.id = r.product_id WHERE r.id = ?""",
+            (review_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def set_review_published(review_id: int, published: bool):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE reviews SET published = ?, published_at = CASE WHEN ? THEN "
+            "COALESCE(published_at, CURRENT_TIMESTAMP) ELSE NULL END WHERE id = ?",
+            (int(published), int(published), review_id))
+        await db.commit()
+
+
+async def set_review_public_text(review_id: int, text: str | None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE reviews SET public_text = ? WHERE id = ?", (text, review_id))
+        await db.commit()
+
+
+async def get_published_reviews(limit: int = 5, offset: int = 0) -> list[dict]:
+    """Опубликованные отзывы для покупателей — свежие сверху, без имён."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT r.id, COALESCE(NULLIF(TRIM(r.public_text), ''), r.text) AS body,
+                      r.created_at, p.name AS product_name
+               FROM reviews r LEFT JOIN products p ON p.id = r.product_id
+               WHERE r.published = 1
+               ORDER BY r.created_at DESC, r.id DESC LIMIT ? OFFSET ?""",
+            (limit, offset)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def count_published_reviews() -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT COUNT(*) FROM reviews WHERE published = 1")
+        return (await cur.fetchone())[0]
 
 
 async def count_reviews() -> int:

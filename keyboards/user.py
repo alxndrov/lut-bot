@@ -4,7 +4,8 @@ import config
 from services.prodamus import build_payment_url
 
 
-def catalog_keyboard(products: list[dict], is_admin: bool = False) -> InlineKeyboardMarkup:
+def catalog_keyboard(products: list[dict], is_admin: bool = False,
+                     reviews: int = 0) -> InlineKeyboardMarkup:
     buttons = []
     for p in products:
         hidden = not p.get("active", 1)
@@ -13,6 +14,9 @@ def catalog_keyboard(products: list[dict], is_admin: bool = False) -> InlineKeyb
             text=f"{prefix}{p['name']} — {p.get('price_label') or p['price']} ₽",
             callback_data=f"product:{p['id']}"
         )])
+    if reviews:   # опубликованные админом отзывы — см. handlers/shop_reviews.py
+        buttons.append([InlineKeyboardButton(text=f"⭐️ Отзывы покупателей ({reviews})",
+                                             callback_data="shoprev:0")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

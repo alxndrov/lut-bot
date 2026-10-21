@@ -61,7 +61,8 @@ async def relay_media(message: Message, to_bot: Bot, chat_id: int):
 
 
 async def notify_admins(message: Message, header: str, user_id: int,
-                        bot_token: str | None = None, order: dict | None = None) -> bool:
+                        bot_token: str | None = None, order: dict | None = None,
+                        extra_rows: list | None = None) -> bool:
     """Шапка + само сообщение клиента всем админам в malimadmins.
 
     Если у клиента есть заказ, вопрос уходит ОТВЕТОМ на карточку этого
@@ -74,7 +75,7 @@ async def notify_admins(message: Message, header: str, user_id: int,
     """
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✍️ Ответить", callback_data=f"sup_reply:{user_id}")
-    ]])
+    ]] + (extra_rows or []))
     ok = False
     bot = Bot(token=bot_token or config.WAITLIST_BOT_TOKEN)
     try:
@@ -239,12 +240,13 @@ async def _save_review(message: Message, order: dict | None, product_id: int | N
             break
     u = message.from_user
     try:
-        await db.add_review(
+        return await db.add_review(
             user_id=u.id, username=u.username, first_name=u.first_name,
             order_id=(order or {}).get("id"), product_id=product_id,
             text=message.text or message.caption, media_kind=kind, file_id=file_id)
     except Exception as e:
         logger.error(f"review save ({u.id}): {type(e).__name__}: {e}")
+        return None
 
 
 # --- Свободное сообщение клиента ---
@@ -308,9 +310,15 @@ async def on_free_message(message: Message, state: FSMContext):
     else:
         return UNHANDLED
 
-    if await notify_admins(message, header, user_id, order=order):
-        if push or early:
-            await _save_review(message, order, (push or early).get("product_id"))
+    # Отзыв сохраняем до уведомления: у сообщения админам — кнопка
+    # «Показать в магазине» с его номером (только если есть текст)
+    review_id = extra = None
+    if push or early:
+        review_id = await _save_review(message, order, (push or early).get("product_id"))
+        if review_id and (message.text or message.caption):
+            from handlers.reviews import publish_row
+            extra = [publish_row(review_id, False)]
+    if await notify_admins(message, header, user_id, order=order, extra_rows=extra):
         if early:
             # Отзыв уже есть — просить о нём ещё раз незачем
             await db.drop_review_push(early["id"])

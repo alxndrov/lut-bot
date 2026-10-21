@@ -203,7 +203,8 @@ async def show_catalog(message_or_callback, edit=False, user_id: int | None = No
     else:
         admin_hint = "\n\n<i>🔐 Вы видите скрытые товары, т.к. вы администратор</i>" if admin else ""
         text = "📦 Каталог товаров:" + admin_hint
-        kb = catalog_keyboard(products, is_admin=admin)
+        kb = catalog_keyboard(products, is_admin=admin,
+                              reviews=await db.count_published_reviews())
 
     if edit:
         msg = message_or_callback.message
