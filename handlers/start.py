@@ -145,7 +145,8 @@ async def cmd_start(message: Message):
 
     admin_hint = "\n\n<i>🔐 Вы видите скрытые товары, т.к. вы администратор</i>" if admin else ""
     text = "👋 Привет! Выбери товар из каталога:" + admin_hint
-    kb = catalog_keyboard(products, is_admin=admin)
+    kb = catalog_keyboard(products, is_admin=admin,
+                          reviews=await db.count_published_reviews())
 
     if banner_file_id:
         await message.answer_photo(banner_file_id, caption=text, reply_markup=kb, parse_mode="HTML")
