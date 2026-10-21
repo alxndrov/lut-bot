@@ -131,7 +131,8 @@ async def _build_snapshot(year, now, monthly_split=True):
         if row['kind'] in INCOME:
             row['fee'] = (0.0 if row.get('refund') else
                           money(yk_fees[str(row['code'])]) if str(row['code']) in yk_fees else
-                          float(row['amount']) * config.PRODAMUS_FEE_PERCENT / 100)
+                          # Prodamus округляет свою комиссию до копеек (commission_sum)
+                          money(float(row['amount']) * config.PRODAMUS_FEE_PERCENT / 100))
     for row in rows:
         row['tax_month'] = tax_months.get(row['code'], '')
         if row['kind'] in INCOME and not row.get('refund'):
@@ -261,7 +262,7 @@ def header_columns(header):
 def operation_values(row):
     income = row['kind'] in INCOME
     amount = float(row['amount'])
-    fee = (row['fee'] if 'fee' in row else amount * config.PRODAMUS_FEE_PERCENT / 100) if income else None
+    fee = (row['fee'] if 'fee' in row else money(amount * config.PRODAMUS_FEE_PERCENT / 100)) if income else None
     if row.get('refund'):
         fee = 0.0
     tax = row.get('tax', 0) if income else None
