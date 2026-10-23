@@ -95,6 +95,17 @@ YOOKASSA_SECRET_KEY: str = os.getenv("YOOKASSA_SECRET_KEY", "")
 YOOKASSA_SHOP_ID_PHYSICAL: str = os.getenv("YOOKASSA_SHOP_ID_PHYSICAL", "") or YOOKASSA_SHOP_ID
 YOOKASSA_SECRET_KEY_PHYSICAL: str = os.getenv("YOOKASSA_SECRET_KEY_PHYSICAL", "") or YOOKASSA_SECRET_KEY
 YOOKASSA_ENABLED: bool = bool(YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY)
+
+# PayAnyWay (НКО «МОНЕТА») — основная оплата с 23.10.2026, платежи принимает
+# самозанятый Барышов М. П.; чеки в «Мой налог» делает сам PayAnyWay.Self.
+# PAYANYWAY_SECRET — «Код проверки целостности данных» из кабинета («Мой магазин»).
+PAYANYWAY_MNT_ID: str = os.getenv("PAYANYWAY_MNT_ID", "34903086")
+PAYANYWAY_SECRET: str = os.getenv("PAYANYWAY_SECRET", "")
+PAYANYWAY_TEST_MODE: bool = os.getenv("PAYANYWAY_TEST_MODE", "0") == "1"
+PAYANYWAY_URL: str = os.getenv("PAYANYWAY_URL", "https://www.payanyway.ru/assistant.htm")
+PAYANYWAY_ENABLED: bool = bool(PAYANYWAY_MNT_ID and PAYANYWAY_SECRET)
+# Комиссия PayAnyWay в финансах — процентом от оплаты (уточнить по договору)
+PAYANYWAY_FEE_PERCENT: float = float(os.getenv("PAYANYWAY_FEE_PERCENT", "4.5"))
 # Ссылки на оплату ведут на наш адрес (/pay/…), а он уже отправляет в
 # Prodamus или ЮKassa — так видно переход и работает переключение. Пусто —
 # ссылки по-старому, прямо на Prodamus. По умолчанию — домен мини-приложения.

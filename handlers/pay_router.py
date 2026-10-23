@@ -1,5 +1,9 @@
 """
-Куда ведёт ссылка на оплату: Prodamus или ЮKassa.
+Куда ведёт ссылка на оплату: PayAnyWay, Prodamus или ЮKassa.
+
+С 23.10.2026 основная — PayAnyWay (платежи принимает Барышов М. П., чеки
+делает PayAnyWay.Self). Prodamus — только для зарубежных карт (via='pd',
+кнопка «У меня зарубежная карта»). ЮKassa — по выбору в /payments.
 
 Все кнопки «Оплатить» ведут на наш адрес /pay/<токен> (services/paylinks.py),
 а он отправляет клиента дальше — смотря по настройке в malimadmins (/payments):
@@ -26,13 +30,13 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 import config
 import database as db
-from services import paylinks, yookassa
+from services import payanyway, paylinks, yookassa
 from services.prodamus import prodamus_url
 
 logger = logging.getLogger(__name__)
 router = Router()   # кнопка «У меня зарубежная карта» в основном боте
 
-PROVIDER_SETTING = "pay_provider"   # 'prodamus' | 'yookassa'
+PROVIDER_SETTING = "pay_provider"   # 'payanyway' | 'prodamus' | 'yookassa'
 POLL_SECONDS = 20
 ALERT_EVERY = 3600                  # не чаще раза в час про сбой ЮKassa
 
@@ -40,16 +44,25 @@ _last_alert = 0.0
 
 
 async def current_provider() -> str:
-    """Куда ведут ссылки сейчас. ЮKassa без ключей не выбирается."""
-    if config.YOOKASSA_ENABLED and await db.get_setting(PROVIDER_SETTING) == "yookassa":
+    """Куда ведут ссылки сейчас. Способ без ключей не выбирается; не задано —
+    PayAnyWay, если он подключён."""
+    chosen = await db.get_setting(PROVIDER_SETTING)
+    if chosen == "yookassa" and config.YOOKASSA_ENABLED:
         return "yookassa"
-    return "prodamus"
+    if chosen == "prodamus":
+        return "prodamus"
+    return "payanyway" if config.PAYANYWAY_ENABLED else "prodamus"
 
 
-def backup_keyboard(order_num: str, amount: int, name: str) -> InlineKeyboardMarkup:
+def backup_keyboard(order_num: str, amount: int, name: str,
+                    provider: str = "yookassa") -> InlineKeyboardMarkup:
+    first = (InlineKeyboardButton(text=f"💳 Оплатить ещё раз · {amount} ₽",
+                                  url=paylinks.link(order_num, amount, name, via="paw"))
+             if provider == "payanyway" else
+             InlineKeyboardButton(text=f"💳 Оплатить через ЮKassa · {amount} ₽",
+                                  url=paylinks.link(order_num, amount, name, via="yk")))
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"💳 Оплатить через ЮKassa · {amount} ₽",
-                              url=paylinks.link(order_num, amount, name, via="yk"))],
+        [first],
         # Зарубежные карты принимает Prodamus — в обычные поля карты на его странице
         [InlineKeyboardButton(text="🌍 У меня зарубежная карта",
                               callback_data=f"payforeign:{order_num}")],
@@ -117,6 +130,16 @@ async def _yookassa_url(link: dict, return_url: str) -> str:
     return url
 
 
+async def _payanyway_url(link: dict, return_url: str) -> str:
+    fresh = await db.fresh_paw_payment(link["order_num"], link["amount"])
+    if fresh:
+        return fresh["url"]
+    txn = payanyway.new_transaction_id(link["order_num"])
+    url = payanyway.form_url(txn, link["amount"], link["name"], str(link["user_id"]), return_url)
+    await db.add_paw_payment(txn, link["order_num"], link["kind"], link["amount"], link["name"], url)
+    return url
+
+
 async def handle_pay(request: web.Request) -> web.Response:
     bot_username = request.app.get("bot_username", "")
     link = paylinks.parse_token(request.match_info["token"])
@@ -135,14 +158,19 @@ async def handle_pay(request: web.Request) -> web.Response:
                          "Оплата по этому заказу уже пришла. Подтверждение — в боте.",
                          bot_username)
 
-    # via: yk — запасная ЮKassa, pd — только Prodamus (зарубежные карты принимает он)
+    # via: yk — запасная ЮKassa, pd — только Prodamus (зарубежные карты принимает он),
+    # paw — PayAnyWay (повтор оплаты, проверочный платёж)
     provider = ("yookassa" if link["via"] == "yk" and config.YOOKASSA_ENABLED
-                else "prodamus" if link["via"] == "pd" else await current_provider())
+                else "prodamus" if link["via"] == "pd"
+                else "payanyway" if link["via"] == "paw" and config.PAYANYWAY_ENABLED
+                else await current_provider())
     shop = config.PRODAMUS_SHOP_URL_PHYSICAL if link["kind"] == "p" else config.PRODAMUS_SHOP_URL
-    if not shop and config.YOOKASSA_ENABLED:
+    if provider == "prodamus" and not shop and config.YOOKASSA_ENABLED:
         provider = "yookassa"
 
     url = None
+    if provider == "payanyway":
+        url = await _payanyway_url(link, f"https://t.me/{bot_username}" if bot_username else "")
     if provider == "yookassa":
         try:
             url = await _yookassa_url(link, f"https://t.me/{bot_username}" if bot_username
@@ -167,6 +195,11 @@ async def handle_pay(request: web.Request) -> web.Response:
     raise web.HTTPFound(url)
 
 
+async def _notify(bot: Bot, text: str):
+    from handlers.prodamus_webhook import _send_notify
+    await _send_notify(bot, text)
+
+
 async def _alert(bot: Bot, text: str):
     global _last_alert
     if time.monotonic() - _last_alert < ALERT_EVERY:
@@ -174,6 +207,63 @@ async def _alert(bot: Bot, text: str):
     _last_alert = time.monotonic()
     from handlers.prodamus_webhook import _send_notify
     await _send_notify(bot, text)
+
+
+# ── Уведомление PayAnyWay (Pay URL) ────────────────────────────────────────────
+
+def _xml(txn: str, code: int) -> web.Response:
+    return web.Response(text=payanyway.response_xml(txn, code), content_type="application/xml")
+
+
+async def handle_payanyway_notify(request: web.Request) -> web.Response:
+    """Оплата прошла. Проверяем подпись, номер оплаты и сумму, выдаём товар
+    той же provision_payment. Повторное уведомление — просто 200."""
+    params = dict(request.query)
+    if request.method == "POST":
+        params.update({k: v for k, v in (await request.post()).items() if isinstance(v, str)})
+    txn = params.get("MNT_TRANSACTION_ID", "")
+    bot = request.app["bot"]
+    logger.info(f"payanyway: уведомление {txn} {params.get('MNT_AMOUNT')} ₽ "
+                f"op={params.get('MNT_OPERATION_ID')} test={params.get('MNT_TEST_MODE')}")
+    if not config.PAYANYWAY_ENABLED:
+        return web.Response(text="FAIL", status=503)
+    if params.get("MNT_ID") != config.PAYANYWAY_MNT_ID or not payanyway.notification_valid(params):
+        # FAIL — PayAnyWay повторит в течение суток: успеем поправить код в .env
+        logger.warning(f"payanyway: подпись/счёт не сошлись для {txn}")
+        await _alert(bot, "⚠️ <b>PayAnyWay: уведомление об оплате с неверной подписью</b>\n"
+                          f"Оплата {escape(txn)}. Проверьте PAYANYWAY_SECRET (код проверки "
+                          "целостности) в .env — PayAnyWay повторит уведомление.")
+        return web.Response(text="FAIL")
+    row = await db.get_paw_payment(txn)
+    if not row:
+        await _notify(bot, f"⚠️ <b>PayAnyWay: оплата {escape(txn)} не из бота</b>\n"
+                          f"{escape(params.get('MNT_AMOUNT', ''))} ₽ — заказ не найден, товар не выдан.")
+        return _xml(txn, 200)
+    amount = float(params.get("MNT_AMOUNT") or 0)
+    if abs(amount - row["amount"]) > 0.009:
+        await _notify(bot, f"⚠️ <b>PayAnyWay: сумма не совпала</b>\n{escape(row['order_num'])}: "
+                          f"ждали {row['amount']} ₽, пришло {amount:.2f} ₽. Товар не выдан — "
+                          "разберитесь вручную.")
+        return _xml(txn, 200)
+    op = params.get("MNT_OPERATION_ID") or txn
+    if not await db.claim_paw_payment(txn, op):
+        return _xml(txn, 200)   # уже выдали
+    from handlers.prodamus_webhook import _send_notify, provision_payment
+    if row["kind"] == "t" or params.get("MNT_TEST_MODE") == "1":
+        await _send_notify(bot, f"🧪 Тестовый платёж PayAnyWay на {amount:.0f} ₽ прошёл — "
+                                f"оплата и уведомления работают. Товар не выдаётся.")
+        return _xml(txn, 200)
+    order_type, user_id, product_id = row["order_num"].split("_", 2)
+    try:
+        await provision_payment(bot, int(user_id), int(product_id), order_type,
+                                f"paw-{txn}", int(round(amount)))
+    except Exception as e:
+        logger.exception(f"payanyway: выдача {row['order_num']} упала: {e}")
+        await _send_notify(bot, f"🔴 <b>Оплата PayAnyWay пришла, но заказ не провёлся</b>\n"
+                                f"{escape(row['order_num'])}, {amount:.0f} ₽, оплата {escape(txn)}\n"
+                                f"{escape(str(e))}")
+    # Чек делает PayAnyWay.Self в «Мой налог» Миши — бот его не пробивает
+    return _xml(txn, 200)
 
 
 # ── Статус платежа ЮKassa ──────────────────────────────────────────────────────
@@ -236,6 +326,12 @@ async def check_yk_payment(bot: Bot, row: dict):
 
 # ── Запасная ссылка ────────────────────────────────────────────────────────────
 
+PAW_BACKUP_TEXT = (
+    "Получилось оплатить? 🙂\n\n"
+    "Если страница оплаты не открылась или банк отклонил платёж — попробуйте ещё раз: "
+    "картой или через СБП. Сумма та же, {amount} ₽.\n\n"
+    "Карта зарубежного банка? Нажмите кнопку ниже."
+)
 BACKUP_TEXT = (
     "Получилось оплатить? 🙂\n\n"
     "Если страница оплаты не открылась или карта не проходит, вот запасной способ — "
@@ -282,10 +378,20 @@ async def _send_backups(bot: Bot):
         fresh = await db.get_pay_click(click["order_num"])
         if not fresh or fresh["paid_at"] or not await _backup_allowed(fresh):
             continue
+        # Перешли в PayAnyWay — «оплатить ещё раз» + зарубежная карта; в Prodamus
+        # (основным он бывает по выбору в /payments) — запасная ЮKassa
+        if click.get("provider") == "payanyway":
+            text = PAW_BACKUP_TEXT
+        elif click.get("provider") == "prodamus" and config.YOOKASSA_ENABLED \
+                and await current_provider() == "prodamus":
+            text = BACKUP_TEXT
+        else:
+            continue   # зарубежная карта в Prodamus при основном PayAnyWay — не дёргаем
         try:
             await bot.send_message(
-                click["user_id"], BACKUP_TEXT.format(amount=click["amount"]),
-                reply_markup=backup_keyboard(click["order_num"], click["amount"], click["name"]))
+                click["user_id"], text.format(amount=click["amount"]),
+                reply_markup=backup_keyboard(click["order_num"], click["amount"], click["name"],
+                                             click.get("provider") or "yookassa"))
             logger.info(f"pay: запасная ссылка {click['order_num']}")
         except Exception as e:
             logger.warning(f"pay: запасную ссылку {click['order_num']} не отправил: {e}")
@@ -298,6 +404,7 @@ async def pay_worker(bot: Bot):
             if config.YOOKASSA_ENABLED:
                 for row in await db.yk_payments_to_check():
                     await check_yk_payment(bot, row)
+            if config.YOOKASSA_ENABLED or config.PAYANYWAY_ENABLED:
                 await _send_backups(bot)
         except Exception as e:
             logger.exception(f"pay_worker: {e}")
@@ -308,3 +415,4 @@ def setup_web(app: web.Application, bot_username: str = ""):
     app["bot_username"] = bot_username
     app.router.add_get("/pay/{token}", handle_pay)
     app.router.add_post("/yookassa/webhook", handle_yookassa_webhook)
+    app.router.add_route("*", "/payanyway/notify", handle_payanyway_notify)

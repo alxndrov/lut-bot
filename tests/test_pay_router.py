@@ -193,3 +193,72 @@ class PayRouteTest(_DbCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PayAnyWaySignatureTest(unittest.TestCase):
+    """Примеры из документации: https://docs.moneta.ru/assistant/v1/"""
+    def test_doc_examples(self):
+        import hashlib
+        from services import payanyway
+        with mock.patch.multiple(config, PAYANYWAY_MNT_ID="54600817", PAYANYWAY_SECRET="QWERTY",
+                                 PAYANYWAY_TEST_MODE=False):
+            url = payanyway.form_url("FF790ABCD", 120.25, "Тест")
+            self.assertIn("MNT_SIGNATURE=" + hashlib.md5(b"54600817FF790ABCD120.25RUB0QWERTY").hexdigest(), url)
+            self.assertIn(hashlib.md5(b"20054600817FF790ABCDQWERTY").hexdigest(),
+                          payanyway.response_xml("FF790ABCD", 200))
+
+
+class PayAnyWayFlowTest(_DbCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self.bot = mock.AsyncMock()
+        app = web.Application()
+        app["bot"] = self.bot
+        pay_router.setup_web(app, "testbot")
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        for k, v in dict(PAYANYWAY_MNT_ID="34903086", PAYANYWAY_SECRET="code", PAYANYWAY_ENABLED=True,
+                         PAYANYWAY_TEST_MODE=False, PRODAMUS_SHOP_URL="https://digital").items():
+            p = mock.patch.object(config, k, v)
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await super().asyncTearDown()
+
+    def _notify_params(self, txn, amount, op="777"):
+        import hashlib
+        p = {"MNT_ID": "34903086", "MNT_TRANSACTION_ID": txn, "MNT_OPERATION_ID": op,
+             "MNT_AMOUNT": amount, "MNT_CURRENCY_CODE": "RUB", "MNT_SUBSCRIBER_ID": "7",
+             "MNT_TEST_MODE": "0"}
+        p["MNT_SIGNATURE"] = hashlib.md5("".join([*p.values(), "code"]).encode()).hexdigest()
+        return p
+
+    async def test_link_notify_provision_once(self):
+        token = paylinks.make_token("c_7_3", 2990, "Съёмка")
+        r = await self.client.get(f"/pay/{token}", allow_redirects=False)
+        self.assertEqual(r.status, 302)
+        self.assertTrue(r.headers["Location"].startswith("https://www.payanyway.ru/assistant.htm?MNT_ID=34903086"))
+        r2 = await self.client.get(f"/pay/{token}", allow_redirects=False)
+        self.assertEqual(r.headers["Location"], r2.headers["Location"])   # тот же номер оплаты
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            txn = (await (await conn.execute("SELECT id FROM paw_payments")).fetchone())[0]
+        provision = mock.AsyncMock(return_value=True)
+        with mock.patch.object(prodamus_webhook, "provision_payment", provision), \
+             mock.patch.object(prodamus_webhook, "_send_notify", mock.AsyncMock()):
+            bad = dict(self._notify_params(txn, "2990.00"), MNT_SIGNATURE="00")
+            self.assertEqual(await (await self.client.post("/payanyway/notify", data=bad)).text(), "FAIL")
+            cheap = await self.client.post("/payanyway/notify", data=self._notify_params(txn, "1.00"))
+            self.assertIn("<MNT_RESULT_CODE>200", await cheap.text())
+            provision.assert_not_awaited()                                   # сумма не та
+            for _ in range(2):                                               # повтор уведомления
+                ok = await self.client.post("/payanyway/notify", data=self._notify_params(txn, "2990.00"))
+                self.assertIn("<MNT_RESULT_CODE>200", await ok.text())
+        provision.assert_awaited_once()
+        self.assertEqual(provision.await_args.args[1:], (7, 3, "c", f"paw-{txn}", 2990))
+
+    async def test_foreign_card_still_prodamus(self):
+        token = paylinks.make_token("c_7_3", 2990, "Съёмка", via="pd")
+        r = await self.client.get(f"/pay/{token}", allow_redirects=False)
+        self.assertTrue(r.headers["Location"].startswith("https://digital/?do=pay"))

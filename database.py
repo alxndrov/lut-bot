@@ -611,6 +611,22 @@ async def init_db(existing_cdek_contract: str | None = None):
                 done_at          TIMESTAMP
             )
         """)
+        # Оплаты PayAnyWay, созданные ботом: номер оплаты → заказ и сумма.
+        # Уведомление сверяем с этой строкой (сумму в форме можно подменить)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS paw_payments (
+                id           TEXT PRIMARY KEY,
+                order_num    TEXT NOT NULL,
+                kind         TEXT NOT NULL,
+                amount       INTEGER NOT NULL,
+                name         TEXT,
+                url          TEXT,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                operation_id TEXT,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                done_at      TIMESTAMP
+            )
+        """)
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -2986,7 +3002,10 @@ def _yk_fee_rate_sql() -> str:
     """Доля комиссии в платеже ЮKassa: фактическая (сумма − пришло после
     комиссии и НДС), а если ЮKassa её не вернула — запасной процент."""
     import config
-    return (f"""(CASE WHEN y.income IS NOT NULL AND y.amount > 0
+    # PayAnyWay (paw-) — процентом из настроек: суммы после комиссии он не присылает
+    return (f"""(CASE WHEN pu.telegram_payment_id LIKE 'paw-%'
+                     THEN {float(config.PAYANYWAY_FEE_PERCENT) / 100}
+                     WHEN y.income IS NOT NULL AND y.amount > 0
                      THEN (y.amount - y.income) * 1.0 / y.amount
                      ELSE {float(config.YOOKASSA_FEE_PERCENT) / 100} END)""")
 
@@ -3013,13 +3032,26 @@ async def get_yk_fees(dt_from: str, dt_to: str) -> dict:
                 FROM purchases pu
                 {_YK_JOIN}
                 LEFT JOIN products pr ON pr.id = pu.product_id
-                WHERE pu.telegram_payment_id LIKE 'yk-%'
+                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%')
                   AND datetime(pu.created_at) BETWEEN datetime(?) AND datetime(?)""",
             (dt_from, dt_to),
         ) as cur:
             gross, fee, digital, digital_fee = await cur.fetchone()
     return {"gross": float(gross), "fee": float(fee),
             "digital": float(digital), "digital_fee": float(digital_fee)}
+
+
+async def get_payment_providers() -> dict:
+    """{код строки финансового листа: 'ЮKassa' | 'PayAnyWay'} — остальные Prodamus."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT COALESCE(o.order_code, o.prodamus_order_id, pu.telegram_payment_id),
+                      CASE WHEN pu.telegram_payment_id LIKE 'paw-%' THEN 'PayAnyWay' ELSE 'ЮKassa' END
+               FROM purchases pu
+               LEFT JOIN orders o ON o.prodamus_order_id = pu.telegram_payment_id
+               WHERE pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%'"""
+        ) as cur:
+            return {str(code): name for code, name in await cur.fetchall()}
 
 
 async def get_yk_fee_by_code() -> dict:
@@ -3033,7 +3065,7 @@ async def get_yk_fee_by_code() -> dict:
                 FROM purchases pu
                 {_YK_JOIN}
                 LEFT JOIN orders o ON o.prodamus_order_id = pu.telegram_payment_id
-                WHERE pu.telegram_payment_id LIKE 'yk-%'
+                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%')
                 GROUP BY 1"""
         ) as cur:
             return {str(code): float(fee) for code, fee in await cur.fetchall()}
@@ -4714,7 +4746,7 @@ async def due_pay_backups(delay_min: int) -> list[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT * FROM pay_clicks
-               WHERE provider = 'prodamus' AND paid_at IS NULL AND backup_sent_at IS NULL
+               WHERE provider IN ('prodamus', 'payanyway') AND paid_at IS NULL AND backup_sent_at IS NULL
                  AND clicked_at <= datetime('now', ?) AND clicked_at >= datetime('now', '-2 hours')""",
             (f"-{int(delay_min)} minutes",),
         ) as cur:
@@ -4843,6 +4875,48 @@ async def get_yk_payment(payment_id: str) -> Optional[dict]:
         async with db.execute("SELECT * FROM yk_payments WHERE id = ?", (payment_id,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+async def add_paw_payment(txn: str, order_num: str, kind: str, amount: int, name: str, url: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO paw_payments (id, order_num, kind, amount, name, url)
+               VALUES (?, ?, ?, ?, ?, ?)""", (txn, order_num, kind, amount, name, url))
+        await db.commit()
+
+
+async def get_paw_payment(txn: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM paw_payments WHERE id = ?", (txn,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def fresh_paw_payment(order_num: str, amount: int, minutes: int = 60) -> Optional[dict]:
+    """Неоплаченная оплата PayAnyWay на тот же заказ и сумму — повторный
+    переход ведём на неё (у неё тот же номер — дважды не оплатить)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM paw_payments
+               WHERE order_num = ? AND amount = ? AND status = 'pending'
+                 AND created_at >= datetime('now', ?)
+               ORDER BY created_at DESC LIMIT 1""",
+            (order_num, amount, f"-{int(minutes)} minutes")) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def claim_paw_payment(txn: str, operation_id: str) -> bool:
+    """Берёт оплату в выдачу ровно один раз (PayAnyWay повторяет уведомления)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """UPDATE paw_payments SET status = 'succeeded', operation_id = ?,
+                   done_at = CURRENT_TIMESTAMP
+               WHERE id = ? AND status != 'succeeded'""", (operation_id, txn))
+        await db.commit()
+        return cur.rowcount > 0
 
 
 async def fresh_yk_payment(order_num: str, amount: int, minutes: int = 20) -> Optional[dict]:

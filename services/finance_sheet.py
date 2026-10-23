@@ -124,10 +124,11 @@ async def _build_snapshot(year, now, monthly_split=True):
     assessment = {m['month']: m for m in months}
     # Комиссия по строке: у оплат ЮKassa — фактическая из платежа (3,5% + НДС),
     # у Prodamus — его процент. Возврат комиссию не возвращает — у строки её нет.
-    yk_fees = await db.get_yk_fee_by_code()
+    yk_fees = await db.get_yk_fee_by_code()   # ЮKassa и PayAnyWay — своя комиссия
+    providers = await db.get_payment_providers()
     for row in rows:
         if row['kind'] in INCOME and not row.get('refund'):
-            row['provider'] = 'ЮKassa' if str(row['code']) in yk_fees else 'Prodamus'
+            row['provider'] = providers.get(str(row['code']), 'Prodamus')
         if row['kind'] in INCOME:
             row['fee'] = (0.0 if row.get('refund') else
                           money(yk_fees[str(row['code'])]) if str(row['code']) in yk_fees else

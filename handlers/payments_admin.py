@@ -25,11 +25,19 @@ logger = logging.getLogger(__name__)
 RECENT_DAYS = 30   # незавершённые заказы для рассылки — не старше
 
 
+_NAMES = {"payanyway": "PayAnyWay", "prodamus": "Prodamus", "yookassa": "ЮKassa"}
+
+
 async def _screen() -> tuple[str, InlineKeyboardMarkup]:
     provider = await current_provider()
     s = await db.pay_stats(24)
     lines = ["💳 <b>Оплата</b>", ""]
-    if provider == "yookassa":
+    if provider == "payanyway":
+        lines.append("Ссылки ведут в <b>PayAnyWay</b> (платежи принимает Барышов М. П., чеки "
+                     "в «Мой налог» делает PayAnyWay). Если через "
+                     f"{config.PAY_BACKUP_DELAY_MIN} мин после перехода оплаты нет, бот спросит "
+                     "клиента и даст «Оплатить ещё раз» и «У меня зарубежная карта» (Prodamus).")
+    elif provider == "yookassa":
         lines.append("Ссылки ведут в <b>ЮKassa</b> — все кнопки «Оплатить» в боте, "
                      "и новые, и уже отправленные.")
     else:
@@ -38,9 +46,11 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
                      "бот спросит клиента и даст запасную ссылку ЮKassa"
                      + ("." if config.YOOKASSA_ENABLED else " — когда ЮKassa будет подключена."))
     lines.append("")
-    lines.append("ЮKassa: " + ("✅ подключена" if config.YOOKASSA_ENABLED else
-                               "❌ не подключена — нужны YOOKASSA_SHOP_ID и "
-                               "YOOKASSA_SECRET_KEY в .env"))
+    lines.append("PayAnyWay: " + ("✅ подключён" + (" — <b>ТЕСТОВЫЙ режим</b>" if config.PAYANYWAY_TEST_MODE else "")
+                                 if config.PAYANYWAY_ENABLED else
+                                 "❌ не подключён — нужен PAYANYWAY_SECRET в .env"))
+    lines.append("ЮKassa: " + ("✅ подключена" if config.YOOKASSA_ENABLED else "❌ не подключена"))
+    lines.append("Зарубежные карты — всегда Prodamus.")
     if not config.PAY_BASE_URL:
         lines.append("⚠️ PAY_BASE_URL не задан — ссылки идут прямо в Prodamus, "
                      "переключение не работает.")
@@ -49,11 +59,15 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
                   f"на {s['yk_sum']} ₽."]
 
     rows = []
+    for mode, enabled in (("payanyway", config.PAYANYWAY_ENABLED), ("prodamus", True),
+                          ("yookassa", config.YOOKASSA_ENABLED)):
+        if enabled and mode != provider:
+            rows.append([InlineKeyboardButton(text=f"🔀 Все ссылки — в {_NAMES[mode]}",
+                                              callback_data=f"pay:mode:{mode}")])
+    if config.PAYANYWAY_ENABLED:
+        rows.append([InlineKeyboardButton(text="🧪 Проверить PayAnyWay (платёж на 1 ₽)",
+                                          callback_data="pay:test:paw")])
     if config.YOOKASSA_ENABLED:
-        rows.append([InlineKeyboardButton(
-            text="↩️ Вернуть Prodamus (+ запасная ЮKassa)" if provider == "yookassa"
-            else "🔀 Все ссылки — в ЮKassa",
-            callback_data="pay:mode:" + ("prodamus" if provider == "yookassa" else "yookassa"))])
         rows.append([InlineKeyboardButton(text="🧪 Проверить ЮKassa (платёж на 1 ₽)",
                                           callback_data="pay:test")])
     rows.append([InlineKeyboardButton(text="📨 Разослать новые ссылки",
@@ -74,9 +88,23 @@ async def cb_mode(callback: CallbackQuery):
     mode = callback.data.split(":")[2]
     await db.set_setting(PROVIDER_SETTING, mode)
     logger.info(f"payments: {callback.from_user.id} переключил оплату на {mode}")
-    await callback.answer("ЮKassa" if mode == "yookassa" else "Prodamus")
+    await callback.answer(_NAMES.get(mode, mode))
     text, kb = await _screen()
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data == "pay:test:paw")
+async def cb_test_paw(callback: CallbackQuery):
+    """Настоящий платёж на 1 ₽ через PayAnyWay — проверка кода целостности,
+    Pay URL и того, что бот узнаёт об оплате. Товар не выдаётся."""
+    await callback.answer()
+    url = paylinks.link(f"t_{callback.from_user.id}_0", 1, "Проверка оплаты MALIMABI", via="paw")
+    await callback.message.answer(
+        "🧪 Ссылка на настоящий платёж в 1 ₽ через PayAnyWay. Оплатите — через несколько "
+        "секунд сюда придёт «тестовый платёж прошёл». Если не придёт — проверьте в кабинете "
+        "PayAnyWay Pay URL: https://app.malimabi.com/payanyway/notify",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="💳 Оплатить 1 ₽", url=url)]]))
 
 
 @router.callback_query(F.data == "pay:test")
