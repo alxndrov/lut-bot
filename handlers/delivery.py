@@ -13,6 +13,7 @@ import re
 from urllib.parse import quote
 
 import config
+from services import paylinks
 import database as db
 from services.prodamus import build_payment_url
 from services.geocode import geocode
@@ -666,10 +667,19 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
     )
 
     await state.clear()
+    if config.PAY_BASE_URL:
+        text += ("\n\n🌍 Карта зарубежного банка — на странице оплаты выберите оплату картой "
+                 "и введите её данные.")
     await message.answer(
         text,
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"💳 Оплатить {total} ₽", url=url)],
+            [InlineKeyboardButton(text=f"💳 Российской картой или СБП · {total} ₽", url=url)],
+            # Зарубежная карта на физтовар — тоже Prodamus (Даня): выбрать «Карта»
+            # и ввести данные зарубежной карты
+            *([[InlineKeyboardButton(
+                text="🌍 Картой зарубежного банка",
+                url=paylinks.link(f"p_{user_id}_{product['id']}", total, product_name, via="pd"))]]
+              if config.PAY_BASE_URL else []),
         ]),
     )

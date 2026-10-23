@@ -52,11 +52,15 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
                                  if config.PAYANYWAY_ENABLED else
                                  "❌ не подключён — нужен PAYANYWAY_SECRET в .env"))
     if config.PAYANYWAY_ENABLED:
-        bal = await db.paw_balance()
+        bal = await db.paw_balance("payanyway")
         lines.append(f"На балансе PayAnyWay: <b>{bal:,.2f} ₽</b>".replace(",", " ")
                      + " — выводится вручную; выведенное запиши кнопкой «💸 Вывод с PayAnyWay».")
+    if config.LAVA_ENABLED:
+        bal = await db.paw_balance("lava")
+        lines.append(f"На балансе lava.top: <b>≈{bal:,.2f} ₽</b>".replace(",", " ")
+                     + " (по курсу ЦБ в день оплаты) — тоже выводится вручную.")
+    lines.append("Зарубежные карты: цифра — lava.top (Миша, в $), физтовары — Prodamus (Даня).")
     lines.append("ЮKassa: " + ("✅ подключена" if config.YOOKASSA_ENABLED else "❌ не подключена"))
-    lines.append("Зарубежные карты — всегда Prodamus.")
     if not config.PAY_BASE_URL:
         lines.append("⚠️ PAY_BASE_URL не задан — ссылки идут прямо в Prodamus, "
                      "переключение не работает.")
@@ -72,7 +76,10 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
                                               callback_data=f"pay:mode:{mode}")])
     if config.PAYANYWAY_ENABLED:
         rows.append([InlineKeyboardButton(text="💸 Вывод с PayAnyWay",
-                                          callback_data="pay:pawout")])
+                                          callback_data="pay:pawout:payanyway")]
+                    + ([InlineKeyboardButton(text="💸 Вывод с lava.top",
+                                             callback_data="pay:pawout:lava")]
+                       if config.LAVA_ENABLED else []))
         rows.append([InlineKeyboardButton(text="🧪 Проверить PayAnyWay (платёж на 1 ₽)",
                                           callback_data="pay:test:paw")])
     if config.YOOKASSA_ENABLED:
@@ -307,13 +314,16 @@ class PawOut(StatesGroup):
     amount = State()
 
 
-@router.callback_query(F.data == "pay:pawout")
+@router.callback_query(F.data.startswith("pay:pawout"))
 async def cb_pawout(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
+    provider = callback.data.split(":")[2] if callback.data.count(":") >= 2 else "payanyway"
     await state.set_state(PawOut.amount)
-    bal = await db.paw_balance()
+    await state.update_data(provider=provider)
+    bal = await db.paw_balance(provider)
+    name = db.WALLETS[provider][0]
     await callback.message.answer(
-        f"💸 Сколько вывели с PayAnyWay на счёт? По боту на балансе {bal:,.2f} ₽.\n"
+        f"💸 Сколько рублей пришло на счёт с {name}? По боту на балансе ≈{bal:,.2f} ₽.\n"
         "Пришли сумму, которая пришла на счёт (можно с комментарием через пробел). "
         "Отмена — /cancel.".replace(",", " "))
 
@@ -334,12 +344,15 @@ async def msg_pawout(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Не понял сумму. Пример: 12500 или 12500,50 на Альфу")
         return
+    provider = (await state.get_data()).get("provider", "payanyway")
     await state.clear()
     u = message.from_user
-    await db.add_paw_withdrawal(amount, comment, u.id, f"@{u.username}" if u.username else "")
+    await db.add_paw_withdrawal(amount, comment, u.id, f"@{u.username}" if u.username else "",
+                                provider=provider)
     from services.finance_sheet import request_finance_sync
     request_finance_sync()
-    bal = await db.paw_balance()
-    logger.info(f"payments: вывод с PayAnyWay {amount} ({u.id})")
-    await message.answer(f"✅ Записал вывод {amount:,.2f} ₽. На балансе PayAnyWay по боту осталось "
+    bal = await db.paw_balance(provider)
+    name = db.WALLETS[provider][0]
+    logger.info(f"payments: вывод с {name} {amount} ({u.id})")
+    await message.answer(f"✅ Записал вывод {amount:,.2f} ₽. На балансе {name} по боту осталось "
                          f"{bal:,.2f} ₽.".replace(",", " "))

@@ -122,7 +122,7 @@ class PayRouteTest(_DbCase):
         await self.client.start_server()
         for k, v in dict(PRODAMUS_SHOP_URL="https://digital", YOOKASSA_ENABLED=True,
                          YOOKASSA_SHOP_ID="1", YOOKASSA_SECRET_KEY="k",
-                         PAYANYWAY_ENABLED=False).items():
+                         PAYANYWAY_ENABLED=False, LAVA_ENABLED=False).items():
             p = mock.patch.object(config, k, v)
             p.start()
             self.addCleanup(p.stop)
@@ -219,7 +219,8 @@ class PayAnyWayFlowTest(_DbCase):
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
         for k, v in dict(PAYANYWAY_MNT_ID="34903086", PAYANYWAY_SECRET="code", PAYANYWAY_ENABLED=True,
-                         PAYANYWAY_TEST_MODE=False, PRODAMUS_SHOP_URL="https://digital").items():
+                         PAYANYWAY_TEST_MODE=False, PRODAMUS_SHOP_URL="https://digital",
+                         LAVA_ENABLED=False).items():
             p = mock.patch.object(config, k, v)
             p.start()
             self.addCleanup(p.stop)
@@ -263,3 +264,66 @@ class PayAnyWayFlowTest(_DbCase):
         token = paylinks.make_token("c_7_3", 2990, "Съёмка", via="pd")
         r = await self.client.get(f"/pay/{token}", allow_redirects=False)
         self.assertTrue(r.headers["Location"].startswith("https://digital/?do=pay"))
+
+
+class LavaFlowTest(_DbCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        from services import lava
+        self.lava = lava
+        self.bot = mock.AsyncMock()
+        app = web.Application()
+        app["bot"] = self.bot
+        pay_router.setup_web(app, "testbot")
+        self.client = TestClient(TestServer(app))
+        await self.client.start_server()
+        for k, v in dict(LAVA_ENABLED=True, LAVA_API_KEY="k", LAVA_WEBHOOK_SECRET="hook",
+                         LAVA_MARKUP_PERCENT=5.0, PAY_BASE_URL="https://app.example",
+                         PRODAMUS_SHOP_URL="https://digital").items():
+            p = mock.patch.object(config, k, v)
+            p.start()
+            self.addCleanup(p.stop)
+        p = mock.patch.object(lava, "usd_rate", mock.AsyncMock(return_value=81.13))
+        p.start(); self.addCleanup(p.stop)
+        await db.upsert_user(user_id=7, username=None, first_name="", ref=None)
+
+    async def asyncTearDown(self):
+        await self.client.close()
+        await super().asyncTearDown()
+
+    def test_usd_price(self):
+        self.assertEqual(self.lava.usd_price(4990, 81.13), 65)   # 4990/81.13*1.05 = 64.6
+        self.assertEqual(self.lava.usd_price(399, 81.13), 6)
+        self.assertEqual(self.lava.usd_price(100, 81.13), 5)     # минимум lava.top
+
+    async def test_email_invoice_webhook_provision_and_misha_receipt(self):
+        token = paylinks.make_token("c_7_3", 4990, "Пакет", via="lava")
+        page = await self.client.get(f"/pay/{token}", allow_redirects=False)
+        self.assertIn("$65", await page.text())
+        bad = await self.client.post(f"/pay/{token}", data={"email": "nope"}, allow_redirects=False)
+        self.assertIn("ошибка", await bad.text())
+        create = mock.AsyncMock(return_value={"id": "inv1", "paymentUrl": "https://lava/pay/inv1"})
+        with mock.patch.object(self.lava, "create_invoice", create):
+            r = await self.client.post(f"/pay/{token}", data={"email": "buyer@mail.com"},
+                                       allow_redirects=False)
+        self.assertEqual((r.status, r.headers["Location"]), (303, "https://lava/pay/inv1"))
+        self.assertEqual(create.await_args.args[:4], ("c", "c_7_3", 65, "buyer@mail.com"))
+        self.assertEqual(await db.get_user_email(7), "buyer@mail.com")
+        # вебхук: чужой ключ — отказ; свой — проверка счёта, выдача, чек Мише
+        self.assertEqual((await self.client.post("/lava/webhook", json={"contractId": "inv1"})).status, 401)
+        paid = {"status": "COMPLETED", "receipt": {"amount": 65.0, "currency": "USD", "fee": 5.2},
+                "datetime": "2026-10-23T13:28:09Z"}
+        provision = mock.AsyncMock(return_value=True)
+        from services import npd_receipts
+        issue = mock.AsyncMock()
+        with mock.patch.object(self.lava, "get_invoice", mock.AsyncMock(return_value=paid)), \
+             mock.patch.object(prodamus_webhook, "provision_payment", provision), \
+             mock.patch.object(npd_receipts, "issue_for_payment", issue):
+            for _ in range(2):
+                ok = await self.client.post("/lava/webhook", json={"contractId": "inv1",
+                                            "eventType": "payment.success"},
+                                            headers={"X-Api-Key": "hook"})
+                self.assertEqual(ok.status, 200)
+        provision.assert_awaited_once()
+        self.assertEqual(provision.await_args.args[1:], (7, 3, "c", "lava-inv1", round(65 * 81.13)))
+        self.assertEqual(issue.await_args.kwargs["account"], "misha")

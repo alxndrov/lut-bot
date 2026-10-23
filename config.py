@@ -104,6 +104,18 @@ PAYANYWAY_SECRET: str = os.getenv("PAYANYWAY_SECRET", "")
 PAYANYWAY_TEST_MODE: bool = os.getenv("PAYANYWAY_TEST_MODE", "0") == "1"
 PAYANYWAY_URL: str = os.getenv("PAYANYWAY_URL", "https://www.payanyway.ru/assistant.htm")
 PAYANYWAY_ENABLED: bool = bool(PAYANYWAY_MNT_ID and PAYANYWAY_SECRET)
+# lava.top — цифровые товары картой зарубежного банка (кабинет Миши), в USD.
+# Цена: рубли ÷ курс ЦБ × (1 + LAVA_MARKUP_PERCENT), вверх до $1, минимум $5.
+# LAVA_WEBHOOK_SECRET — ключ из настроек вебхука в кабинете (необязателен:
+# оплату бот всё равно перепроверяет запросом счёта своим API-ключом).
+LAVA_API_KEY: str = os.getenv("LAVA_API_KEY", "")
+LAVA_WEBHOOK_SECRET: str = os.getenv("LAVA_WEBHOOK_SECRET", "")
+LAVA_OFFER_COURSE: str = os.getenv("LAVA_OFFER_COURSE", "5cbea9ec-43ca-4c8a-a4cc-4818e2a55a72")
+LAVA_OFFER_LUT: str = os.getenv("LAVA_OFFER_LUT", "bc78be2f-b9f4-47d2-b7b2-0b721744bbd4")
+LAVA_MARKUP_PERCENT: float = float(os.getenv("LAVA_MARKUP_PERCENT", "5"))
+LAVA_FEE_PERCENT: float = float(os.getenv("LAVA_FEE_PERCENT", "8"))
+LAVA_ENABLED: bool = bool(LAVA_API_KEY and LAVA_OFFER_COURSE and LAVA_OFFER_LUT)
+
 # Комиссия PayAnyWay по договору — 4% от оплаты (Даня, 23.10.2026)
 PAYANYWAY_FEE_PERCENT: float = float(os.getenv("PAYANYWAY_FEE_PERCENT", "4"))
 # Ссылки на оплату ведут на наш адрес (/pay/…), а он уже отправляет в

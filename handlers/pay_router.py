@@ -30,7 +30,9 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 import config
 import database as db
-from services import payanyway, paylinks, yookassa
+import secrets
+
+from services import lava, payanyway, paylinks, yookassa
 from services.prodamus import prodamus_url
 
 logger = logging.getLogger(__name__)
@@ -41,12 +43,16 @@ POLL_SECONDS = 20
 ALERT_EVERY = 3600                  # не чаще раза в час про сбой ЮKassa
 
 _last_alert = 0.0
+_lava_polled = [0.0]
 
 
-async def current_provider() -> str:
-    """Куда ведут ссылки сейчас. Способ без ключей не выбирается; не задано —
-    PayAnyWay, если он подключён."""
+async def current_provider(kind: str = "c") -> str:
+    """Куда ведут ссылки сейчас. Схема Дани (23.10.2026): цифра (курс, LUT) —
+    PayAnyWay Миши, физтовары ('p') — Prodamus Дани. Настройка /payments
+    действует на цифру (на случай сбоя PayAnyWay). Способ без ключей не выбирается."""
     chosen = await db.get_setting(PROVIDER_SETTING)
+    if kind == "p":
+        return "yookassa" if chosen == "yookassa" and config.YOOKASSA_ENABLED else "prodamus"
     if chosen == "yookassa" and config.YOOKASSA_ENABLED:
         return "yookassa"
     if chosen == "prodamus":
@@ -74,6 +80,11 @@ FOREIGN_TEXT = (
     "и введите данные карты — номер, срок и CVC — в поля карты.\n\n"
     "Сумма {amount} ₽ — банк спишет её в валюте вашей карты по своему курсу."
 )
+FOREIGN_DIGITAL_TEXT = (
+    "Оплата картой зарубежного банка — в долларах через lava.top. По ссылке ниже "
+    "укажите email (туда придёт подтверждение) и оплатите картой.\n\n"
+    "Pay by a non-Russian card in USD via lava.top: enter your email and pay."
+)
 
 
 @router.callback_query(F.data.startswith("payforeign:"))
@@ -85,11 +96,13 @@ async def cb_foreign_card(callback: CallbackQuery):
         await callback.message.answer("Этот заказ уже оплачен или устарел — "
                                       "откройте товар в каталоге заново 🤍")
         return
+    digital = order_num[:1] in ("c", "d") and config.LAVA_ENABLED
     await callback.message.answer(
-        FOREIGN_TEXT.format(amount=click["amount"]),
+        FOREIGN_DIGITAL_TEXT if digital else FOREIGN_TEXT.format(amount=click["amount"]),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
             text=f"🌍 Оплатить зарубежной картой · {click['amount']} ₽",
-            url=paylinks.link(order_num, click["amount"], click["name"], via="pd"))]]))
+            url=paylinks.link(order_num, click["amount"], click["name"],
+                              via="lava" if digital else "pd"))]]))
     # Админам — одно сообщение на заказ, для сведения
     key = f"foreign_card:{order_num}"
     if await db.get_setting(key):
@@ -102,7 +115,7 @@ async def cb_foreign_card(callback: CallbackQuery):
         f"🌍 <b>Клиент платит зарубежной картой</b>\n\n"
         f"👤 {escape(u.full_name or '—')} {who}\n"
         f"🛍 {escape(click['name'] or order_num)} — {click['amount']} ₽\n\n"
-        f"Бот дал ему ссылку Prodamus. Если оплата не придёт — напишите клиенту."))
+        f"Бот дал ему ссылку на оплату (цифра — lava.top, физтовар — Prodamus). Если оплата не придёт — напишите клиенту."))
     logger.info(f"pay: зарубежная карта — {order_num} ({who})")
 
 
@@ -140,6 +153,128 @@ async def _payanyway_url(link: dict, return_url: str) -> str:
     return url
 
 
+def _lava_form(link: dict, usd: int, rate: float, email: str, error: str = "") -> web.Response:
+    err = f'<p style="color:#c0392b">{escape(error)}</p>' if error else ""
+    return web.Response(content_type="text/html", text=(
+        '<!doctype html><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1">'
+        "<title>Payment by foreign card</title>"
+        '<body style="font:17px/1.5 system-ui,sans-serif;max-width:420px;margin:10vh auto;padding:0 16px">'
+        f"<h2>🌍 {escape(link['name'])}</h2>"
+        f"<p>К оплате: <b>${usd}</b> (≈ {link['amount']} ₽ по курсу ЦБ {rate:.2f} ₽ "
+        f"+ комиссия за зарубежную оплату).<br><small>Total: ${usd} USD.</small></p>"
+        "<p>Email — на него платёжный сервис пришлёт подтверждение оплаты.<br>"
+        "<small>Email for the payment confirmation.</small></p>"
+        f"{err}<form method=post>"
+        f'<input name=email type=email required value="{escape(email)}" placeholder="you@example.com" '
+        'style="width:100%;font:inherit;padding:10px;box-sizing:border-box;border:1px solid #bbb;border-radius:8px">'
+        '<button style="margin-top:12px;width:100%;font:inherit;padding:12px;border:0;border-radius:8px;'
+        'background:#111;color:#fff">Перейти к оплате · Pay</button></form>'
+        '<p><small>Оплата через lava.top (LAVALANE LTD). Продолжая, вы принимаете оферту '
+        "и согласие на обработку персональных данных.</small></p></body>"))
+
+
+async def _lava_page(request: web.Request, link: dict, bot_username: str) -> web.Response:
+    """Зарубежная карта на цифру: спрашиваем email (подставляем прошлый), создаём
+    счёт lava.top в долларах и отправляем на его страницу."""
+    try:
+        rate = await lava.usd_rate()
+    except lava.LavaError as e:
+        logger.error(f"lava: {e}")
+        return _page("Оплата временно недоступна", "Напишите нам в боте — поможем оплатить.",
+                     bot_username, status=503)
+    usd = lava.usd_price(link["amount"], rate)
+    saved = await db.get_user_email(link["user_id"]) or ""
+    if request.method != "POST":
+        return _lava_form(link, usd, rate, saved)
+    email = ((await request.post()).get("email") or "").strip()
+    if not lava.valid_email(email):
+        return _lava_form(link, usd, rate, email, "Похоже, в адресе ошибка. Please check the email.")
+    if email != saved:
+        await db.set_user_email(link["user_id"], email)
+    fresh = await db.fresh_lava_payment(link["order_num"], link["amount"], email)
+    if fresh:
+        url = fresh["url"]
+    else:
+        try:
+            inv = await lava.create_invoice(link["kind"], link["order_num"], usd, email,
+                                            f"https://t.me/{bot_username}" if bot_username else "")
+        except lava.LavaError as e:
+            logger.error(f"lava: счёт {link['order_num']} не создан: {e}")
+            if "email" in str(e).lower():
+                return _lava_form(link, usd, rate, email,
+                                  "Этот email платёжный сервис не принимает — укажите другой.")
+            await _alert(request.app["bot"], f"⚠️ <b>lava.top не создала счёт</b>\n"
+                                             f"{escape(link['order_num'])}: {escape(str(e))}")
+            return _page("Оплата временно недоступна", "Напишите нам в боте — поможем оплатить.",
+                         bot_username, status=502)
+        url = inv["paymentUrl"]
+        await db.add_lava_payment(inv["id"], link["order_num"], link["kind"], link["amount"],
+                                  usd, rate, email, link["name"], url)
+    await db.record_pay_click(link["order_num"], link["user_id"], link["amount"],
+                              link["name"], "lava")
+    logger.info(f"pay: {link['order_num']} {link['amount']} ₽ → lava.top ${usd}")
+    raise web.HTTPSeeOther(url)
+
+
+async def handle_lava_webhook(request: web.Request) -> web.Response:
+    """payment.success / payment.failed от lava.top. Оплату перепроверяем
+    запросом счёта своим ключом — тело вебхука само по себе не доказательство."""
+    if config.LAVA_WEBHOOK_SECRET:
+        got = request.headers.get("X-Api-Key", "")
+        if not got or not secrets.compare_digest(got, config.LAVA_WEBHOOK_SECRET):
+            logger.warning("lava webhook: неверный ключ")
+            return web.Response(status=401, text="unauthorized")
+    try:
+        body = await request.json()
+        invoice_id = body.get("contractId") or ""
+    except Exception:
+        return web.Response(status=400, text="bad request")
+    logger.info(f"lava webhook: {body.get('eventType')} {invoice_id} {body.get('amount')} {body.get('currency')}")
+    row = await db.get_lava_payment(invoice_id)
+    if row:
+        await check_lava_payment(request.app["bot"], row)
+    return web.Response(text="ok")
+
+
+async def check_lava_payment(bot: Bot, row: dict):
+    try:
+        inv = await lava.get_invoice(row["id"])
+    except Exception as e:
+        logger.warning(f"lava: статус {row['id']} не получен: {e}")
+        return
+    status = inv.get("status")
+    if status == "FAILED":
+        await db.set_lava_status(row["id"], "failed")
+        return
+    if status != "COMPLETED":
+        return
+    receipt = inv.get("receipt") or {}
+    usd = float(receipt.get("amount") or row["amount_usd"])
+    rate = await lava.usd_rate()          # курс ЦБ на день получения денег — для чека и учёта
+    paid_rub = int(round(usd * rate))
+    if not await db.claim_lava_payment(row["id"], paid_rub, receipt.get("fee")):
+        return
+    logger.info(f"lava: оплачен {row['id']} {row['order_num']} ${usd} = {paid_rub} ₽")
+    from handlers.prodamus_webhook import _send_notify, provision_payment
+    order_type, user_id, product_id = row["order_num"].split("_", 2)
+    try:
+        await provision_payment(bot, int(user_id), int(product_id), order_type,
+                                f"lava-{row['id']}", paid_rub)
+    except Exception as e:
+        logger.exception(f"lava: выдача {row['order_num']} упала: {e}")
+        await _send_notify(bot, f"🔴 <b>Оплата lava.top пришла, но заказ не провёлся</b>\n"
+                                f"{escape(row['order_num'])}, ${usd:.0f} ({paid_rub} ₽)\n{escape(str(e))}")
+    # Чек — в «Мой налог» Миши: lava.top чеков не делает
+    try:
+        from services import npd_receipts
+        name = await npd_receipts.receipt_name(order_type, int(product_id))
+        await npd_receipts.issue_for_payment(bot, f"lava-{row['id']}", int(user_id), name,
+                                             float(paid_rub), inv.get("datetime"), account="misha")
+    except Exception as e:
+        logger.exception(f"lava: чек за {row['id']} не заведён: {e}")
+
+
 async def handle_pay(request: web.Request) -> web.Response:
     bot_username = request.app.get("bot_username", "")
     link = paylinks.parse_token(request.match_info["token"])
@@ -158,12 +293,16 @@ async def handle_pay(request: web.Request) -> web.Response:
                          "Оплата по этому заказу уже пришла. Подтверждение — в боте.",
                          bot_username)
 
-    # via: yk — запасная ЮKassa, pd — только Prodamus (зарубежные карты принимает он),
+    # Зарубежная карта: цифра — lava.top Миши (спрашиваем email), физтовары —
+    # Prodamus Дани
+    if link["via"] in ("lava", "pd") and link["kind"] in ("c", "d") and config.LAVA_ENABLED:
+        return await _lava_page(request, link, bot_username)
+    # via: yk — запасная ЮKassa, pd — только Prodamus (зарубежная карта на физтовар),
     # paw — PayAnyWay (повтор оплаты, проверочный платёж)
     provider = ("yookassa" if link["via"] == "yk" and config.YOOKASSA_ENABLED
-                else "prodamus" if link["via"] == "pd"
+                else "prodamus" if link["via"] in ("pd", "lava")
                 else "payanyway" if link["via"] == "paw" and config.PAYANYWAY_ENABLED
-                else await current_provider())
+                else await current_provider(link["kind"]))
     shop = config.PRODAMUS_SHOP_URL_PHYSICAL if link["kind"] == "p" else config.PRODAMUS_SHOP_URL
     if provider == "prodamus" and not shop and config.YOOKASSA_ENABLED:
         provider = "yookassa"
@@ -385,7 +524,7 @@ async def _send_backups(bot: Bot):
         if click.get("provider") == "payanyway":
             text = PAW_BACKUP_TEXT
         elif click.get("provider") == "prodamus" and config.YOOKASSA_ENABLED \
-                and await current_provider() == "prodamus":
+                and await current_provider(click["order_num"][:1]) == "prodamus":
             text = BACKUP_TEXT
         else:
             continue   # зарубежная карта в Prodamus при основном PayAnyWay — не дёргаем
@@ -406,6 +545,11 @@ async def pay_worker(bot: Bot):
             if config.YOOKASSA_ENABLED:
                 for row in await db.yk_payments_to_check():
                     await check_yk_payment(bot, row)
+            # lava.top — опрос раз в 2 минуты, на случай если вебхук не дошёл
+            if config.LAVA_ENABLED and time.monotonic() - _lava_polled[0] > 120:
+                _lava_polled[0] = time.monotonic()
+                for row in await db.lava_payments_to_check():
+                    await check_lava_payment(bot, row)
             if config.YOOKASSA_ENABLED or config.PAYANYWAY_ENABLED:
                 await _send_backups(bot)
         except Exception as e:
@@ -415,6 +559,7 @@ async def pay_worker(bot: Bot):
 
 def setup_web(app: web.Application, bot_username: str = ""):
     app["bot_username"] = bot_username
-    app.router.add_get("/pay/{token}", handle_pay)
+    app.router.add_route("*", "/pay/{token}", handle_pay)   # POST — email для lava.top
+    app.router.add_post("/lava/webhook", handle_lava_webhook)
     app.router.add_post("/yookassa/webhook", handle_yookassa_webhook)
     app.router.add_route("*", "/payanyway/notify", handle_payanyway_notify)

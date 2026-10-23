@@ -36,24 +36,32 @@ async def status_screen() -> tuple[str, InlineKeyboardMarkup]:
     month = datetime.now(timezone(timedelta(hours=3))).strftime("%Y-%m")
     issued = [r for r in rows if r["status"] == "issued"]
     waiting = [r for r in rows if r["status"] in ("pending", "failed")]
-    ok = await npd.connected()
-    inn = await db.get_setting(npd.S_INN) or ""
-    lines = ["🧾 <b>Чеки «Мой налог» за оплаты ЮKassa</b>", "",
-             f"Подключение: {'✅ ИНН ' + inn if ok else '❌ не подключено'}",
-             f"Пробито: {len(issued)}, в этом месяце — "
-             f"{sum(1 for r in issued if (r['issued_at'] or '').startswith(month))}"]
+    lines = ["🧾 <b>Чеки «Мой налог»</b>", "",
+             "Бот пробивает чеки за оплаты ЮKassa — Дане, за оплаты lava.top "
+             "(зарубежные карты) — Мише. PayAnyWay и Prodamus делают чеки сами.", ""]
+    status = {}
+    for acc, who in npd.ACCOUNTS.items():
+        status[acc] = await npd.connected(acc)
+        inn = await npd.inn(acc)
+        lines.append(f"{who}: {'✅ ИНН ' + inn if status[acc] else '❌ не подключено'}")
+    lines.append(f"Пробито: {len(issued)}, в этом месяце — "
+                 f"{sum(1 for r in issued if (r['issued_at'] or '').startswith(month))}")
     if waiting:
         lines += ["", f"⏳ <b>Ждут: {len(waiting)}</b>"]
         for r in waiting[:10]:
             lines.append(f"• {escape(r['name'])} — {r['amount']:.0f} ₽"
                          + (f" · {escape((r['error'] or '')[:80])}" if r.get("error") else ""))
     lines += ["", "<i>Чеки по оплатам Prodamus делает Prodamus — здесь их нет.</i>"]
-    kb = [[InlineKeyboardButton(text="📱 Подключить по СМС" if not ok else "🔁 Переподключить",
-                                callback_data="npd:login")]]
+    kb = []
+    for acc, who in npd.ACCOUNTS.items():
+        row = [InlineKeyboardButton(text=(f"🔁 {who}: переподключить" if status[acc]
+                                          else f"📱 {who}: подключить по СМС"),
+                                    callback_data=f"npd:login:{acc}")]
+        if status[acc]:
+            row.append(InlineKeyboardButton(text=f"Отключить ({who})", callback_data=f"npd:off:{acc}"))
+        kb.append(row)
     if waiting:
         kb.append([InlineKeyboardButton(text="🧾 Пробить ждущие сейчас", callback_data="npd:retry")])
-    if ok:
-        kb.append([InlineKeyboardButton(text="Отключить", callback_data="npd:off")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -66,16 +74,21 @@ async def cmd_nalog(message: Message, state: FSMContext):
     await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
 
-@router.callback_query(F.data == "npd:login")
+@router.callback_query(F.data.startswith("npd:login"))
 async def cb_login(callback: CallbackQuery, state: FSMContext):
     if not _admin(callback.from_user.id):
         await callback.answer()
         return
+    acc = (callback.data.split(":") + ["danya"])[2] if callback.data.count(":") >= 2 else "danya"
+    if acc not in npd.ACCOUNTS:
+        await callback.answer()
+        return
     await state.set_state(NpdLogin.phone)
+    await state.update_data(account=acc)
     await callback.answer()
     await callback.message.answer(
-        "📱 Номер телефона, к которому привязан «Мой налог» (самозанятость продавца). "
-        "Налоговая пришлёт на него СМС с кодом.\n\nОтмена — /cancel")
+        f"📱 «Мой налог» — {npd.ACCOUNTS[acc]}. Номер телефона, к которому он привязан. "
+        "Налоговая пришлёт на него СМС с кодом — код вводит владелец кабинета.\n\nОтмена — /cancel")
 
 
 @router.message(Command("cancel"), StateFilter(NpdLogin.phone, NpdLogin.code))
@@ -97,7 +110,7 @@ async def msg_phone(message: Message, state: FSMContext):
                              parse_mode="HTML")
         return
     await state.set_state(NpdLogin.code)
-    await state.update_data(phone=phone, challenge=challenge)
+    await state.update_data(phone=phone, challenge=challenge)   # account уже в state
     await message.answer("Код из СМС от «Мой налог»?")
 
 
@@ -105,7 +118,8 @@ async def msg_phone(message: Message, state: FSMContext):
 async def msg_code(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     try:
-        inn = await npd.verify_sms(data["phone"], data["challenge"], message.text)
+        acc = data.get("account", "danya")
+        inn = await npd.verify_sms(data["phone"], data["challenge"], message.text, account=acc)
     except Exception as e:
         await message.answer(f"⚠️ Не подошло: {escape(str(e)[:200])}\nПопробуй ещё раз "
                              f"или /cancel и начни сначала.", parse_mode="HTML")
@@ -116,9 +130,10 @@ async def msg_code(message: Message, state: FSMContext, bot: Bot):
         await message.delete()
     except Exception:
         pass
-    logger.info(f"npd: подключён ИНН {inn} ({message.from_user.id})")
-    await message.answer(f"✅ «Мой налог» подключён (ИНН {inn}). Чеки за оплаты ЮKassa "
-                         "теперь пробиваются сами.")
+    logger.info(f"npd: подключён {acc}, ИНН {inn} ({message.from_user.id})")
+    what = "ЮKassa" if acc == "danya" else "lava.top (зарубежные карты)"
+    await message.answer(f"✅ «Мой налог» — {npd.ACCOUNTS[acc]} — подключён (ИНН {inn}). "
+                         f"Чеки за оплаты {what} теперь пробиваются сами.")
     main_bot = Bot(token=config.BOT_TOKEN)
     try:
         done, left = await npd_receipts.retry_failed(main_bot)
@@ -143,12 +158,13 @@ async def cb_retry(callback: CallbackQuery):
                                                            if left else ""))
 
 
-@router.callback_query(F.data == "npd:off")
+@router.callback_query(F.data.startswith("npd:off"))
 async def cb_off(callback: CallbackQuery):
     if not _admin(callback.from_user.id):
         await callback.answer()
         return
-    await npd.disconnect()
+    acc = callback.data.split(":")[2] if callback.data.count(":") >= 2 else "danya"
+    await npd.disconnect(acc)
     await callback.answer("Отключено")
     text, kb = await status_screen()
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)

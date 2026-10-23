@@ -100,7 +100,8 @@ async def _already_issued(row: dict, paid: datetime | None) -> str | None:
     оплаты, ещё не привязанный к другой оплате, — чтобы не пробить второй."""
     when = paid or datetime.now(timezone.utc)
     known = {r["receipt_uuid"] for r in await db.get_npd_receipts() if r.get("receipt_uuid")}
-    for i in await npd.list_incomes(when - timedelta(days=1), datetime.now(timezone.utc)):
+    for i in await npd.list_incomes(when - timedelta(days=1), datetime.now(timezone.utc),
+                                    account=_account(row)):
         if (not i.get("cancellationInfo") and i.get("approvedReceiptUuid") not in known
                 and abs(float(i["totalAmount"]) - float(row["amount"])) < 0.01
                 and i.get("name") == row["name"]
@@ -109,6 +110,10 @@ async def _already_issued(row: dict, paid: datetime | None) -> str | None:
             logger.info(f"npd: чек за {row['payment_id']} уже есть — {i['approvedReceiptUuid']}")
             return i["approvedReceiptUuid"]
     return None
+
+
+def _account(row: dict) -> str:
+    return row.get("account") or "danya"
 
 
 async def _try_issue(bot: Bot, row: dict) -> bool:
@@ -122,9 +127,9 @@ async def _try_issue(bot: Bot, row: dict) -> bool:
     timed_out = npd.TIMEOUT_MSG in (row.get("error") or "")
     uuid = await _already_issued(row, paid) if timed_out else None
     if not uuid:
-        uuid = await npd.create_receipt(row["name"], row["amount"], paid)
+        uuid = await npd.create_receipt(row["name"], row["amount"], paid, account=_account(row))
     await db.set_npd_receipt(row["payment_id"], "issued", receipt_uuid=uuid)
-    url = await npd.print_url(uuid)
+    url = await npd.print_url(uuid, account=_account(row))
     logger.info(f"npd: чек {uuid} за {row['payment_id']} — {row['amount']} ₽")
     delivered = False
     if row.get("user_id"):
@@ -139,9 +144,9 @@ async def _try_issue(bot: Bot, row: dict) -> bool:
 
 
 async def issue_for_payment(bot: Bot, payment_id: str, user_id: int | None, name: str,
-                            amount: float, paid_at: str | None):
-    """Заводит чек по оплате ЮKassa и сразу пробует его пробить."""
-    if not await db.add_npd_receipt(payment_id, user_id, name, amount, paid_at):
+                            amount: float, paid_at: str | None, account: str = "danya"):
+    """Заводит чек по оплате (ЮKassa — Дане, lava.top — Мише) и сразу пробует его пробить."""
+    if not await db.add_npd_receipt(payment_id, user_id, name, amount, paid_at, account):
         return
     row = await db.get_npd_receipt(payment_id)
     try:
@@ -150,12 +155,13 @@ async def issue_for_payment(bot: Bot, payment_id: str, user_id: int | None, name
         await db.set_npd_receipt(payment_id, "failed", error=str(e)[:300])
         logger.warning(f"npd: чек за {payment_id} не пробит: {e}")
         await update_sale_messages(payment_id, LINE_FAILED)
-        hint = ("Подключи «Мой налог» командой /nalog — бот пробьёт чек сам."
+        who = npd.ACCOUNTS.get(account, account)
+        hint = (f"{who}: подключи «Мой налог» командой /nalog — бот пробьёт чек сам."
                 if isinstance(e, npd.NpdNotConnected) else
                 "Бот повторит сам каждые 10 минут; статус — /nalog.")
         await _notify_admins(
-            f"⚠️ <b>Чек в «Мой налог» не пробит</b>\n{escape(name)} — {amount:.0f} ₽ "
-            f"(платёж ЮKassa {escape(payment_id)})\n{escape(str(e)[:200])}\n\n{hint}")
+            f"⚠️ <b>Чек в «Мой налог» ({who}) не пробит</b>\n{escape(name)} — {amount:.0f} ₽ "
+            f"(платёж {escape(payment_id)})\n{escape(str(e)[:200])}\n\n{hint}")
 
 
 async def retry_failed(bot: Bot) -> tuple[int, int]:
@@ -163,13 +169,16 @@ async def retry_failed(bot: Bot) -> tuple[int, int]:
     rows = [r for r in await db.get_npd_receipts(("pending", "failed"))
             if r["attempts"] < MAX_ATTEMPTS]
     done = 0
+    offline: set[str] = set()   # кабинеты без входа — их чеки в этот раз не трогаем
     for row in rows:
+        if _account(row) in offline:
+            continue
         try:
             await _try_issue(bot, row)
             done += 1
         except npd.NpdNotConnected as e:
             await db.set_npd_receipt(row["payment_id"], "failed", error=str(e)[:300])
-            break   # без входа остальные тоже не пробьются
+            offline.add(_account(row))
         except Exception as e:
             await db.set_npd_receipt(row["payment_id"], "failed", error=str(e)[:300])
     left = len(await db.get_npd_receipts(("pending", "failed")))
@@ -182,7 +191,7 @@ async def cancel_for_refund(payment_id: str) -> bool:
     if not row or row["status"] != "issued" or not row.get("receipt_uuid"):
         return False
     try:
-        await npd.cancel_receipt(row["receipt_uuid"], npd.CANCEL_REFUND)
+        await npd.cancel_receipt(row["receipt_uuid"], npd.CANCEL_REFUND, account=_account(row))
     except Exception as e:
         logger.warning(f"npd: чек {row['receipt_uuid']} не отменён: {e}")
         return False
@@ -194,7 +203,7 @@ async def cancel_for_refund(payment_id: str) -> bool:
 
 def _is_prodamus(payment_id: str) -> bool:
     # paw- — PayAnyWay: чеки в «Мой налог» Миши, сюда не относятся
-    return not payment_id.startswith(("yk-", "paw-", "manual", "test"))
+    return not payment_id.startswith(("yk-", "paw-", "lava-", "manual", "test"))
 
 
 async def prodamus_missing() -> list[dict]:
@@ -330,8 +339,11 @@ async def retry_loop(bot: Bot):
             today = datetime.now(timezone(timedelta(hours=3))).date()
             if left and _reminded_day["day"] != today:
                 _reminded_day["day"] = today
-                if not await npd.connected():
-                    await _notify_admins(f"🧾 {left} чек(ов) ждут, пока подключат «Мой налог»: /nalog")
+                rows = await db.get_npd_receipts(("pending", "failed"))
+                missing = {_account(r) for r in rows} - {a for a in npd.ACCOUNTS if await npd.connected(a)}
+                if missing:
+                    who = ", ".join(npd.ACCOUNTS.get(a, a) for a in sorted(missing))
+                    await _notify_admins(f"🧾 {left} чек(ов) ждут, пока подключат «Мой налог» ({who}): /nalog")
                 else:
                     rows = await db.get_npd_receipts(("pending", "failed"))
                     why = escape((rows[0].get("error") or "")[:200]) if rows else ""

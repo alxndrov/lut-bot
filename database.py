@@ -627,6 +627,41 @@ async def init_db(existing_cdek_contract: str | None = None):
                 done_at      TIMESTAMP
             )
         """)
+        # Оплаты lava.top (зарубежные карты, цифра): счёт → заказ, суммы в
+        # рублях (наша цена) и долларах, курс ЦБ на момент счёта
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS lava_payments (
+                id         TEXT PRIMARY KEY,
+                order_num  TEXT NOT NULL,
+                kind       TEXT NOT NULL,
+                amount_rub INTEGER NOT NULL,
+                amount_usd INTEGER NOT NULL,
+                rate       REAL,
+                email      TEXT,
+                name       TEXT,
+                url        TEXT,
+                status     TEXT NOT NULL DEFAULT 'pending',
+                paid_rub   INTEGER,
+                fee_usd    REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                done_at    TIMESTAMP
+            )
+        """)
+        # Вывод: с баланса PayAnyWay или lava.top (оба сами не переводят)
+        try:
+            await db.execute("ALTER TABLE paw_withdrawals ADD COLUMN provider TEXT DEFAULT 'payanyway'")
+        except Exception:
+            pass
+        # Чек — в «Мой налог» Дани (danya) или Миши (misha, оплаты lava.top)
+        try:
+            await db.execute("ALTER TABLE npd_receipts ADD COLUMN account TEXT DEFAULT 'danya'")
+        except Exception:
+            pass
+        # Email покупателя — нужен только lava.top; подставляем в его же оплаты
+        try:
+            await db.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        except Exception:
+            pass
         # Вывод денег с баланса PayAnyWay (он не переводит сам — выводят
         # вручную): в таблице строка pawout-N, «Лежит на балансе PayAnyWay»
         await db.execute("""
@@ -636,7 +671,8 @@ async def init_db(existing_cdek_contract: str | None = None):
                 amount    REAL NOT NULL,
                 comment   TEXT,
                 user_id   INTEGER,
-                user_name TEXT
+                user_name TEXT,
+                provider  TEXT DEFAULT 'payanyway'
             )
         """)
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
@@ -3034,6 +3070,8 @@ def _yk_fee_rate_sql() -> str:
     # PayAnyWay (paw-) — процентом из настроек: суммы после комиссии он не присылает
     return (f"""(CASE WHEN pu.telegram_payment_id LIKE 'paw-%'
                      THEN {float(config.PAYANYWAY_FEE_PERCENT) / 100}
+                     WHEN pu.telegram_payment_id LIKE 'lava-%'
+                     THEN {float(config.LAVA_FEE_PERCENT) / 100}
                      WHEN y.income IS NOT NULL AND y.amount > 0
                      THEN (y.amount - y.income) * 1.0 / y.amount
                      ELSE {float(config.YOOKASSA_FEE_PERCENT) / 100} END)""")
@@ -3061,7 +3099,7 @@ async def get_yk_fees(dt_from: str, dt_to: str) -> dict:
                 FROM purchases pu
                 {_YK_JOIN}
                 LEFT JOIN products pr ON pr.id = pu.product_id
-                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%')
+                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%' OR pu.telegram_payment_id LIKE 'lava-%')
                   AND datetime(pu.created_at) BETWEEN datetime(?) AND datetime(?)""",
             (dt_from, dt_to),
         ) as cur:
@@ -3075,10 +3113,12 @@ async def get_payment_providers() -> dict:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             """SELECT COALESCE(o.order_code, o.prodamus_order_id, pu.telegram_payment_id),
-                      CASE WHEN pu.telegram_payment_id LIKE 'paw-%' THEN 'PayAnyWay' ELSE 'ЮKassa' END
+                      CASE WHEN pu.telegram_payment_id LIKE 'paw-%' THEN 'PayAnyWay'
+                           WHEN pu.telegram_payment_id LIKE 'lava-%' THEN 'lava.top' ELSE 'ЮKassa' END
                FROM purchases pu
                LEFT JOIN orders o ON o.prodamus_order_id = pu.telegram_payment_id
-               WHERE pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%'"""
+               WHERE pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%'
+                  OR pu.telegram_payment_id LIKE 'lava-%'"""
         ) as cur:
             return {str(code): name for code, name in await cur.fetchall()}
 
@@ -3094,7 +3134,7 @@ async def get_yk_fee_by_code() -> dict:
                 FROM purchases pu
                 {_YK_JOIN}
                 LEFT JOIN orders o ON o.prodamus_order_id = pu.telegram_payment_id
-                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%')
+                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%' OR pu.telegram_payment_id LIKE 'lava-%')
                 GROUP BY 1"""
         ) as cur:
             return {str(code): float(fee) for code, fee in await cur.fetchall()}
@@ -3757,12 +3797,17 @@ async def get_payouts_for_finance_export() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+WALLETS = {"payanyway": ("PayAnyWay", "paw-", "pawout", "PAYANYWAY_FEE_PERCENT"),
+           "lava": ("lava.top", "lava-", "lavaout", "LAVA_FEE_PERCENT")}
+
+
 async def add_paw_withdrawal(amount: float, comment: str = "", user_id: int = 0,
-                             user_name: str = "") -> int:
+                             user_name: str = "", provider: str = "payanyway") -> int:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO paw_withdrawals (amount, comment, user_id, user_name) VALUES (?, ?, ?, ?)",
-            (float(amount), (comment or "").strip() or None, user_id, user_name))
+            "INSERT INTO paw_withdrawals (amount, comment, user_id, user_name, provider) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (float(amount), (comment or "").strip() or None, user_id, user_name, provider))
         await db.commit()
         return cur.lastrowid
 
@@ -3774,16 +3819,19 @@ async def get_paw_withdrawals() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
-async def paw_balance() -> float:
-    """Сколько лежит на балансе PayAnyWay: оплаты за вычетом его комиссии
-    минус всё, что выведено (/payments → «Вывод с PayAnyWay»)."""
+async def paw_balance(provider: str = "payanyway") -> float:
+    """Сколько лежит на балансе PayAnyWay / lava.top: оплаты за вычетом
+    комиссии минус всё выведенное (/payments → «Вывод с …»)."""
     import config
+    _, prefix, _, fee_attr = WALLETS[provider]
     async with aiosqlite.connect(DB_PATH) as db:
         got = (await (await db.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE telegram_payment_id LIKE 'paw-%'"
-        )).fetchone())[0]
-        out = (await (await db.execute("SELECT COALESCE(SUM(amount), 0) FROM paw_withdrawals")).fetchone())[0]
-    return float(got) * (1 - config.PAYANYWAY_FEE_PERCENT / 100) - float(out)
+            "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE telegram_payment_id LIKE ?",
+            (prefix + "%",))).fetchone())[0]
+        out = (await (await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM paw_withdrawals "
+            "WHERE COALESCE(provider, 'payanyway') = ?", (provider,))).fetchone())[0]
+    return float(got) * (1 - getattr(config, fee_attr) / 100) - float(out)
 
 
 async def get_cdek_payments_for_finance_export() -> list[dict]:
@@ -3882,10 +3930,11 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
         })
 
     for r in await get_paw_withdrawals():
+        name, _, code, _ = WALLETS.get(r.get("provider") or "payanyway", WALLETS["payanyway"])
         rows.append({
-            "code": f"pawout-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
+            "code": f"{code}-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
             "kind": "Расход",
-            "comment": "Вывод с баланса PayAnyWay" + (f": {r['comment']}" if r["comment"] else ""),
+            "comment": f"Вывод с баланса {name}" + (f": {r['comment']}" if r["comment"] else ""),
             "delivery_cost": None, "delivery_legacy": None,
         })
 
@@ -4888,12 +4937,12 @@ async def set_order_receipt_line(order_id: int, line: str | None):
 
 
 async def add_npd_receipt(payment_id: str, user_id: int | None, name: str, amount: float,
-                          paid_at: str | None) -> bool:
-    """False — по этому платежу чек уже заведён."""
+                          paid_at: str | None, account: str = "danya") -> bool:
+    """False — по этому платежу чек уже заведён. account — чей «Мой налог»."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            """INSERT OR IGNORE INTO npd_receipts (payment_id, user_id, name, amount, paid_at)
-               VALUES (?, ?, ?, ?, ?)""", (payment_id, user_id, name, amount, paid_at))
+            """INSERT OR IGNORE INTO npd_receipts (payment_id, user_id, name, amount, paid_at, account)
+               VALUES (?, ?, ?, ?, ?, ?)""", (payment_id, user_id, name, amount, paid_at, account))
         await db.commit()
         return cur.rowcount > 0
 
@@ -4941,6 +4990,78 @@ async def get_yk_payment(payment_id: str) -> Optional[dict]:
         async with db.execute("SELECT * FROM yk_payments WHERE id = ?", (payment_id,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+async def get_user_email(user_id: int) -> Optional[str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT email FROM users WHERE user_id = ?", (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row and row[0] else None
+
+
+async def set_user_email(user_id: int, email: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE users SET email = ? WHERE user_id = ?", (email, user_id))
+        await db.commit()
+
+
+async def add_lava_payment(invoice_id: str, order_num: str, kind: str, amount_rub: int,
+                           amount_usd: int, rate: float, email: str, name: str, url: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT OR IGNORE INTO lava_payments
+               (id, order_num, kind, amount_rub, amount_usd, rate, email, name, url)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (invoice_id, order_num, kind, amount_rub, amount_usd, rate, email, name, url))
+        await db.commit()
+
+
+async def get_lava_payment(invoice_id: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM lava_payments WHERE id = ?", (invoice_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def fresh_lava_payment(order_num: str, amount_rub: int, email: str,
+                             minutes: int = 60) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM lava_payments WHERE order_num = ? AND amount_rub = ? AND email = ?
+                 AND status = 'pending' AND created_at >= datetime('now', ?)
+               ORDER BY created_at DESC LIMIT 1""",
+            (order_num, amount_rub, email, f"-{int(minutes)} minutes")) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def lava_payments_to_check() -> list[dict]:
+    """Неоплаченные счета последних суток — опрашиваем на случай, если вебхук не дошёл."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT * FROM lava_payments WHERE status = 'pending'
+                 AND created_at >= datetime('now', '-1 day')""") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def claim_lava_payment(invoice_id: str, paid_rub: int, fee_usd: float | None) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            """UPDATE lava_payments SET status = 'succeeded', paid_rub = ?, fee_usd = ?,
+                   done_at = CURRENT_TIMESTAMP WHERE id = ? AND status != 'succeeded'""",
+            (paid_rub, fee_usd, invoice_id))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def set_lava_status(invoice_id: str, status: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE lava_payments SET status = ? WHERE id = ? AND status = 'pending'",
+                         (status, invoice_id))
+        await db.commit()
 
 
 async def add_paw_payment(txn: str, order_num: str, kind: str, amount: int, name: str, url: str):

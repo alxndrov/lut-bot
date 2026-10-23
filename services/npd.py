@@ -40,11 +40,23 @@ HEADERS = {"Referrer": "https://lknpd.nalog.ru/auth/login",
 MSK = timezone(timedelta(hours=3))
 
 S_REFRESH, S_DEVICE, S_INN = "npd_refresh_token", "npd_device_id", "npd_inn"
+# Два кабинета «Мой налог» (решение Дани 23.10.2026): «danya» — ЮKassa и
+# прежние оплаты, «misha» — lava.top (зарубежные карты, цифра). Ключи Дани —
+# прежние (без суффикса), у Миши — с суффиксом ":misha".
+ACCOUNTS = {"danya": "Даня", "misha": "Миша"}
+
+
+def _key(base: str, account: str) -> str:
+    return base if account == "danya" else f"{base}:{account}"
 
 CANCEL_REFUND = "Возврат средств"
 CANCEL_MISTAKE = "Чек сформирован ошибочно"
 
-_access: dict = {"token": None, "until": 0.0}
+_access: dict = {}   # account → {"token", "until"}
+
+
+def _acc(account: str) -> dict:
+    return _access.setdefault(account, {"token": None, "until": 0.0})
 
 
 class NpdError(Exception):
@@ -62,16 +74,16 @@ class NpdTimeout(NpdError):
     """Ответа не дождались: запрос мог и пройти (чек создан)."""
 
 
-async def _device_id() -> str:
-    dev = await db.get_setting(S_DEVICE)
+async def _device_id(account: str = "danya") -> str:
+    dev = await db.get_setting(_key(S_DEVICE, account))
     if not dev:
         dev = secrets.token_urlsafe(16)[:21].lower()
-        await db.set_setting(S_DEVICE, dev)
+        await db.set_setting(_key(S_DEVICE, account), dev)
     return dev
 
 
-async def _device_info() -> dict:
-    return {"sourceType": "WEB", "sourceDeviceId": await _device_id(), "appVersion": "1.0.0",
+async def _device_info(account: str = "danya") -> dict:
+    return {"sourceType": "WEB", "sourceDeviceId": await _device_id(account), "appVersion": "1.0.0",
             "metaDetails": {"userAgent": HEADERS["User-Agent"]}}
 
 
@@ -113,15 +125,15 @@ async def _post(path: str, payload: dict, token: str | None = None, version: str
         raise NpdError(f"нет связи с «Мой налог»: {hint} ({type(e).__name__})") from e
 
 
-async def _save_login(data: dict):
+async def _save_login(data: dict, account: str = "danya"):
     if not data.get("refreshToken"):
         raise NpdError("«Мой налог» не вернул токен")
-    await db.set_setting(S_REFRESH, data["refreshToken"])
+    await db.set_setting(_key(S_REFRESH, account), data["refreshToken"])
     inn = (data.get("profile") or {}).get("inn")
     if inn:
-        await db.set_setting(S_INN, str(inn))
-    _access["token"] = data.get("token")
-    _access["until"] = time.time() + 600
+        await db.set_setting(_key(S_INN, account), str(inn))
+    _acc(account)["token"] = data.get("token")
+    _acc(account)["until"] = time.time() + 600
 
 
 # ── Вход по СМС ────────────────────────────────────────────────────────────────
@@ -142,49 +154,56 @@ async def start_sms(phone: str) -> str:
     return data["challengeToken"]
 
 
-async def verify_sms(phone: str, challenge: str, code: str) -> str:
+async def verify_sms(phone: str, challenge: str, code: str, account: str = "danya") -> str:
     data = await _post("/auth/challenge/sms/verify",
                        {"phone": phone, "code": code.strip(), "challengeToken": challenge,
-                        "deviceInfo": await _device_info()})
-    await _save_login(data)
-    return await db.get_setting(S_INN) or ""
+                        "deviceInfo": await _device_info(account)})
+    await _save_login(data, account)
+    return await db.get_setting(_key(S_INN, account)) or ""
 
 
-async def disconnect():
-    await db.set_setting(S_REFRESH, "")
-    _access["token"] = None
+async def inn(account: str = "danya") -> str:
+    return await db.get_setting(_key(S_INN, account)) or ""
 
 
-async def connected() -> bool:
-    return bool(await db.get_setting(S_REFRESH))
+async def disconnect(account: str = "danya"):
+    await db.set_setting(_key(S_REFRESH, account), "")
+    _acc(account)["token"] = None
 
 
-async def _token() -> str:
-    if _access["token"] and time.time() < _access["until"]:
-        return _access["token"]
-    refresh = await db.get_setting(S_REFRESH)
+async def connected(account: str = "danya") -> bool:
+    return bool(await db.get_setting(_key(S_REFRESH, account)))
+
+
+async def _token(account: str = "danya") -> str:
+    a = _acc(account)
+    if a["token"] and time.time() < a["until"]:
+        return a["token"]
+    refresh = await db.get_setting(_key(S_REFRESH, account))
     if not refresh:
-        raise NpdNotConnected("«Мой налог» не подключён — /nalog в malimadmins")
+        raise NpdNotConnected(f"«Мой налог» ({ACCOUNTS.get(account, account)}) не подключён — "
+                              "/nalog в malimadmins")
     try:
-        data = await _post("/auth/token", {"deviceInfo": await _device_info(),
+        data = await _post("/auth/token", {"deviceInfo": await _device_info(account),
                                            "refreshToken": refresh})
     except NpdError as e:
         if str(e).startswith(("401", "403")):
             raise NpdNotConnected(f"Вход в «Мой налог» слетел ({e}) — подключи заново: /nalog")
         raise
     if data.get("refreshToken"):
-        await db.set_setting(S_REFRESH, data["refreshToken"])
-    _access["token"] = data["token"]
+        await db.set_setting(_key(S_REFRESH, account), data["refreshToken"])
+    a["token"] = data["token"]
     # Токен живёт около часа; обновляем с запасом
-    _access["until"] = time.time() + 30 * 60
-    return _access["token"]
+    a["until"] = time.time() + 30 * 60
+    return a["token"]
 
 
 def _iso(moment: datetime) -> str:
     return moment.astimezone(MSK).isoformat(timespec="seconds")
 
 
-async def create_receipt(name: str, amount: float, when: datetime | None = None) -> str:
+async def create_receipt(name: str, amount: float, when: datetime | None = None,
+                         account: str = "danya") -> str:
     """Регистрирует доход от физлица. Возвращает uuid чека."""
     now = datetime.now(MSK)
     data = await _post("/income", {
@@ -196,23 +215,23 @@ async def create_receipt(name: str, amount: float, when: datetime | None = None)
                    "incomeType": "FROM_INDIVIDUAL", "inn": None},
         "paymentType": "CASH",
         "ignoreMaxTotalIncomeRestriction": False,
-    }, token=await _token())
+    }, token=await _token(account))
     uuid = data.get("approvedReceiptUuid")
     if not uuid:
         raise NpdError(f"«Мой налог» не вернул номер чека: {data}")
     return uuid
 
 
-async def cancel_receipt(uuid: str, comment: str = CANCEL_REFUND):
+async def cancel_receipt(uuid: str, comment: str = CANCEL_REFUND, account: str = "danya"):
     now = datetime.now(MSK)
     await _post("/cancel", {"operationTime": _iso(now), "requestTime": _iso(now),
                             "comment": comment, "receiptUuid": uuid, "partnerCode": None},
-                token=await _token())
+                token=await _token(account))
 
 
-async def list_incomes(since: datetime, until: datetime) -> list[dict]:
+async def list_incomes(since: datetime, until: datetime, account: str = "danya") -> list[dict]:
     """Все чеки за период (и наши, и от партнёров вроде Продамуса)."""
-    token = await _token()
+    token = await _token(account)
     headers = dict(HEADERS, Authorization=f"Bearer {token}")
     result, offset = [], 0
     try:
@@ -232,6 +251,5 @@ async def list_incomes(since: datetime, until: datetime) -> list[dict]:
         raise NpdError(f"нет связи с «Мой налог» ({type(e).__name__})") from e
 
 
-async def print_url(uuid: str) -> str:
-    inn = await db.get_setting(S_INN) or ""
-    return f"{API}/v1/receipt/{inn}/{uuid}/print"
+async def print_url(uuid: str, account: str = "danya") -> str:
+    return f"{API}/v1/receipt/{await inn(account)}/{uuid}/print"

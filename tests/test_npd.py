@@ -30,16 +30,17 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
         self.fail = None
         self.orig = {n: getattr(npd, n) for n in ("create_receipt", "cancel_receipt", "print_url")}
 
-        async def create(name, amount, when=None):
+        async def create(name, amount, when=None, account="danya"):
             if self.fail:
                 raise self.fail
-            self.calls.append(("create", name, amount))
+            self.calls.append(("create", name, amount) if account == "danya"
+                              else ("create", name, amount, account))
             return f"uuid{len(self.calls)}"
 
-        async def cancel(uuid, comment=npd.CANCEL_REFUND):
+        async def cancel(uuid, comment=npd.CANCEL_REFUND, account="danya"):
             self.calls.append(("cancel", uuid, comment))
 
-        async def url(uuid):
+        async def url(uuid, account="danya"):
             return f"https://lknpd/{uuid}"
         npd.create_receipt, npd.cancel_receipt, npd.print_url = create, cancel, url
         self.notes = []
@@ -88,7 +89,7 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
         await npd_receipts.issue_for_payment(bot, "yk-5", 7, "Курс", 4990.0, "2026-10-15T07:10:57Z")
         self.fail = None
 
-        async def incomes(since, until):   # налоговая чек всё-таки создала
+        async def incomes(since, until, account="danya"):   # налоговая чек всё-таки создала
             return [{"approvedReceiptUuid": "real1", "totalAmount": 4990, "name": "Курс",
                      "operationTime": "2026-10-15T10:10:57+03:00", "cancellationInfo": None}]
         orig = npd.list_incomes
@@ -99,6 +100,11 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
             npd.list_incomes = orig
         self.assertEqual(self.calls, [])   # второй чек не создавали
         self.assertEqual((await db.get_npd_receipt("yk-5"))["receipt_uuid"], "real1")
+
+    async def test_lava_receipt_goes_to_misha(self):
+        await npd_receipts.issue_for_payment(FakeBot(), "lava-1", 7, "Курс", 5100.0, None, account="misha")
+        self.assertEqual(self.calls, [("create", "Курс", 5100.0, "misha")])
+        self.assertEqual((await db.get_npd_receipt("lava-1"))["account"], "misha")
 
     async def test_cancel_on_refund(self):
         bot = FakeBot()
@@ -148,7 +154,7 @@ class ProdamusWatchTest(NpdReceiptsTest):
             await conn.commit()
         await db.set_setting(npd_receipts.S_PRODAMUS_FROM, "2026-10-08")
 
-        async def incomes(since, until):
+        async def incomes(since, until, account="danya"):
             return [{"totalAmount": 399, "operationTime": "2026-10-09T15:24:30+03:00",
                      "cancellationInfo": None}]
         orig = npd.list_incomes

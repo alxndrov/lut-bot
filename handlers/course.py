@@ -149,6 +149,9 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
                 label = "Докупить " + o["title"] if owned else o["title"]
             rows.append([InlineKeyboardButton(
                 text=f"💳 {label} · {svc.rub(price)}", url=_payment_url(o, user_id, price))])
+        if rows and config.LAVA_ENABLED and config.PAY_BASE_URL:
+            rows.append([InlineKeyboardButton(text="🌍 Картой зарубежного банка (в $)",
+                                              callback_data="course:foreign")])
         if rows:
             rows.append([InlineKeyboardButton(text="🔄 Я оплатил", callback_data="course:check")])
     button = app_button()
@@ -158,6 +161,46 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
         rows.append([InlineKeyboardButton(text="🧪 Тестовая оплата", callback_data="course:test")])
     rows.append([InlineKeyboardButton(text="◀️ Каталог", callback_data="catalog")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.callback_query(F.data == "course:foreign")
+async def cb_course_foreign(callback: CallbackQuery):
+    """Те же варианты, что на экране курса, но оплата зарубежной картой —
+    lava.top Миши в долларах (курс ЦБ + 5%, см. services/lava.py)."""
+    from services import lava, paylinks
+    user_id = callback.from_user.id
+    product = await db.get_course_product()
+    if not product:
+        await callback.answer()
+        return
+    options = await db.get_course_options(product["id"])
+    owned = await db.get_user_course_sections(user_id)
+    paid = await db.get_user_course_paid(user_id)
+    has_call = bool(await db.get_user_course_call(user_id))
+    bundle = svc.bundle_option(options)
+    try:
+        rate = await lava.usd_rate()
+    except lava.LavaError:
+        await callback.answer("Оплата зарубежной картой временно недоступна", show_alert=True)
+        return
+    rows = []
+    for o in svc.available_options(options, owned, has_call):
+        price = svc.price_for_user(o, paid, bundle)
+        if not price:
+            continue
+        label = ("Перейти на VIP" if owned and svc.is_call_option(o)
+                 else ("Докупить " if owned else "") + o["title"])
+        rows.append([InlineKeyboardButton(
+            text=f"🌍 {label} · ${lava.usd_price(price, rate)}",
+            url=paylinks.link(f"c_{user_id}_{o['id']}", price, o["title"], via="lava"))])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="course:show")])
+    await callback.answer()
+    await callback.message.answer(
+        "🌍 <b>Оплата картой зарубежного банка</b>\n\n"
+        "Цены в долларах — по курсу ЦБ плюс комиссия за зарубежную оплату. "
+        "На странице оплаты укажите email: туда придёт подтверждение.\n\n"
+        "<i>Pay by a non-Russian card in USD. Enter your email on the payment page.</i>",
+        parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 async def send_course(message: Message, user_id: int) -> bool:

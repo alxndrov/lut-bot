@@ -43,11 +43,18 @@ def product_keyboard(product: dict, user_id: int = 0,
             secret=config.PRODAMUS_SECRET,
             notification_url=config.PRODAMUS_WEBHOOK_URL,
         )
-        buy_button = InlineKeyboardButton(text=f"💳 Купить {price} ₽", url=url)
+        buy_button = InlineKeyboardButton(text=f"💳 Российской картой или СБП · {price} ₽", url=url)
     else:
         buy_button = InlineKeyboardButton(text="💳 Купить", callback_data=f"buy:{pid}")
 
     rows = [[buy_button]] if buy_button else []
+    # Зарубежная карта — lava.top Миши, в долларах (email спросит наша страница)
+    if (category in ("digital", "infobiz") and user_id and config.LAVA_ENABLED
+            and config.PAY_BASE_URL):
+        from services.paylinks import link
+        rows.append([InlineKeyboardButton(
+            text="🌍 Картой зарубежного банка · в $",
+            url=link(f"d_{user_id}_{pid}", price, product["name"], via="lava"))])
     if category in ("digital", "infobiz") and config.PRODAMUS_SHOP_URL and user_id:
         rows.append([InlineKeyboardButton(
             text="🔄 Я оплатил — получить товар",
