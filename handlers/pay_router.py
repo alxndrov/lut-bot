@@ -227,6 +227,8 @@ async def handle_payanyway_notify(request: web.Request) -> web.Response:
                 f"op={params.get('MNT_OPERATION_ID')} test={params.get('MNT_TEST_MODE')}")
     if not config.PAYANYWAY_ENABLED:
         return web.Response(text="FAIL", status=503)
+    if not txn:   # пустой запрос (сканеры, проверка адреса) — без тревоги
+        return web.Response(text="FAIL")
     if params.get("MNT_ID") != config.PAYANYWAY_MNT_ID or not payanyway.notification_valid(params):
         # FAIL — PayAnyWay повторит в течение суток: успеем поправить код в .env
         logger.warning(f"payanyway: подпись/счёт не сошлись для {txn}")
