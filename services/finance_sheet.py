@@ -164,6 +164,8 @@ async def _build_snapshot(year, now, monthly_split=True):
     pending_gross = await _pending_gross('1900-01-01 00:00:00',
                                        now.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'), now)
     pending = pending_gross * (1 - config.PRODAMUS_FEE_PERCENT / 100)
+    # PayAnyWay сам не переводит: деньги лежат у него, пока их не выведут вручную
+    paw_balance = await db.paw_balance()
     active_months = {msk_date(r['created_at']).month for r in rows
                      if msk_date(r['created_at']).year == year}
     monthly = []
@@ -181,7 +183,8 @@ async def _build_snapshot(year, now, monthly_split=True):
         'rows': rows, 'year': year, 'monthly': monthly, 'now': now.isoformat(),
         'tax_months': months, 'bank': bank, 'fee_percent': config.PRODAMUS_FEE_PERCENT,
         'gross': money(gross), 'fee': money(fee), 'pending': money(pending),
-        'arrived': money(gross - fee - pending), 'cdek_paid': money(cdek['paid']),
+        'paw_balance': money(paw_balance),
+        'arrived': money(gross - fee - pending - paw_balance), 'cdek_paid': money(cdek['paid']),
         'cdek_reserve': money(max(0, cdek['due'])),
         'cdek_overpaid': money(max(0, -cdek['due'])),
         'tax_paid': money(tax_paid['total']),
@@ -312,7 +315,7 @@ def cashflow_plan(sheet_id, existing, rows):
         if code in expected and code not in seen:
             stats['updated'] += bool(changes(index, current, operation_values(expected[code])))
             seen.add(code)
-        elif code in expected or re.fullmatch(r'(exp|payout|cdek|npd|refund)-\d+', code) or at(current, 'Статус синхронизации') in ('Сверено', 'Отменено', 'Дубликат'):
+        elif code in expected or re.fullmatch(r'(exp|payout|cdek|npd|refund|pawout)-\d+', code) or at(current, 'Статус синхронизации') in ('Сверено', 'Отменено', 'Дубликат'):
             duplicate = code in expected
             desired = {h: None for h in HEADERS if h not in
                        ('Номер операции', 'Дата операции', 'Комментарий')}

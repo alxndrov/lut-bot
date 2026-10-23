@@ -147,8 +147,10 @@ async def _pending_gross(dt_from: str, dt_to: str, now_utc: datetime) -> float:
     правилу, а не «плюс-минус 2 суток»."""
     purchases = await db.get_purchases_in_range(dt_from, dt_to)
     now_msk_date = (now_utc + timedelta(hours=3)).date()
+    # PayAnyWay сам на счёт не переводит — его деньги в «Лежит на балансе PayAnyWay»
     return sum(float(p["amount"]) for p in purchases
-              if not _prodamus_arrived(p["created_at"], now_msk_date))
+              if not str(p.get("telegram_payment_id") or "").startswith("paw-")
+              and not _prodamus_arrived(p["created_at"], now_msk_date))
 
 
 async def _debt_caveats(s: dict, pending_gross: float, cdek_paid: dict, npd_paid: dict) -> str:

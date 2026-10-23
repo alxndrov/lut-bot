@@ -40,6 +40,7 @@ async def main():
 
     # Каждое входящее сообщение — в лог, до и после хендлеров
     dp.update.outer_middleware(MessageLogMiddleware("клиент"))
+    dp.callback_query.middleware(start.PolicyGate())   # новое согласие после смены оператора
 
     # Регистрируем роутеры
     dp.include_router(admin.router)   # Сначала админ, чтобы перехватывал FSM-состояния

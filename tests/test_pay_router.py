@@ -121,7 +121,8 @@ class PayRouteTest(_DbCase):
         self.client = TestClient(TestServer(app))
         await self.client.start_server()
         for k, v in dict(PRODAMUS_SHOP_URL="https://digital", YOOKASSA_ENABLED=True,
-                         YOOKASSA_SHOP_ID="1", YOOKASSA_SECRET_KEY="k").items():
+                         YOOKASSA_SHOP_ID="1", YOOKASSA_SECRET_KEY="k",
+                         PAYANYWAY_ENABLED=False).items():
             p = mock.patch.object(config, k, v)
             p.start()
             self.addCleanup(p.stop)

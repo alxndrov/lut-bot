@@ -104,8 +104,8 @@ PAYANYWAY_SECRET: str = os.getenv("PAYANYWAY_SECRET", "")
 PAYANYWAY_TEST_MODE: bool = os.getenv("PAYANYWAY_TEST_MODE", "0") == "1"
 PAYANYWAY_URL: str = os.getenv("PAYANYWAY_URL", "https://www.payanyway.ru/assistant.htm")
 PAYANYWAY_ENABLED: bool = bool(PAYANYWAY_MNT_ID and PAYANYWAY_SECRET)
-# Комиссия PayAnyWay в финансах — процентом от оплаты (уточнить по договору)
-PAYANYWAY_FEE_PERCENT: float = float(os.getenv("PAYANYWAY_FEE_PERCENT", "4.5"))
+# Комиссия PayAnyWay по договору — 4% от оплаты (Даня, 23.10.2026)
+PAYANYWAY_FEE_PERCENT: float = float(os.getenv("PAYANYWAY_FEE_PERCENT", "4"))
 # Ссылки на оплату ведут на наш адрес (/pay/…), а он уже отправляет в
 # Prodamus или ЮKassa — так видно переход и работает переключение. Пусто —
 # ссылки по-старому, прямо на Prodamus. По умолчанию — домен мини-приложения.

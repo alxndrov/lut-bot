@@ -9,7 +9,9 @@ import logging
 from html import escape
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 import config
@@ -49,6 +51,10 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
     lines.append("PayAnyWay: " + ("✅ подключён" + (" — <b>ТЕСТОВЫЙ режим</b>" if config.PAYANYWAY_TEST_MODE else "")
                                  if config.PAYANYWAY_ENABLED else
                                  "❌ не подключён — нужен PAYANYWAY_SECRET в .env"))
+    if config.PAYANYWAY_ENABLED:
+        bal = await db.paw_balance()
+        lines.append(f"На балансе PayAnyWay: <b>{bal:,.2f} ₽</b>".replace(",", " ")
+                     + " — выводится вручную; выведенное запиши кнопкой «💸 Вывод с PayAnyWay».")
     lines.append("ЮKassa: " + ("✅ подключена" if config.YOOKASSA_ENABLED else "❌ не подключена"))
     lines.append("Зарубежные карты — всегда Prodamus.")
     if not config.PAY_BASE_URL:
@@ -65,6 +71,8 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
             rows.append([InlineKeyboardButton(text=f"🔀 Все ссылки — в {_NAMES[mode]}",
                                               callback_data=f"pay:mode:{mode}")])
     if config.PAYANYWAY_ENABLED:
+        rows.append([InlineKeyboardButton(text="💸 Вывод с PayAnyWay",
+                                          callback_data="pay:pawout")])
         rows.append([InlineKeyboardButton(text="🧪 Проверить PayAnyWay (платёж на 1 ₽)",
                                           callback_data="pay:test:paw")])
     if config.YOOKASSA_ENABLED:
@@ -291,3 +299,47 @@ async def _send_course(text: str = COURSE_TEXT) -> tuple[int, int]:
     finally:
         await main_bot.session.close()
     return sent, failed
+
+
+# ── Вывод с баланса PayAnyWay ─────────────────────────────────────────────────
+
+class PawOut(StatesGroup):
+    amount = State()
+
+
+@router.callback_query(F.data == "pay:pawout")
+async def cb_pawout(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    await state.set_state(PawOut.amount)
+    bal = await db.paw_balance()
+    await callback.message.answer(
+        f"💸 Сколько вывели с PayAnyWay на счёт? По боту на балансе {bal:,.2f} ₽.\n"
+        "Пришли сумму, которая пришла на счёт (можно с комментарием через пробел). "
+        "Отмена — /cancel.".replace(",", " "))
+
+
+@router.message(Command("cancel"), StateFilter(PawOut.amount))
+async def cmd_pawout_cancel(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Ок, ничего не записал.")
+
+
+@router.message(StateFilter(PawOut.amount), F.text)
+async def msg_pawout(message: Message, state: FSMContext):
+    raw, _, comment = message.text.strip().partition(" ")
+    try:
+        amount = float(raw.replace(",", ".").replace("\u00a0", ""))
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await message.answer("Не понял сумму. Пример: 12500 или 12500,50 на Альфу")
+        return
+    await state.clear()
+    u = message.from_user
+    await db.add_paw_withdrawal(amount, comment, u.id, f"@{u.username}" if u.username else "")
+    from services.finance_sheet import request_finance_sync
+    request_finance_sync()
+    bal = await db.paw_balance()
+    logger.info(f"payments: вывод с PayAnyWay {amount} ({u.id})")
+    await message.answer(f"✅ Записал вывод {amount:,.2f} ₽. На балансе PayAnyWay по боту осталось "
+                         f"{bal:,.2f} ₽.".replace(",", " "))

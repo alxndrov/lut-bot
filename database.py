@@ -627,6 +627,18 @@ async def init_db(existing_cdek_contract: str | None = None):
                 done_at      TIMESTAMP
             )
         """)
+        # Вывод денег с баланса PayAnyWay (он не переводит сам — выводят
+        # вручную): в таблице строка pawout-N, «Лежит на балансе PayAnyWay»
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS paw_withdrawals (
+                id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                paid_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                amount    REAL NOT NULL,
+                comment   TEXT,
+                user_id   INTEGER,
+                user_name TEXT
+            )
+        """)
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -2689,13 +2701,30 @@ async def set_order_routing(order_id: int, whos) -> None:
         await db.commit()
 
 
-async def is_policy_accepted(user_id: int) -> bool:
+POLICY_RECONSENT_SETTING = "policy_reconsent_from"   # UTC; согласие раньше — устарело
+
+
+async def policy_status(user_id: int) -> str:
+    """'ok' — согласие действующее, 'none' — не давал, 'old' — давал прежнему
+    оператору (до смены политики, см. POLICY_RECONSENT_SETTING)."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
             "SELECT policy_accepted_at FROM users WHERE user_id = ?", (user_id,)
         ) as cur:
             row = await cur.fetchone()
-            return bool(row and row[0])
+        accepted = row[0] if row else None
+        if not accepted:
+            return "none"
+        async with db.execute("SELECT value FROM settings WHERE key = ?",
+                              (POLICY_RECONSENT_SETTING,)) as cur:
+            cutoff = await cur.fetchone()
+    if cutoff and cutoff[0] and str(accepted) < cutoff[0]:
+        return "old"
+    return "ok"
+
+
+async def is_policy_accepted(user_id: int) -> bool:
+    return await policy_status(user_id) == "ok"
 
 
 async def accept_policy(user_id: int) -> Optional[str]:
@@ -3162,7 +3191,7 @@ async def get_purchases_in_range(dt_from: str, dt_to: str) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, created_at, amount FROM purchases "
+            "SELECT id, created_at, amount, telegram_payment_id FROM purchases "
             "WHERE datetime(created_at) BETWEEN datetime(?) AND datetime(?)",
             (dt_from, dt_to),
         ) as cur:
@@ -3728,6 +3757,35 @@ async def get_payouts_for_finance_export() -> list[dict]:
             return [dict(r) for r in await cur.fetchall()]
 
 
+async def add_paw_withdrawal(amount: float, comment: str = "", user_id: int = 0,
+                             user_name: str = "") -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO paw_withdrawals (amount, comment, user_id, user_name) VALUES (?, ?, ?, ?)",
+            (float(amount), (comment or "").strip() or None, user_id, user_name))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_paw_withdrawals() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM paw_withdrawals ORDER BY paid_at") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def paw_balance() -> float:
+    """Сколько лежит на балансе PayAnyWay: оплаты за вычетом его комиссии
+    минус всё, что выведено (/payments → «Вывод с PayAnyWay»)."""
+    import config
+    async with aiosqlite.connect(DB_PATH) as db:
+        got = (await (await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE telegram_payment_id LIKE 'paw-%'"
+        )).fetchone())[0]
+        out = (await (await db.execute("SELECT COALESCE(SUM(amount), 0) FROM paw_withdrawals")).fetchone())[0]
+    return float(got) * (1 - config.PAYANYWAY_FEE_PERCENT / 100) - float(out)
+
+
 async def get_cdek_payments_for_finance_export() -> list[dict]:
     """Все оплаченные счета СДЭК (см. /cdek) — расходные строки финансового
     листа. В отличие от «Отложено на СДЭК» в строке прихода (это оценка
@@ -3820,6 +3878,14 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
         rows.append({
             "code": f"cdek-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
             "kind": "Расход", "comment": comment,
+            "delivery_cost": None, "delivery_legacy": None,
+        })
+
+    for r in await get_paw_withdrawals():
+        rows.append({
+            "code": f"pawout-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
+            "kind": "Расход",
+            "comment": "Вывод с баланса PayAnyWay" + (f": {r['comment']}" if r["comment"] else ""),
             "delivery_cost": None, "delivery_legacy": None,
         })
 

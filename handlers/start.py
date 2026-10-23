@@ -1,5 +1,5 @@
 import logging
-from aiogram import Router, F
+from aiogram import BaseMiddleware, Router, F
 from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
@@ -23,19 +23,38 @@ def policy_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-async def ask_policy(message: Message):
-    """Первый экран для нового пользователя: без согласия дальше не пускаем."""
+async def ask_policy(message: Message, renewed: bool = False):
+    """Первый экран для нового пользователя: без согласия дальше не пускаем.
+    renewed — человек давал согласие прежнему оператору: просим новое."""
     policy = (f'<a href="{config.PRIVACY_POLICY_URL}">'
               "согласие на обработку персональных данных</a>")
     offer = (f' и <a href="{config.OFFER_URL}">оферту</a>'
              if config.OFFER_URL else "")
-    await message.answer(
-        "Привет!\n\n"
-        f"Прежде чем я отправлю тебе всю информацию, пожалуйста, прими {policy}{offer}.",
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=policy_keyboard(),
-    )
+    if renewed:
+        text = ("Мы обновили документы: теперь продавец и оператор персональных данных — "
+                "Барышов Михаил Павлович (самозанятый). Чтобы продолжить, пожалуйста, "
+                f"прими новое {policy}{offer} 🙏")
+    else:
+        text = ("Привет!\n\n"
+                f"Прежде чем я отправлю тебе всю информацию, пожалуйста, прими {policy}{offer}.")
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True,
+                         reply_markup=policy_keyboard())
+
+
+class PolicyGate(BaseMiddleware):
+    """После смены оператора (политика от 23.10.2026) тот, кто давал согласие
+    прежнему, при нажатии любой кнопки сначала даёт новое. Новых пользователей
+    это не касается — они соглашаются на /start, как обычно. Включается
+    настройкой db.POLICY_RECONSENT_SETTING (дата, с которой согласие новое)."""
+
+    async def __call__(self, handler, event: CallbackQuery, data):
+        if (config.POLICY_REQUIRED and event.data != "policy:accept"
+                and event.from_user.id not in ADMIN_IDS
+                and await db.policy_status(event.from_user.id) == "old"):
+            await event.answer()
+            await ask_policy(event.message, renewed=True)
+            return None
+        return await handler(event, data)
 
 
 async def ensure_policy(message: Message, payload: str | None = None) -> bool:
@@ -45,10 +64,11 @@ async def ensure_policy(message: Message, payload: str | None = None) -> bool:
                          first_name=message.from_user.first_name or "", ref=None)
     if not config.POLICY_REQUIRED:
         return True
-    if await db.is_policy_accepted(message.from_user.id):
+    status = await db.policy_status(message.from_user.id)
+    if status == "ok":
         return True
     await db.set_pending_payload(message.from_user.id, payload)
-    await ask_policy(message)
+    await ask_policy(message, renewed=status == "old")
     return False
 
 
@@ -122,9 +142,10 @@ async def cmd_start(message: Message):
 
     # Без согласия на обработку данных ничего не показываем и воронку
     # не запускаем — payload дождётся принятия
-    if config.POLICY_REQUIRED and not await db.is_policy_accepted(message.from_user.id):
+    status = await db.policy_status(message.from_user.id) if config.POLICY_REQUIRED else "ok"
+    if status != "ok":
         await db.set_pending_payload(message.from_user.id, payload)
-        await ask_policy(message)
+        await ask_policy(message, renewed=status == "old")
         return
 
     if payload == "course":
