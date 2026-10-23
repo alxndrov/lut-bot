@@ -350,8 +350,9 @@ async def _alert(bot: Bot, text: str):
 
 # ── Уведомление PayAnyWay (Pay URL) ────────────────────────────────────────────
 
-def _xml(txn: str, code: int) -> web.Response:
-    return web.Response(text=payanyway.response_xml(txn, code), content_type="application/xml")
+def _xml(txn: str, code: int, items: list | None = None, email: str = "") -> web.Response:
+    return web.Response(text=payanyway.response_xml(txn, code, items, email),
+                        content_type="application/xml")
 
 
 async def handle_payanyway_notify(request: web.Request) -> web.Response:
@@ -386,15 +387,24 @@ async def handle_payanyway_notify(request: web.Request) -> web.Response:
                           f"ждали {row['amount']} ₽, пришло {amount:.2f} ₽. Товар не выдан — "
                           "разберитесь вручную.")
         return _xml(txn, 200)
+    # Номенклатура в ответе — по ней PayAnyWay.Self регистрирует доход Миши
+    # в «Мой налог»; отдаём её и на повторное уведомление
+    order_type, user_id, product_id = row["order_num"].split("_", 2)
+    name = row["name"]
+    if order_type != "t":
+        from services.npd_receipts import receipt_name
+        name = await receipt_name(order_type, int(product_id))
+    items = payanyway.inventory(name, amount, service=order_type == "c")
+    email = await db.get_user_email(int(user_id)) or ""
+    ok = _xml(txn, 200, items, email)
     op = params.get("MNT_OPERATION_ID") or txn
     if not await db.claim_paw_payment(txn, op):
-        return _xml(txn, 200)   # уже выдали
+        return ok   # уже выдали
     from handlers.prodamus_webhook import _send_notify, provision_payment
     if row["kind"] == "t" or params.get("MNT_TEST_MODE") == "1":
         await _send_notify(bot, f"🧪 Тестовый платёж PayAnyWay на {amount:.0f} ₽ прошёл — "
                                 f"оплата и уведомления работают. Товар не выдаётся.")
-        return _xml(txn, 200)
-    order_type, user_id, product_id = row["order_num"].split("_", 2)
+        return ok
     try:
         await provision_payment(bot, int(user_id), int(product_id), order_type,
                                 f"paw-{txn}", int(round(amount)))
@@ -404,7 +414,7 @@ async def handle_payanyway_notify(request: web.Request) -> web.Response:
                                 f"{escape(row['order_num'])}, {amount:.0f} ₽, оплата {escape(txn)}\n"
                                 f"{escape(str(e))}")
     # Чек делает PayAnyWay.Self в «Мой налог» Миши — бот его не пробивает
-    return _xml(txn, 200)
+    return ok
 
 
 # ── Статус платежа ЮKassa ──────────────────────────────────────────────────────

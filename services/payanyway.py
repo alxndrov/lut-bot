@@ -11,7 +11,10 @@ https://app.malimabi.com/payanyway/notify), мы проверяем подпис
 https://docs.moneta.ru/assistant/v1/
 """
 import hashlib
+import json
+import re
 import secrets
+from xml.sax.saxutils import escape
 from urllib.parse import urlencode
 
 import config
@@ -66,11 +69,38 @@ def notification_valid(p: dict) -> bool:
     return secrets.compare_digest(expected, (p.get("MNT_SIGNATURE") or "").lower())
 
 
-def response_xml(transaction_id: str, code: int) -> str:
-    """Ответ на уведомление: 200 — принято, 500 — не повторять (подпись не та и т. п.)."""
+def receipt_name(name: str) -> str:
+    """Наименование для чека: PayAnyWay не принимает кавычки, &, $, #, слэши
+    и прочие спецсимволы — оставляем буквы, цифры и простую пунктуацию."""
+    clean = re.sub(r"[^\w\s.,:;()+№-]", " ", name or "", flags=re.UNICODE).replace("_", " ")
+    return re.sub(r"\s+", " ", clean).strip()[:128] or "Оплата заказа"
+
+
+def inventory(name: str, amount: float, service: bool) -> list[dict]:
+    """Номенклатура для PayAnyWay.Self: без неё доход самозанятого в «Мой
+    налог» автоматически не регистрируется («ответ не по протоколу»)."""
+    return [{"name": receipt_name(name), "price": amount_str(amount), "quantity": "1",
+             "vatTag": "1105", "pm": "full_payment",
+             "po": "service" if service else "commodity"}]
+
+
+def response_xml(transaction_id: str, code: int, items: list[dict] | None = None,
+                 email: str = "") -> str:
+    """Ответ на уведомление: 200 — принято, 500 — не повторять (подпись не та и т. п.).
+    items — номенклатура чека (MNT_ATTRIBUTES/INVENTORY), см. «Спецификация
+    для CMS с использованием кассового сервиса PayAnyWay»."""
     sig = _md5(code, config.PAYANYWAY_MNT_ID, transaction_id, config.PAYANYWAY_SECRET)
+    attrs = ""
+    if items:
+        pairs = [("INVENTORY", json.dumps(items, ensure_ascii=False))]
+        if email:
+            pairs += [("CUSTOMER", email),
+                      ("CLIENT", json.dumps([{"email": email}], ensure_ascii=False))]
+        attrs = "<MNT_ATTRIBUTES>" + "".join(
+            f"<ATTRIBUTE><KEY>{k}</KEY><VALUE>{escape(v)}</VALUE></ATTRIBUTE>"
+            for k, v in pairs) + "</MNT_ATTRIBUTES>"
     return ('<?xml version="1.0" encoding="UTF-8"?>'
             f"<MNT_RESPONSE><MNT_ID>{config.PAYANYWAY_MNT_ID}</MNT_ID>"
             f"<MNT_TRANSACTION_ID>{transaction_id}</MNT_TRANSACTION_ID>"
             f"<MNT_RESULT_CODE>{code}</MNT_RESULT_CODE>"
-            f"<MNT_SIGNATURE>{sig}</MNT_SIGNATURE></MNT_RESPONSE>")
+            f"<MNT_SIGNATURE>{sig}</MNT_SIGNATURE>{attrs}</MNT_RESPONSE>")

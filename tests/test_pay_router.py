@@ -256,7 +256,12 @@ class PayAnyWayFlowTest(_DbCase):
             provision.assert_not_awaited()                                   # сумма не та
             for _ in range(2):                                               # повтор уведомления
                 ok = await self.client.post("/payanyway/notify", data=self._notify_params(txn, "2990.00"))
-                self.assertIn("<MNT_RESULT_CODE>200", await ok.text())
+                body = await ok.text()
+                self.assertIn("<MNT_RESULT_CODE>200", body)
+                # номенклатура для PayAnyWay.Self — без неё доход в «Мой налог» не регистрируется
+                self.assertIn('<KEY>INVENTORY</KEY><VALUE>[{"name": "Оплата заказа", '
+                              '"price": "2990.00", "quantity": "1", "vatTag": "1105", '
+                              '"pm": "full_payment", "po": "service"}]</VALUE>', body)
         provision.assert_awaited_once()
         self.assertEqual(provision.await_args.args[1:], (7, 3, "c", f"paw-{txn}", 2990))
 
