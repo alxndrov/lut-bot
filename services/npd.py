@@ -8,8 +8,10 @@ Prodamus пробивает чеки сам, а ЮKassa для самозаня�
 измениться без предупреждения — тогда чек не создастся, админам придёт
 сообщение, а бот будет повторять попытку (services/npd_receipts.py).
 
-Вход — один раз по телефону и коду из СМС (/nalog в malimadmins), пароль
-не нужен и нигде не хранится. В настройках бота лежит refresh-токен
+Вход — один раз по телефону и коду из СМС (/nalog в malimadmins) или, если
+налоговая не шлёт СМС («Авторизация по номеру телефона временно недоступна»),
+по ИНН и паролю от личного кабинета налогоплательщика. Пароль нигде не
+хранится. В настройках бота лежит refresh-токен
 и id «устройства»; по ним бот сам получает короткий токен доступа.
 """
 import logging
@@ -160,6 +162,22 @@ async def verify_sms(phone: str, challenge: str, code: str, account: str = "dany
                         "deviceInfo": await _device_info(account)})
     await _save_login(data, account)
     return await db.get_setting(_key(S_INN, account)) or ""
+
+
+# ── Вход по ИНН и паролю ───────────────────────────────────────────────────────
+
+def normalize_inn(text: str) -> str | None:
+    digits = "".join(c for c in text if c.isdigit())
+    return digits if len(digits) == 12 else None
+
+
+async def login_password(inn_: str, password: str, account: str = "danya") -> str:
+    """Пароль — от личного кабинета налогоплательщика (lkfl2.nalog.ru), как при
+    входе «по ИНН» на lknpd.nalog.ru. Используется один раз, не сохраняется."""
+    data = await _post("/auth/lkfl", {"username": inn_, "password": password,
+                                       "deviceInfo": await _device_info(account)})
+    await _save_login(data, account)
+    return await db.get_setting(_key(S_INN, account)) or inn_
 
 
 async def inn(account: str = "danya") -> str:

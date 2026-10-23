@@ -48,5 +48,7 @@ class MessageLogMiddleware(BaseMiddleware):
             who = f"@{u.username}" if u and u.username else (u.first_name if u else "—")
             state = data.get("raw_state")
             mark = "NOT HANDLED" if result is UNHANDLED else "ok"
+            # Пароль от налоговой (/nalog) в журнал не попадает
+            what = "text ***" if str(state or "").endswith(":password") else _describe(msg)
             logger.info(f"[{self.tag}] {who} (id:{u.id if u else '?'}) "
-                        f"state={state} {mark} | {_describe(msg)}")
+                        f"state={state} {mark} | {what}")

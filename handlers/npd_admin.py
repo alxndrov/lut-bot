@@ -1,8 +1,9 @@
 """/nalog в malimadmins — чеки «Мой налог» за оплаты ЮKassa.
 
 Статус подключения, сколько чеков пробито и что ждёт, подключение по СМС
-(телефон и код вводит сам админ — пароль от «Мой налог» не нужен),
-ручной повтор непробитых.
+(телефон и код вводит сам владелец кабинета) или, если налоговая не шлёт
+СМС, по ИНН и паролю (сообщение с паролем бот сразу удаляет, пароль не
+хранит и не пишет в журнал), ручной повтор непробитых.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -25,6 +26,8 @@ logger = logging.getLogger(__name__)
 class NpdLogin(StatesGroup):
     phone = State()
     code = State()
+    inn = State()
+    password = State()   # имя кончается на password — message_log текст не пишет
 
 
 def _admin(user_id: int) -> bool:
@@ -60,6 +63,9 @@ async def status_screen() -> tuple[str, InlineKeyboardMarkup]:
         if status[acc]:
             row.append(InlineKeyboardButton(text=f"Отключить ({who})", callback_data=f"npd:off:{acc}"))
         kb.append(row)
+        if not status[acc]:
+            kb.append([InlineKeyboardButton(text=f"🔑 {who}: войти по ИНН и паролю",
+                                            callback_data=f"npd:pwd:{acc}")])
     if waiting:
         kb.append([InlineKeyboardButton(text="🧾 Пробить ждущие сейчас", callback_data="npd:retry")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
@@ -91,7 +97,7 @@ async def cb_login(callback: CallbackQuery, state: FSMContext):
         "Налоговая пришлёт на него СМС с кодом — код вводит владелец кабинета.\n\nОтмена — /cancel")
 
 
-@router.message(Command("cancel"), StateFilter(NpdLogin.phone, NpdLogin.code))
+@router.message(Command("cancel"), StateFilter(NpdLogin))
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Ок, подключение отменено.")
@@ -130,6 +136,10 @@ async def msg_code(message: Message, state: FSMContext, bot: Bot):
         await message.delete()
     except Exception:
         pass
+    await _connected(message, acc, inn)
+
+
+async def _connected(message: Message, acc: str, inn: str):
     logger.info(f"npd: подключён {acc}, ИНН {inn} ({message.from_user.id})")
     what = "ЮKassa" if acc == "danya" else "lava.top (зарубежные карты)"
     await message.answer(f"✅ «Мой налог» — {npd.ACCOUNTS[acc]} — подключён (ИНН {inn}). "
@@ -141,6 +151,56 @@ async def msg_code(message: Message, state: FSMContext, bot: Bot):
         await main_bot.session.close()
     if done or left:
         await message.answer(f"Пробил ждавшие чеки: {done}" + (f", осталось {left}" if left else ""))
+
+
+@router.callback_query(F.data.startswith("npd:pwd:"))
+async def cb_login_password(callback: CallbackQuery, state: FSMContext):
+    if not _admin(callback.from_user.id):
+        await callback.answer()
+        return
+    acc = callback.data.split(":")[2]
+    if acc not in npd.ACCOUNTS:
+        await callback.answer()
+        return
+    await state.set_state(NpdLogin.inn)
+    await state.update_data(account=acc)
+    await callback.answer()
+    await callback.message.answer(
+        f"🔑 «Мой налог» — {npd.ACCOUNTS[acc]}, вход по ИНН и паролю (если налоговая "
+        "не шлёт СМС). Пароль — от личного кабинета налогоплательщика на nalog.ru; "
+        "вводит его сам владелец кабинета. Бот сразу удалит сообщение с паролем и "
+        "нигде его не сохранит.\n\nИНН (12 цифр)?\n\nОтмена — /cancel")
+
+
+@router.message(StateFilter(NpdLogin.inn), F.text)
+async def msg_inn(message: Message, state: FSMContext):
+    inn = npd.normalize_inn(message.text)
+    if not inn:
+        await message.answer("ИНН самозанятого — 12 цифр. Ещё раз?")
+        return
+    await state.set_state(NpdLogin.password)
+    await state.update_data(inn=inn)
+    await message.answer("Пароль от личного кабинета налогоплательщика?")
+
+
+@router.message(StateFilter(NpdLogin.password), F.text)
+async def msg_password(message: Message, state: FSMContext):
+    password = message.text
+    # Пароль в чате не оставляем — удаляем до запроса в налоговую
+    try:
+        await message.delete()
+    except Exception:
+        await message.answer("⚠️ Не смог удалить сообщение с паролем — удали его сам.")
+    data = await state.get_data()
+    acc = data.get("account", "danya")
+    try:
+        inn = await npd.login_password(data["inn"], password, account=acc)
+    except Exception as e:
+        await message.answer(f"⚠️ Не подошло: {escape(str(e)[:200])}\nПришли пароль ещё раз "
+                             f"или /cancel.", parse_mode="HTML")
+        return
+    await state.clear()
+    await _connected(message, acc, inn)
 
 
 @router.callback_query(F.data == "npd:retry")

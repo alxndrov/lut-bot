@@ -185,6 +185,42 @@ class PhoneTest(unittest.TestCase):
         self.assertEqual(npd.normalize_phone("89123456789"), "79123456789")
         self.assertIsNone(npd.normalize_phone("12345"))
 
+    def test_normalize_inn(self):
+        self.assertEqual(npd.normalize_inn("7453 1224 4278"), "745312244278")
+        self.assertIsNone(npd.normalize_inn("7453122442"))
+
+
+class PasswordLoginTest(NpdReceiptsTest):
+    async def test_login_password_saves_token_for_account(self):
+        sent = []
+
+        async def fake_post(path, payload, token=None, version="v1"):
+            sent.append((path, payload["username"], payload["password"]))
+            return {"refreshToken": "r1", "token": "t1", "profile": {"inn": "745312244278"}}
+        orig, npd._post = npd._post, fake_post
+        try:
+            inn = await npd.login_password("745312244278", "secret", account="misha")
+        finally:
+            npd._post = orig
+        self.assertEqual(inn, "745312244278")
+        self.assertEqual(sent, [("/auth/lkfl", "745312244278", "secret")])
+        self.assertTrue(await npd.connected("misha"))
+        self.assertFalse(await npd.connected("danya"))
+        self.assertNotIn("secret", str(await db.get_setting("npd_refresh_token:misha")))
+
+
+class PasswordNotLoggedTest(unittest.IsolatedAsyncioTestCase):
+    async def test_message_log_masks_password_state(self):
+        from unittest import mock
+        from services.message_log import MessageLogMiddleware
+        msg = mock.Mock(text="secret", from_user=mock.Mock(username="m", id=1))
+        with self.assertLogs("messages", "INFO") as logs:
+            await MessageLogMiddleware("админ")(mock.AsyncMock(return_value=True),
+                                                mock.Mock(message=msg),
+                                                {"raw_state": "NpdLogin:password"})
+        self.assertNotIn("secret", logs.output[0])
+        self.assertIn("text ***", logs.output[0])
+
 
 if __name__ == "__main__":
     unittest.main()
