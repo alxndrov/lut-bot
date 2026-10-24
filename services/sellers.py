@@ -6,7 +6,7 @@
 MISHA = {"name": "Барышов Михаил Павлович", "short": "Барышов М. П.", "inn": "745312244278"}
 DANYA = {"name": "Александров Даниил Константинович", "short": "Александров Д. К.",
          "inn": "745114732883"}
-CONTACT = "d.alxndrov@gmail.com"
+CONTACT = "mikhail.baryshov@gmail.com"
 
 
 def seller_for(category: str) -> dict:

@@ -13,7 +13,7 @@ class SellersTest(unittest.TestCase):
     def test_info_has_what_payanyway_checks(self):
         text = info_text()
         for must in ("Барышов Михаил Павлович", "745312244278", "Александров Даниил Константинович",
-                     "745114732883", "d.alxndrov@gmail.com", "Возврат", "Оплата", "СДЭК"):
+                     "745114732883", "mikhail.baryshov@gmail.com", "Возврат", "Оплата", "СДЭК"):
             self.assertIn(must, text)
 
 
