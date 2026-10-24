@@ -2771,6 +2771,9 @@ async def accept_policy(user_id: int) -> Optional[str]:
         ) as cur:
             row = await cur.fetchone()
         payload = row[0] if row else None
+        # После /forget строки пользователя нет — заводим заново
+        await db.execute("INSERT OR IGNORE INTO users (user_id, launch_count, first_seen, last_seen) "
+                         "VALUES (?, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", (user_id,))
         await db.execute(
             "UPDATE users SET policy_accepted_at = CURRENT_TIMESTAMP, "
             "pending_payload = NULL WHERE user_id = ?",
@@ -5157,3 +5160,44 @@ async def claim_yk_payment(payment_id: str) -> bool:
                WHERE id = ? AND status != 'succeeded'""", (payment_id,))
         await db.commit()
         return cur.rowcount > 0
+
+
+# ── /forget: удаление данных пользователя по его запросу ───────────────────────
+
+async def orders_in_progress(user_id: int) -> list[int]:
+    """Заказы, которые ещё могут ехать: за 60 дней и без отметки о прибытии в
+    пункт выдачи. Пока они есть, данные получателя удалять нельзя."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT id FROM orders WHERE user_id = ? AND arrived_notified_at IS NULL
+                  AND created_at >= datetime('now', '-60 days') ORDER BY id""", (user_id,)
+        ) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+# Удаляются целиком: переписка, отзывы, рассылки, интерес к курсу, ссылки на
+# видео, неоплаченные корзины и переходы к оплате, email.
+FORGET_DELETE = ("support_messages", "reviews", "funnel_queue", "review_push_queue",
+                 "course_nudges", "course_views", "course_review_requests", "course_orders",
+                 "waitlist_entries", "bonus_reviews", "channel_access", "pending_deliveries")
+
+
+async def forget_user(user_id: int) -> None:
+    """Удаляет персональные данные по запросу пользователя (/forget).
+
+    Остаются только сведения о покупках и платежах — их по закону хранят
+    5 лет (политика, п. 5.2): сумма, дата, товар, номер платежа и Telegram ID
+    как номер покупателя в учёте. Доступ к оплаченному курсу привязан к
+    покупке и тоже остаётся — вернётся, если человек снова даст согласие.
+    Имя, username, email, данные получателя, переписка и отзывы удаляются."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        for table in FORGET_DELETE:
+            await db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
+        await db.execute("DELETE FROM pay_clicks WHERE user_id = ? AND paid_at IS NULL", (user_id,))
+        await db.execute("UPDATE purchases SET username = NULL WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE orders SET recipient_name = NULL, recipient_phone = NULL "
+                         "WHERE user_id = ?", (user_id,))
+        await db.execute("UPDATE npd_receipts SET user_id = NULL WHERE user_id = ? "
+                         "AND status = 'issued'", (user_id,))
+        await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        await db.commit()

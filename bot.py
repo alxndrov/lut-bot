@@ -10,7 +10,7 @@ import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
-from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info
+from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget
 from handlers import course, course_admin, course_orders, course_invoice, npd_admin, friend_order
 from handlers import pay_router, payments_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
@@ -45,6 +45,7 @@ async def main():
     # Регистрируем роутеры
     dp.include_router(admin.router)   # Сначала админ, чтобы перехватывал FSM-состояния
     dp.include_router(start.router)
+    dp.include_router(forget.router)        # /forget — удалить свои данные
     dp.include_router(course.router)        # кодовое слово — раньше поддержки
     dp.include_router(friend_order.router)  # заказ для друга — только админам
     dp.include_router(course_invoice.router)  # счёт за курс — только админам
@@ -72,6 +73,8 @@ async def main():
         BotCommand(command="mypurchases", description="🧾 Мои покупки"),
         BotCommand(command="feedback",    description="💬 Оставить отзыв"),
         BotCommand(command="help",        description="🆘 Поддержка"),
+        BotCommand(command="info",        description="ℹ️ Продавцы и условия"),
+        BotCommand(command="forget",      description="🗑 Удалить мои данные"),
     ]
     await bot.set_my_commands(commands)
     await course.set_admin_commands(bot, commands)

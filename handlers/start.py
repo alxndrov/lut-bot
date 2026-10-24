@@ -73,18 +73,19 @@ async def ask_policy(message: Message, renewed: bool = False):
 
 
 class PolicyGate(BaseMiddleware):
-    """После смены оператора (политика от 23.10.2026) тот, кто давал согласие
-    прежнему, при нажатии любой кнопки сначала даёт новое. Новых пользователей
-    это не касается — они соглашаются на /start, как обычно. Включается
-    настройкой db.POLICY_RECONSENT_SETTING (дата, с которой согласие новое)."""
+    """Без действующего согласия кнопки не работают — сначала экран согласия.
+    Кто давал согласие по прежним документам (db.POLICY_RECONSENT_SETTING —
+    дата, с которой согласие новое), видит «Мы обновили документы»; кто не
+    давал или удалил данные через /forget — обычный экран."""
 
     async def __call__(self, handler, event: CallbackQuery, data):
-        if (config.POLICY_REQUIRED and not (event.data or "").startswith("policy:")
-                and event.from_user.id not in ADMIN_IDS
-                and await db.policy_status(event.from_user.id) == "old"):
-            await event.answer()
-            await ask_policy(event.message, renewed=True)
-            return None
+        if (config.POLICY_REQUIRED and not (event.data or "").startswith(("policy:", "forget:"))
+                and event.from_user.id not in ADMIN_IDS):
+            status = await db.policy_status(event.from_user.id)
+            if status != "ok":   # 'old' — давал прежнему оператору, 'none' — не давал или /forget
+                await event.answer()
+                await ask_policy(event.message, renewed=status == "old")
+                return None
         return await handler(event, data)
 
 
