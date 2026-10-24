@@ -38,12 +38,12 @@ class CourseGiftTest(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = self.old
         self.tmp.cleanup()
 
-    async def _make_gift(self):
+    async def _make_gift(self, args="@buyer"):
         msg = mock.AsyncMock()
         msg.from_user.id = config.ADMIN_IDS[0]
         with mock.patch.object(course_gift, "gift_link",
                                mock.AsyncMock(side_effect=lambda t: f"https://t.me/b?start=gift_{t}")):
-            await course_gift.cmd_gift(msg, mock.Mock(args="@buyer"))
+            await course_gift.cmd_gift(msg, mock.Mock(args=args))
         text = msg.answer.await_args.args[0]
         return text.split("start=gift_")[1].split()[0]
 
@@ -63,6 +63,15 @@ class CourseGiftTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await db.get_user_course_sections(5), set())
         # покупка в учёте осталась за покупателем
         self.assertEqual((await db.last_course_purchase(1))["id"], 218)
+
+    async def test_named_gift_only_for_that_username(self):
+        token = await self._make_gift("@buyer @Friend")
+        stranger = mock.AsyncMock()
+        await course_gift.claim(stranger, 5, token)                      # чужой — не открывает
+        self.assertIn("другому человеку", stranger.answer.await_args.args[0])
+        self.assertEqual(await db.get_user_course_sections(5), set())
+        await course_gift.claim(mock.AsyncMock(), 2, token)              # @friend — открывает
+        self.assertEqual(await db.get_user_course_sections(2), {"shooting", "editing"})
 
 
 if __name__ == "__main__":

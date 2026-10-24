@@ -1,11 +1,16 @@
 """Курс в подарок.
 
-Админ в malimadmins: /gift @покупатель (или Telegram ID) — доступ покупателя
-к разделам его последней покупки курса придерживается, а бот выдаёт ссылку
-t.me/<бот>?start=gift_<token>. Покупатель пересылает её получателю в нужный
-день. Получатель открывает ссылку, даёт согласие (галочки на /start) — и
-разделы этой покупки открываются ему, а покупателю и админам приходит
-сообщение. Покупка в учёте остаётся за покупателем (он платил).
+Админ в malimadmins: /gift @покупатель [@получатель] (покупатель — ник или
+Telegram ID) — доступ покупателя к разделам его последней покупки курса
+придерживается, а бот выдаёт ссылку t.me/<бот>?start=gift_<token>. Покупатель
+пересылает её получателю в нужный день. Получатель открывает ссылку, даёт
+согласие (галочки на /start) — и разделы этой покупки открываются ему, а
+покупателю и админам приходит сообщение. Покупка в учёте остаётся за
+покупателем (он платил).
+
+Два вида подарка: открытый (без @получателя) — курс получит тот, кто первым
+откроет ссылку; с ником — только человек с этим username, остальным ссылка
+не откроет курс и не «сгорит».
 
 Бот не может написать человеку первым, поэтому подарок — только ссылкой.
 """
@@ -46,11 +51,16 @@ async def gift_link(token: str) -> str:
 async def cmd_gift(message: Message, command: CommandObject):
     if message.from_user.id not in config.ADMIN_IDS:
         return
-    arg = (command.args or "").strip().lstrip("@")
-    if not arg:
-        await message.answer("🎁 Курс в подарок: /gift @ник_покупателя (или его Telegram ID).\n"
-                             "Доступ покупателя придержу и дам ссылку для получателя.")
+    args = (command.args or "").split()
+    if not args or len(args) > 2:
+        await message.answer(
+            "🎁 Курс в подарок:\n"
+            "• /gift @покупатель — открытый подарок: курс получит тот, кто первым откроет ссылку;\n"
+            "• /gift @покупатель @получатель — только для этого ника.\n\n"
+            "Покупателя можно указать и Telegram ID. Доступ покупателя придержу и дам ссылку.")
         return
+    arg = args[0].lstrip("@")
+    recipient = args[1].lstrip("@").lower() if len(args) == 2 else None
     buyer = await (db.get_user(int(arg)) if arg.isdigit() else db.get_user_by_username(arg))
     buyer_id = buyer["user_id"] if buyer else (int(arg) if arg.isdigit() else None)
     purchase = await db.last_course_purchase(buyer_id) if buyer_id else None
@@ -62,10 +72,11 @@ async def cmd_gift(message: Message, command: CommandObject):
         await message.answer("У этой покупки нет разделов курса — нечего дарить.")
         return
     gift = await db.get_open_gift_for_purchase(purchase["id"])
-    if not gift:
-        token = secrets.token_urlsafe(9)
-        await db.create_course_gift(token, purchase["id"], buyer_id, sections)
-        gift = {"token": token}
+    if gift:   # ссылка уже есть — та же, вид подарка меняем на указанный сейчас
+        await db.set_gift_recipient(gift["token"], recipient)
+    else:
+        gift = {"token": secrets.token_urlsafe(9)}
+        await db.create_course_gift(gift["token"], purchase["id"], buyer_id, sections, recipient)
     # Придерживаем доступ покупателя к разделам этой покупки
     await db.revoke_course_access(buyer_id, sections)
     link = await gift_link(gift["token"])
@@ -75,8 +86,10 @@ async def cmd_gift(message: Message, command: CommandObject):
         f"🎁 <b>Подарок готов</b>\n{escape(purchase['title'])} ({names}) — покупка "
         f"{_who(buyer, buyer_id)}, {purchase['amount']} ₽. Доступ покупателя придержан.\n\n"
         f"Ссылка для получателя (одноразовая):\n{link}\n\n"
-        "Покупатель пересылает её получателю в нужный день. Кто первым откроет ссылку "
-        "и даст согласие — тому и откроется курс.",
+        "Покупатель пересылает её получателю в нужный день. "
+        + (f"Курс откроется только @{escape(recipient)} — у других ссылка не сработает."
+           if recipient else
+           "Подарок открытый: кто первым откроет ссылку и даст согласие — тому и откроется курс."),
         parse_mode="HTML", disable_web_page_preview=True)
 
 
@@ -90,6 +103,12 @@ async def claim(message: Message, user_id: int, token: str) -> None:
     if gift["claimed_by"] and gift["claimed_by"] != user_id:
         await message.answer("Этот подарок уже получен. Если это ошибка — напиши в /help.")
         return
+    if not gift["claimed_by"] and gift.get("recipient"):
+        username = ((await db.get_user(user_id)) or {}).get("username") or ""
+        if username.lower() != gift["recipient"]:
+            await message.answer("🎁 Этот подарок предназначен другому человеку. Если он для тебя — "
+                                 "попроси дарителя написать нам в /help, поправим.")
+            return
     if not gift["claimed_by"]:
         if not await db.claim_course_gift(token, user_id):
             await message.answer("Этот подарок уже получен. Если это ошибка — напиши в /help.")

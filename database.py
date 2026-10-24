@@ -461,9 +461,16 @@ async def init_db(existing_cdek_contract: str | None = None):
                 sections    TEXT NOT NULL,
                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 claimed_by  INTEGER,
-                claimed_at  TIMESTAMP
+                claimed_at  TIMESTAMP,
+                recipient   TEXT
             )
         """)
+        # recipient — username получателя (без @, в нижнем регистре): подарок
+        # с ником открывается только ему; NULL — открытый, кто первым откроет
+        try:
+            await db.execute("ALTER TABLE course_gifts ADD COLUMN recipient TEXT")
+        except Exception:
+            pass
         # Очередь на личный разбор — первые N покупателей пакета. Место
         # выдаётся одним INSERT … SELECT MAX+1, уникальность position не даст
         # двум одновременным оплатам получить одно и то же место.
@@ -5239,10 +5246,19 @@ async def purchase_sections(purchase_id: int) -> list[str]:
             return [r[0] for r in await cur.fetchall()]
 
 
-async def create_course_gift(token: str, purchase_id: int, buyer_id: int, sections: list[str]):
+async def create_course_gift(token: str, purchase_id: int, buyer_id: int, sections: list[str],
+                             recipient: str | None = None):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("INSERT INTO course_gifts (token, purchase_id, buyer_id, sections) "
-                         "VALUES (?, ?, ?, ?)", (token, purchase_id, buyer_id, ",".join(sections)))
+        await db.execute("INSERT INTO course_gifts (token, purchase_id, buyer_id, sections, recipient) "
+                         "VALUES (?, ?, ?, ?, ?)",
+                         (token, purchase_id, buyer_id, ",".join(sections), recipient))
+        await db.commit()
+
+
+async def set_gift_recipient(token: str, recipient: str | None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE course_gifts SET recipient = ? WHERE token = ? AND claimed_by IS NULL",
+                         (recipient, token))
         await db.commit()
 
 
