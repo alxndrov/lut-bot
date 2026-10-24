@@ -17,27 +17,54 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
-def policy_keyboard() -> InlineKeyboardMarkup:
-    """Одна кнопка — сами документы даны ссылками в тексте."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Принимаю", callback_data="policy:accept")]
-    ])
+OFFER_BOX = "Принимаю оферту"
+CONSENT_BOX = "Даю согласие на обработку персональных данных"
+ON, OFF = "✅", "⬜️"
+
+
+def policy_keyboard(offer_on: bool = False, consent_on: bool = False) -> InlineKeyboardMarkup:
+    """Две отдельные галочки: оферта и согласие на обработку ПДн. Согласие по
+    ч. 1 ст. 9 152-ФЗ (с 01.09.2025) оформляется отдельно от других документов,
+    поэтому одной кнопкой «принимаю всё» его давать нельзя."""
+    rows = []
+    if config.OFFER_URL:
+        rows.append([InlineKeyboardButton(text=f"{ON if offer_on else OFF} {OFFER_BOX}",
+                                          callback_data="policy:t:offer")])
+    rows.append([InlineKeyboardButton(text=f"{ON if consent_on else OFF} {CONSENT_BOX}",
+                                      callback_data="policy:t:consent")])
+    rows.append([InlineKeyboardButton(text="Дальше →", callback_data="policy:accept")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _boxes(markup: InlineKeyboardMarkup | None) -> dict | None:
+    """Какие галочки отмечены — читаем из кнопок самого сообщения.
+    None — старое сообщение без галочек (одна кнопка «Принимаю»)."""
+    state = {}
+    for row in (markup.inline_keyboard if markup else []):
+        for b in row:
+            if b.callback_data in ("policy:t:offer", "policy:t:consent"):
+                state[b.callback_data.split(":")[2]] = b.text.startswith(ON)
+    return state or None
 
 
 async def ask_policy(message: Message, renewed: bool = False):
     """Первый экран для нового пользователя: без согласия дальше не пускаем.
     renewed — человек давал согласие прежнему оператору: просим новое."""
-    policy = (f'<a href="{config.PRIVACY_POLICY_URL}">'
-              "согласие на обработку персональных данных</a>")
-    offer = (f' и <a href="{config.OFFER_URL}">оферту</a>'
-             if config.OFFER_URL else "")
+    items = []
+    if config.OFFER_URL:
+        items.append(f'• <a href="{config.OFFER_URL}">публичная оферта</a>')
+    items.append(f'• <a href="{config.CONSENT_URL}">согласие на обработку персональных данных</a>')
     if renewed:
         text = ("Мы обновили документы: теперь у магазина два продавца и оператора "
-                "персональных данных (указаны ниже). Чтобы продолжить, пожалуйста, "
-                f"прими новое {policy}{offer} 🙏")
+                "персональных данных (указаны ниже).")
     else:
-        text = ("Привет!\n\n"
-                f"Прежде чем я отправлю тебе всю информацию, пожалуйста, прими {policy}{offer}.")
+        text = ("Привет! Это бот MALIMABI: LUT для видео, онлайн-курс по съёмке и монтажу "
+                "и рукоятки для микрофонов.")
+    text += ("\n\nЧуть-чуть формальностей, без них никак. Отметь, пожалуйста, "
+             + ("оба пункта" if len(items) > 1 else "пункт") + ":\n" + "\n".join(items))
+    if config.PRIVACY_POLICY_URL != config.CONSENT_URL:
+        text += (f'\n\nКак мы обрабатываем и защищаем данные — в '
+                 f'<a href="{config.PRIVACY_POLICY_URL}">политике обработки персональных данных</a>.')
     text += ("\n\n<i>Продавцы: самозанятые " + MISHA["short"] + f" (ИНН {MISHA['inn']}) — "
              "цифровые товары и курс, " + DANYA["short"] + f" (ИНН {DANYA['inn']}) — рукоятки "
              f"для микрофонов. Связь: {CONTACT}</i>")
@@ -52,7 +79,7 @@ class PolicyGate(BaseMiddleware):
     настройкой db.POLICY_RECONSENT_SETTING (дата, с которой согласие новое)."""
 
     async def __call__(self, handler, event: CallbackQuery, data):
-        if (config.POLICY_REQUIRED and event.data != "policy:accept"
+        if (config.POLICY_REQUIRED and not (event.data or "").startswith("policy:")
                 and event.from_user.id not in ADMIN_IDS
                 and await db.policy_status(event.from_user.id) == "old"):
             await event.answer()
@@ -96,8 +123,31 @@ async def _start_funnel(user_id: int, payload: str | None):
     logger.info(f"funnel auto-start: user {user_id} → funnel {funnel['id']} source={source}")
 
 
+@router.callback_query(F.data.startswith("policy:t:"))
+async def cb_policy_toggle(callback: CallbackQuery):
+    state = _boxes(callback.message.reply_markup) or {}
+    which = callback.data.split(":")[2]
+    state[which] = not state.get(which, False)
+    await callback.answer()
+    try:
+        await callback.message.edit_reply_markup(reply_markup=policy_keyboard(
+            offer_on=state.get("offer", False), consent_on=state.get("consent", False)))
+    except Exception:
+        pass
+
+
 @router.callback_query(F.data == "policy:accept")
 async def cb_policy_accept(callback: CallbackQuery):
+    state = _boxes(callback.message.reply_markup)
+    if state is None:   # старый экран с одной кнопкой — показываем новый, с галочками
+        await callback.answer()
+        await ask_policy(callback.message, renewed=await db.policy_status(callback.from_user.id) == "old")
+        return
+    if not all(state.values()):
+        await callback.answer("Отметь, пожалуйста, "
+                              + ("оба пункта" if len(state) > 1 else "пункт") + " 🙏",
+                              show_alert=True)
+        return
     payload = await db.accept_policy(callback.from_user.id)
     await callback.answer("Спасибо!")
     try:

@@ -43,6 +43,9 @@ def info_keyboard() -> InlineKeyboardMarkup:
     if config.PRIVACY_POLICY_URL:
         rows.append([InlineKeyboardButton(text="🔒 Политика обработки данных",
                                           url=config.PRIVACY_POLICY_URL)])
+    if config.CONSENT_URL and config.CONSENT_URL != config.PRIVACY_POLICY_URL:
+        rows.append([InlineKeyboardButton(text="✍️ Согласие на обработку данных",
+                                          url=config.CONSENT_URL)])
     rows.append([InlineKeyboardButton(text="◀️ К каталогу", callback_data="catalog")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

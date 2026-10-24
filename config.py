@@ -146,6 +146,9 @@ NEW_SPLIT_FROM: str = os.getenv("NEW_SPLIT_FROM", "2026-09-02")      # дата 
 # согласие не спрашивается — бот работает как раньше.
 PRIVACY_POLICY_URL: str = os.getenv("PRIVACY_POLICY_URL", "")
 OFFER_URL: str = os.getenv("OFFER_URL", "")
+# Согласие на обработку ПДн — отдельный документ (ч. 1 ст. 9 152-ФЗ с 01.09.2025);
+# пока его ссылки нет, ведём на политику (в старой редакции согласие было внутри)
+CONSENT_URL: str = os.getenv("CONSENT_URL", "") or PRIVACY_POLICY_URL
 POLICY_REQUIRED: bool = bool(PRIVACY_POLICY_URL)
 
 # Google Таблица (финансовый лист). Пока не заданы — выгрузка выключена.
