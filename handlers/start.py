@@ -159,6 +159,10 @@ async def cb_policy_accept(callback: CallbackQuery):
         from handlers.course import send_course
         await send_course(callback.message, callback.from_user.id)
         return
+    if payload and payload.startswith("gift_"):
+        from handlers import course_gift
+        await course_gift.claim(callback.message, callback.from_user.id, payload[5:])
+        return
     await _start_funnel(callback.from_user.id, payload)
     await show_catalog(callback.message, user_id=callback.from_user.id)
 
@@ -206,6 +210,11 @@ async def cmd_start(message: Message):
     if payload == "course":
         from handlers.course import send_course
         await send_course(message, message.from_user.id)
+        return
+
+    if payload and payload.startswith("gift_"):   # курс в подарок — handlers/course_gift.py
+        from handlers import course_gift
+        await course_gift.claim(message, message.from_user.id, payload[5:])
         return
 
     if funnel_to_start:

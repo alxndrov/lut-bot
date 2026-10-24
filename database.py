@@ -450,6 +450,20 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (user_id, section)
             )
         """)
+        # Курс в подарок: покупатель отдаёт доступ по ссылке t.me/<бот>?start=gift_<token>
+        # (handlers/course_gift.py). Доступ покупателя придержан, получатель
+        # открывает ссылку — и разделы этой покупки открываются ему.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_gifts (
+                token       TEXT PRIMARY KEY,
+                purchase_id INTEGER NOT NULL,
+                buyer_id    INTEGER NOT NULL,
+                sections    TEXT NOT NULL,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                claimed_by  INTEGER,
+                claimed_at  TIMESTAMP
+            )
+        """)
         # Очередь на личный разбор — первые N покупателей пакета. Место
         # выдаётся одним INSERT … SELECT MAX+1, уникальность position не даст
         # двум одновременным оплатам получить одно и то же место.
@@ -5201,3 +5215,58 @@ async def forget_user(user_id: int) -> None:
                          "AND status = 'issued'", (user_id,))
         await db.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
         await db.commit()
+
+
+# ── Курс в подарок ─────────────────────────────────────────────────────────────
+
+async def last_course_purchase(user_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT pu.*, o.title FROM purchases pu
+               JOIN course_options o ON o.id = pu.course_option_id
+               WHERE pu.user_id = ? ORDER BY pu.id DESC LIMIT 1""", (user_id,)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def purchase_sections(purchase_id: int) -> list[str]:
+    """Разделы, открытые этой покупкой (в том числе уже придержанные)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT section FROM course_access WHERE purchase_id = ? "
+                              "AND test = 0 ORDER BY section", (purchase_id,)) as cur:
+            return [r[0] for r in await cur.fetchall()]
+
+
+async def create_course_gift(token: str, purchase_id: int, buyer_id: int, sections: list[str]):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO course_gifts (token, purchase_id, buyer_id, sections) "
+                         "VALUES (?, ?, ?, ?)", (token, purchase_id, buyer_id, ",".join(sections)))
+        await db.commit()
+
+
+async def get_course_gift(token: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM course_gifts WHERE token = ?", (token,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def get_open_gift_for_purchase(purchase_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM course_gifts WHERE purchase_id = ? AND claimed_by IS NULL "
+                              "ORDER BY created_at DESC LIMIT 1", (purchase_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def claim_course_gift(token: str, user_id: int) -> bool:
+    """Отдаёт подарок ровно одному человеку."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("UPDATE course_gifts SET claimed_by = ?, claimed_at = CURRENT_TIMESTAMP "
+                               "WHERE token = ? AND claimed_by IS NULL", (user_id, token))
+        await db.commit()
+        return cur.rowcount > 0
