@@ -741,8 +741,8 @@ def course_values(buyers, options, review_limit):
     head = [
         ['КУРС SHOT ON IPHONE + CUT BY MALIMABI'],
         ['Покупок', len(buyers)],
-        ['Выручка', money(sum(float(b['amount']) for b in buyers)),
-         'Уже на листе операций как «Цифровой» (делится как цифровые товары)'],
+        # C3 без пояснения — Даня его убирает (24.10.2026)
+        ['Выручка', money(sum(float(b['amount']) for b in buyers))],
     ]
     for o in options:
         mine = [b for b in buyers if b['slug'] == o['slug']]
