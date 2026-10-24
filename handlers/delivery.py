@@ -15,6 +15,7 @@ from urllib.parse import quote
 import config
 from services import paylinks
 import database as db
+from services.sellers import seller_line
 from services.prodamus import build_payment_url
 from services.geocode import geocode
 from services.cdek_accounts import CDEK_CLIENT
@@ -667,6 +668,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
     )
 
     await state.clear()
+    text += "\n\n" + seller_line("physical")
     if config.PAY_BASE_URL:
         text += ("\n\n🌍 Карта зарубежного банка — на странице оплаты выберите оплату картой "
                  "и введите её данные.")

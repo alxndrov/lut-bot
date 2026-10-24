@@ -10,7 +10,7 @@ import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
-from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews
+from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info
 from handlers import course, course_admin, course_orders, course_invoice, npd_admin, friend_order
 from handlers import pay_router, payments_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
@@ -50,6 +50,7 @@ async def main():
     dp.include_router(course_invoice.router)  # счёт за курс — только админам
     dp.include_router(catalog.router)
     dp.include_router(shop_reviews.router)  # «Отзывы покупателей» в каталоге
+    dp.include_router(sellers_info.router)  # «ℹ️ Продавцы и условия», /info
     dp.include_router(brief_handler.router)
     dp.include_router(delivery.router)      # before payment!
     dp.include_router(waitlist_handler.router)

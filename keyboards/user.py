@@ -17,6 +17,8 @@ def catalog_keyboard(products: list[dict], is_admin: bool = False,
     if reviews:   # опубликованные админом отзывы — см. handlers/shop_reviews.py
         buttons.append([InlineKeyboardButton(text=f"⭐️ Отзывы покупателей ({reviews})",
                                              callback_data="shoprev:0")])
+    # Продавцы, контакты и условия — их проверяет PayAnyWay (handlers/sellers_info.py)
+    buttons.append([InlineKeyboardButton(text="ℹ️ Продавцы и условия", callback_data="info:sellers")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

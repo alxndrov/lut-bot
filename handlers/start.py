@@ -11,6 +11,7 @@ from config import ADMIN_IDS
 from keyboards.user import catalog_keyboard, back_to_catalog_keyboard
 from keyboards.admin import admin_menu_keyboard
 import database as db
+from services.sellers import CONTACT, DANYA, MISHA
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -37,6 +38,9 @@ async def ask_policy(message: Message, renewed: bool = False):
     else:
         text = ("Привет!\n\n"
                 f"Прежде чем я отправлю тебе всю информацию, пожалуйста, прими {policy}{offer}.")
+    text += ("\n\n<i>Продавцы: самозанятые " + MISHA["short"] + f" (ИНН {MISHA['inn']}) — "
+             "цифровые товары и курс, " + DANYA["short"] + f" (ИНН {DANYA['inn']}) — рукоятки "
+             f"для микрофонов. Связь: {CONTACT}</i>")
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True,
                          reply_markup=policy_keyboard())
 

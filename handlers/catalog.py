@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery
 import config
 from keyboards.user import catalog_keyboard, product_keyboard
 import database as db
+from services.sellers import seller_line
 from handlers.start import show_catalog
 from handlers.brief_handler import start_order_flow
 
@@ -106,6 +107,7 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
             file_status = "📥 После оплаты вы получите: " + ", ".join(parts)
 
     label_line = f"{category_label}\n" if category_label else ""
+    seller = "" if category == "waitlist" else "\n\n" + seller_line(category)
 
     # Счётчик для инфобиз (если включён)
     counter_line = ""
@@ -124,7 +126,7 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
         f"💰 Цена: <b>{effective_price} ₽</b>\n"
         f"{label_line}"
         f"{file_status}"
-    ).rstrip()
+    ).rstrip() + seller
 
     kb = product_keyboard(product, user_id=callback.from_user.id,
                           effective_price=effective_price, is_admin=admin)

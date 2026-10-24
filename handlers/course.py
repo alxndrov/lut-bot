@@ -21,6 +21,7 @@ from aiohttp import web
 
 import config
 import database as db
+from services.sellers import seller_line
 from services import course as svc
 from services.prodamus import build_payment_url
 
@@ -132,8 +133,9 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
         lines += ["", f"У тебя открыто: <b>{names}</b>. {when}"]
         if bundle and len(owned) == 1:
             lines.append("Второй раздел — по цене пакета минус то, что ты уже заплатил.")
+    lines += ["", seller_line("course")]
     if config.COURSE_OFFER_URL:
-        lines += ["", f'Оплачивая, ты принимаешь <a href="{config.COURSE_OFFER_URL}">оферту</a>.']
+        lines.append(f'Оплачивая, ты принимаешь <a href="{config.COURSE_OFFER_URL}">оферту</a>.')
     if admin and not product.get("active"):
         lines += ["", "<i>🔐 Курс скрыт — экран видят только админы.</i>"]
 

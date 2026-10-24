@@ -19,6 +19,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 import config
 import database as db
+from services.sellers import seller_line
 from services import course as svc
 from services.prodamus import build_payment_url
 
@@ -220,8 +221,9 @@ async def cb_send(callback: CallbackQuery):
     uid, oid, price = int(uid), int(oid), int(price)
     option = await db.get_course_option(oid)
     url = payment_url(option, uid, price)
-    offer = (f'\n\nОплачивая, ты принимаешь <a href="{config.COURSE_OFFER_URL}">оферту</a>.'
-             if config.COURSE_OFFER_URL else "")
+    offer = "\n\n" + seller_line("course") + (
+        f'\nОплачивая, ты принимаешь <a href="{config.COURSE_OFFER_URL}">оферту</a>.'
+        if config.COURSE_OFFER_URL else "")
     try:
         await callback.bot.send_message(
             uid, f"🧾 <b>Счёт за курс</b>\n{escape(option['title'])} — <b>{svc.rub(price)}</b>\n\n"
