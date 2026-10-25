@@ -59,15 +59,15 @@ async def ask_policy(message: Message, renewed: bool = False):
                 "персональных данных (указаны ниже).")
     else:
         text = ("Привет! Это бот MALIMABI: LUT для видео, онлайн-курс по съёмке и монтажу "
-                "и рукоятки для микрофонов.")
+                "и изделия 3D-печати для съёмки: рукоятки для микрофонов, кейсы.")
     text += ("\n\nЧуть-чуть формальностей, без них никак. Отметь, пожалуйста, "
              + ("оба пункта" if len(items) > 1 else "пункт") + ":\n" + "\n".join(items))
     if config.PRIVACY_POLICY_URL != config.CONSENT_URL:
         text += (f'\n\nКак мы обрабатываем и защищаем данные — в '
                  f'<a href="{config.PRIVACY_POLICY_URL}">политике обработки персональных данных</a>.')
     text += ("\n\n<i>Продавцы: самозанятые " + MISHA["short"] + f" (ИНН {MISHA['inn']}) — "
-             "цифровые товары и курс, " + DANYA["short"] + f" (ИНН {DANYA['inn']}) — рукоятки "
-             f"для микрофонов. Связь: {CONTACT}</i>")
+             "цифровые товары и курс, " + DANYA["short"] + f" (ИНН {DANYA['inn']}) — изделия "
+             f"3D-печати. Связь: {CONTACT}</i>")
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True,
                          reply_markup=policy_keyboard())
 
