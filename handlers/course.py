@@ -610,7 +610,12 @@ async def api_call(request: web.Request) -> web.Response:
 
 
 async def app_index(request: web.Request) -> web.Response:
-    return web.FileResponse(WEBAPP_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    # Страницу — всегда целиком и без кэша. FileResponse отвечал Telegram
+    # Desktop на Range-запрос куском (206) новой версии поверх закэшированной
+    # старой — получалась склейка, и приложение висло на «Загружаем…»
+    return web.Response(body=(WEBAPP_DIR / "index.html").read_bytes(),
+                        content_type="text/html", charset="utf-8",
+                        headers={"Cache-Control": "no-store"})
 
 
 def setup_web(app: web.Application, bot_username: str = ""):
