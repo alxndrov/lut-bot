@@ -446,6 +446,10 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
     is_open = svc.is_open() or (admin and preview_open)
     bundle = svc.bundle_option(options)
     paid = await db.get_user_course_paid(user_id)
+    # Ролики уроков (Kinescope с DRM) — ссылка с токеном только на открытые уроки
+    from services import kinescope
+    videos = await kinescope.videos()
+    watched = await db.get_lesson_views(user_id)
     sections = []
     for slug, title in svc.SECTIONS.items():
         program = svc.PROGRAM[slug]
@@ -459,7 +463,10 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             "price": svc.price_for_user(option, paid, bundle) if option else None,
             "price_full": (svc.price_for(option) if paid else option["price_full"])
                           if option else None,
-            "lessons": [{"n": i + 1, "title": t, "open": has and is_open}
+            "lessons": [{"n": i + 1, "title": t, "open": has and is_open,
+                         "watched": i + 1 in watched.get(slug, []),
+                         "video": kinescope.embed_url(videos[slug][str(i + 1)], user_id)
+                                  if has and is_open and str(i + 1) in videos.get(slug, {}) else ""}
                         for i, t in enumerate(program["lessons"])],
         })
     vip = next((o for o in options if svc.is_call_option(o)), None)

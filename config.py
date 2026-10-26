@@ -149,6 +149,10 @@ OFFER_URL: str = os.getenv("OFFER_URL", "")
 # Согласие на обработку ПДн — отдельный документ (ч. 1 ст. 9 152-ФЗ с 01.09.2025);
 # пока его ссылки нет, ведём на политику (в старой редакции согласие было внутри)
 CONSENT_URL: str = os.getenv("CONSENT_URL", "") or PRIVACY_POLICY_URL
+
+# Kinescope — видео уроков с DRM (services/kinescope.py). API-токен (UUID)
+# из «Настройки → API-токены» кладёт в .env Даня
+KINESCOPE_API_TOKEN: str = os.getenv("KINESCOPE_API_TOKEN", "")
 POLICY_REQUIRED: bool = bool(PRIVACY_POLICY_URL)
 
 # Google Таблица (финансовый лист). Пока не заданы — выгрузка выключена.

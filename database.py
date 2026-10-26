@@ -450,6 +450,20 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (user_id, section)
             )
         """)
+        # Просмотры уроков: Kinescope спрашивает наш бэкенд при старте ролика
+        # (handlers/kinescope_drm.py). По ним считается возврат за
+        # непросмотренные уроки (оферта, п. 7.10.2)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_lesson_views (
+                user_id  INTEGER NOT NULL,
+                section  TEXT NOT NULL,
+                lesson   INTEGER NOT NULL,
+                first_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                licenses INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (user_id, section, lesson)
+            )
+        """)
         # Курс в подарок: покупатель отдаёт доступ по ссылке t.me/<бот>?start=gift_<token>
         # (handlers/course_gift.py). Доступ покупателя придержан, получатель
         # открывает ссылку — и разделы этой покупки открываются ему.
@@ -5286,3 +5300,26 @@ async def claim_course_gift(token: str, user_id: int) -> bool:
                                "WHERE token = ? AND claimed_by IS NULL", (user_id, token))
         await db.commit()
         return cur.rowcount > 0
+
+
+# ── Просмотры уроков (Kinescope) ───────────────────────────────────────────────
+
+async def record_lesson_view(user_id: int, section: str, lesson: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO course_lesson_views (user_id, section, lesson) VALUES (?, ?, ?)
+               ON CONFLICT(user_id, section, lesson) DO UPDATE
+                   SET last_at = CURRENT_TIMESTAMP, licenses = licenses + 1""",
+            (user_id, section, lesson))
+        await db.commit()
+
+
+async def get_lesson_views(user_id: int) -> dict[str, list[int]]:
+    """{раздел: [номера просмотренных уроков]}."""
+    out: dict[str, list[int]] = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT section, lesson FROM course_lesson_views WHERE user_id = ? "
+                              "ORDER BY section, lesson", (user_id,)) as cur:
+            for section, lesson in await cur.fetchall():
+                out.setdefault(section, []).append(lesson)
+    return out
