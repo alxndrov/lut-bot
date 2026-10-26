@@ -4,9 +4,31 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Курс MALIMABI</title>
+<script>
+  // Отчёт о сбоях загрузки: ошибки JS и «не загрузились за 8 с» уходят в журнал бота
+  // (POST /api/course/log), чтобы видеть, на чём застревает приложение у пользователя
+  (function () {
+    var t0 = Date.now(), sent = 0;
+    window.__appLog = function (kind, msg) {
+      if (sent++ > 5) return;
+      try {
+        var body = JSON.stringify({ kind: kind, msg: String(msg).slice(0, 500), t: Date.now() - t0,
+                                    ua: navigator.userAgent, ready: document.readyState });
+        navigator.sendBeacon ? navigator.sendBeacon('/api/course/log', body)
+                             : fetch('/api/course/log', { method: 'POST', body: body, keepalive: true });
+      } catch (e) {}
+    };
+    window.addEventListener('error', function (e) {
+      __appLog('error', (e.message || 'resource') + ' @ ' + (e.filename || (e.target && (e.target.src || e.target.href)) || '') + ':' + (e.lineno || ''));
+    }, true);
+    window.addEventListener('unhandledrejection', function (e) { __appLog('promise', e.reason && (e.reason.stack || e.reason)); });
+    setTimeout(function () { if (!window.__appLoaded) __appLog('timeout', 'stage=' + (window.__appStage || 'head')); }, 8000);
+  })();
+</script>
 <!-- Скрипт Telegram Mini Apps — копия с telegram.org (26.10.2026) у нас на сервере: у части
      пользователей telegram.org грузится долго или не грузится, и страница оставалась белой -->
 <script src="/app/static/telegram-web-app.js?v=20261026"></script>
+<script>window.__appStage = "tg-script-loaded";</script>
 <link rel="stylesheet" href="/app/static/fonts/fonts.css">
 <style>
   :root {
@@ -588,7 +610,9 @@
   }
 
   // ── старт ──
+  window.__appStage = 'boot initData=' + !!(tg && tg.initData);
   if (!demo && (!tg || !tg.initData)) {
+    window.__appLoaded = true;
     root.innerHTML = '<div class="muted">Открой приложение из бота MALIMABI в Telegram.</div>';
     return;
   }
@@ -598,7 +622,8 @@
     try { tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch (e) {}
     tg.BackButton.onClick(back);
   }
-  load().catch(function () {
+  window.__appStage = 'api-me';
+  load().then(function () { window.__appLoaded = true; }, function (e) { __appLog('load', e && (e.status + ' ' + e.message)); throw e; }).catch(function () {
     root.innerHTML = '<div class="muted">Не получилось загрузить. Закрой приложение и открой снова.</div>';
   });
 })();

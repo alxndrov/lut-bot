@@ -609,6 +609,16 @@ async def api_call(request: web.Request) -> web.Response:
                                               bool(body.get("preview_open"))))
 
 
+async def api_log(request: web.Request) -> web.Response:
+    """Сбой загрузки мини-приложения у пользователя (см. __appLog в index.html)."""
+    try:
+        raw = (await request.read())[:2000].decode("utf-8", "replace")
+    except Exception:
+        raw = ""
+    logger.warning(f"miniapp: {raw}")
+    return web.Response(status=204)
+
+
 async def app_index(request: web.Request) -> web.Response:
     # Страницу — всегда целиком и без кэша. FileResponse отвечал Telegram
     # Desktop на Range-запрос куском (206) новой версии поверх закэшированной
@@ -625,6 +635,7 @@ def setup_web(app: web.Application, bot_username: str = ""):
     if (WEBAPP_DIR / "static").is_dir():
         app.router.add_static("/app/static/", WEBAPP_DIR / "static", show_index=False)
     app.router.add_post("/api/course/me", api_me)
+    app.router.add_post("/api/course/log", api_log)
     app.router.add_post("/api/course/test", api_test)
     app.router.add_post("/api/course/review", api_review)
     app.router.add_post("/api/course/call", api_call)
