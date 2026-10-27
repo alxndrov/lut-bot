@@ -27,6 +27,7 @@ _NPD_RATE = config.NPD_PERCENT / 100
 class CashStates(StatesGroup):
     waiting_payout = State()
     waiting_npd = State()
+    waiting_misha_tax = State()
 
 
 def _dative(name: str) -> str:
@@ -381,8 +382,9 @@ def _back_to_finance_keyboard() -> InlineKeyboardMarkup:
 
 def _settle_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Мы в расчёте", callback_data="fin_settle")],
-        [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.OWNER_NAME)}", callback_data="payout:owner")],
+        [InlineKeyboardButton(text="✅ Перевели — зафиксировать расчёт", callback_data="fin_settle")],
+        [InlineKeyboardButton(text="🧾 Миша заплатил свой налог", callback_data="misha_tax")],
+        [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.OWNER_NAME)} (со счёта Дани)", callback_data="payout:owner")],
         [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.PARTNER_NAME)}", callback_data="payout:partner")],
         [InlineKeyboardButton(text="📋 История взаиморасчётов", callback_data="settle_log")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="fin_show")],
@@ -429,8 +431,12 @@ async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
         return
     await state.clear()
     await callback.answer()
-    s, last, start, end, now = await _settle_split()
-    text, *_ = await _debt_block(s, last, start, end, now)
+    from services import settle
+    try:
+        text = settle.text(await settle.state())
+    except Exception as e:
+        logger.exception("settle: расчёт не посчитался")
+        text = f"❌ Не удалось посчитать взаиморасчёт: {e}"
     await callback.message.edit_text(
         text,
         parse_mode="HTML",
@@ -440,62 +446,71 @@ async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data == "fin_settle")
 async def cb_fin_settle(callback: CallbackQuery):
+    """Сначала показываем, что будет записано, — фиксирует «fin_settle_go»."""
     if not await _admin_only(callback):
         return
     await callback.answer()
-    await callback.message.edit_text("⏳ Фиксирую расчёт…")
+    from services import settle
+    st = await settle.state()
+    await callback.message.answer(
+        settle.text(st) + "\n\n<b>Зафиксировать?</b> Запишу перевод между вами (если он есть) "
+        "и выплаты обоим их долей из их же денег.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Да, перевели", callback_data="fin_settle_go")],
+            [InlineKeyboardButton(text="Не сейчас", callback_data="fin_settle_menu")],
+        ]))
 
-    s, _last, _start, _end, now_utc = await _settle_split()
-    cash = await _free_cash()
-    if s is None or cash is None:
-        await callback.message.edit_text(
-            "❌ Не удалось получить данные.", reply_markup=_settle_menu_keyboard()
-        )
+
+@router.callback_query(F.data == "fin_settle_go")
+async def cb_fin_settle_go(callback: CallbackQuery):
+    """Взаиморасчёт как в Splitwise — services/settle.py."""
+    if not await _admin_only(callback):
         return
-    pay = dict(zip(("owner", "partner"), _payable(s, cash["free"])))
-
-    # «Мы в расчёте» = обоим перевели то, что можно выплатить сейчас: их
-    # остаток, но не больше свободных денег (отложенное на СДЭК и НПД и ещё
-    # не пришедшее от Prodamus не трогаем). Записываем эти переводы
-    # выплатами, а недоплаченное переносим долгом в следующий период.
-    # Время выплаты — на секунду раньше расчёта, чтобы она попала в
-    # закрываемый период, а не в следующий.
+    await callback.answer("Фиксирую…")
+    from services import settle
     u = callback.from_user
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
-    paid_at = (now_utc - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
-    now_msk = datetime.now(MSK)
-    comment = f"Мы в расчёте {now_msk.strftime('%d.%m.%Y')}"
-    from services.gsheets import request_expense_append
-    share_lines, overpaid, carry = [], [], {"owner": 0.0, "partner": 0.0}
-    for who, recipient in (("owner", config.OWNER_NAME), ("partner", config.PARTNER_NAME)):
-        left, reimb, amount = s[f"{who}_left"], s.get(f"reimb_{who}", 0), pay[who]
-        if left <= -0.01:
-            overpaid.append(f"⚠️ {recipient} за период получил на <b>{-left:,.2f} ₽</b> больше доли")
-            continue
-        if left < 0.01:
-            share_lines.append(f"👤 {recipient}: уже всё выплачено")
-            continue
-        carry[who] = round(left - amount, 2)
-        if amount >= 0.01:
-            payout_id = await db.add_payout(recipient, amount, comment, u.id, name, paid_at=paid_at)
-            request_expense_append(f"payout-{payout_id}", now_msk.strftime("%d.%m.%Y %H:%M"),
-                                   amount, f"Выплата {recipient}: {comment}")
-            note = f", в т.ч. возмещение личных трат {reimb:,.2f} ₽" if reimb else ""
-            share_lines.append(f"👤 {recipient}: <b>{amount:,.2f} ₽</b> — записал выплату{note}")
-        if carry[who] >= 0.01:
-            share_lines.append(f"    ⏳ ещё {carry[who]:,.2f} ₽ — долг, перейдёт в следующий расчёт")
-
-    await db.add_settlement(gross=s["gross"], fee=s["fee"], net=s["net"], count=s["count"],
-                            carry_owner=carry["owner"], carry_partner=carry["partner"])
-
-    text = (
-        f"✅ <b>Расчёт зафиксирован</b> — {now_msk.strftime('%d.%m.%Y %H:%M')} МСК\n\n"
-        f"Продаж: <b>{s['count']}</b>  |  Принято: <b>{s['gross']:,.2f} ₽</b>\n"
-        f"Чистыми: <b>{s['net']:,.2f} ₽</b>\n\n"
-        + "\n".join(share_lines + overpaid)
-    )
-    await callback.message.edit_text(text, parse_mode="HTML",
+    res = await settle.settle(u.id, name)
+    logger.info(f"settle: расчёт зафиксирован ({u.id}): перевод {res['state']['transfer']}, "
+                f"выплаты {res['paid']}, перенос {res['carry']}")
+    await callback.message.edit_text(settle.settled_text(res), parse_mode="HTML",
                                      reply_markup=_settle_menu_keyboard())
+    from services.gsheets import request_finance_sync
+    request_finance_sync()
+
+
+@router.callback_query(F.data == "misha_tax")
+async def cb_misha_tax(callback: CallbackQuery, state: FSMContext):
+    if not await _admin_only(callback):
+        return
+    from services import settle
+    st = await settle.state()
+    await state.set_state(CashStates.waiting_misha_tax)
+    await callback.answer()
+    await callback.message.edit_text(
+        f"🧾 <b>Сколько налога заплатил Миша?</b>\nК уплате сейчас: {st['tax']['misha']:,.2f} ₽\n\n"
+        "Напишите сумму, можно с комментарием: <code>1586.20 за октябрь</code>",
+        parse_mode="HTML")
+
+
+@router.message(CashStates.waiting_misha_tax)
+async def on_misha_tax(message: Message, state: FSMContext):
+    amount, comment = _parse_amount(message.text or "")
+    if amount is None:
+        await message.answer("Не понял сумму. Напишите числом, например <code>1586.20</code>.",
+                             parse_mode="HTML")
+        return
+    u = message.from_user
+    name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
+    payment_id = await db.add_npd_payment(amount, f"НПД Миши" + (f": {comment}" if comment else ""),
+                                          u.id, name, payer="misha")
+    await state.clear()
+    from services.gsheets import request_finance_sync
+    request_finance_sync()
+    await message.answer(f"✅ Записал: Миша заплатил налог {amount:,.2f} ₽ (npd-{payment_id}).",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                             [InlineKeyboardButton(text="◀️ Взаиморасчёт", callback_data="fin_settle_menu")]]))
 
 
 @router.callback_query(F.data.startswith("npd_del:"))

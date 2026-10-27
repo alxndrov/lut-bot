@@ -117,7 +117,9 @@ LAVA_FEE_PERCENT: float = float(os.getenv("LAVA_FEE_PERCENT", "8"))
 LAVA_ENABLED: bool = bool(LAVA_API_KEY and LAVA_OFFER_COURSE and LAVA_OFFER_LUT)
 
 # Комиссия PayAnyWay по договору — 4% от оплаты (Даня, 23.10.2026)
-PAYANYWAY_FEE_PERCENT: float = float(os.getenv("PAYANYWAY_FEE_PERCENT", "4"))
+# Комиссия PayAnyWay — 4,5%, но не меньше 40 ₽ с платежа (условия на 27.10.2026)
+PAYANYWAY_FEE_PERCENT: float = float(os.getenv("PAYANYWAY_FEE_PERCENT", "4.5"))
+PAYANYWAY_FEE_MIN: float = float(os.getenv("PAYANYWAY_FEE_MIN", "40"))
 # Ссылки на оплату ведут на наш адрес (/pay/…), а он уже отправляет в
 # Prodamus или ЮKassa — так видно переход и работает переключение. Пусто —
 # ссылки по-старому, прямо на Prodamus. По умолчанию — домен мини-приложения.

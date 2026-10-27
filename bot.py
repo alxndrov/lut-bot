@@ -141,6 +141,8 @@ async def main():
         asyncio.create_task(report_loop(admin_bot))
         asyncio.create_task(pending_report_loop(admin_bot))
         asyncio.create_task(refunds.receipt_reminder_loop(admin_bot))
+        from services import settle
+        asyncio.create_task(settle.remind_loop())   # 1-го и 16-го — пора рассчитаться
         # Догоняем кнопки у заказов, созданных до появления новых статусов
         asyncio.create_task(order_actions.refresh_open_orders(admin_bot))
         # Команда видна в меню бота

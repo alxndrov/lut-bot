@@ -121,14 +121,21 @@ async def claim(message: Message, user_id: int, token: str) -> None:
         recipient = await db.get_user(user_id)
         buyer = await db.get_user(gift["buyer_id"])
         from handlers.prodamus_webhook import _send_notify
-        await _send_notify(None, f"🎁 Подарок получен: курс открыт {escape(_who(recipient, user_id))} "
-                                 + (f"(подарил(а) {escape(_who(buyer, gift['buyer_id']))})."
-                                    if gift["buyer_id"] else "(продажа вне бота, /sale)."))
+        sale = None if gift["buyer_id"] else await db.get_manual_sale_by_gift(token)
+        if sale:
+            await _send_notify(None, f"🎓 Ручная продажа b2b-{sale['id']}"
+                                     + (f" ({escape(sale['buyer_name'])})" if sale.get("buyer_name") else "")
+                                     + f": ученик открыл курс — {escape(_who(recipient, user_id))}.")
+        else:
+            await _send_notify(None, f"🎁 Подарок получен: курс открыт {escape(_who(recipient, user_id))} "
+                                     f"(подарил(а) {escape(_who(buyer, gift['buyer_id']))}).")
         if gift["buyer_id"] and gift["buyer_id"] != user_id:
             try:
                 await message.bot.send_message(
                     gift["buyer_id"], "🎁 Ваш подарок получен — курс открыт получателю. Спасибо! 🤍")
             except Exception as e:
                 logger.info(f"gift: покупателю {gift['buyer_id']} не написать: {e}")
-    await message.answer("🎁 Тебе подарили курс «Shot on iPhone + Cut by MALIMABI»! Он уже твой 👇")
+    await message.answer("🎁 Тебе подарили курс «Shot on iPhone + Cut by MALIMABI»! Он уже твой 👇"
+                         if gift["buyer_id"] else
+                         "🎓 Доступ к курсу «Shot on iPhone + Cut by MALIMABI» открыт — он уже твой 👇")
     await send_course(message, user_id)

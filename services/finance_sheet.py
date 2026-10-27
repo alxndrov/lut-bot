@@ -113,7 +113,12 @@ async def _build_snapshot(year, now, monthly_split=True):
     for row in rows:
         row['noncash'] = noncash.get(str(row['code']), '')
     months = await tax_account.months()
-    allocate_tax(rows, months)
+    # Налог Миши — по его чекам своей ставкой; помесячные поправки — только Дани
+    misha_tax = await db.misha_tax_codes()
+    for row in rows:
+        if row['kind'] in INCOME and str(row['code']) in misha_tax:
+            row['tax'] = money(float(row['amount']) * misha_tax[str(row['code'])])
+    allocate_tax([r for r in rows if str(r['code']) not in misha_tax], months)
     async with aiosqlite.connect(db.DB_PATH) as conn:
         async with conn.execute("SELECT id, COALESCE(tax_month, strftime('%Y-%m', datetime(paid_at, '+3 hours'))) FROM npd_payments") as cur:
             tax_months = {f'npd-{i}': m for i, m in await cur.fetchall()}
@@ -719,6 +724,7 @@ def publish_refunds(book, props, refunds):
 
 
 COURSE_TAB = 'Курс'
+SETTLE_TAB = 'Взаиморасчёт'   # services/settle.py — бот переписывает целиком
 COURSE_HEADERS = ['Дата оплаты', 'Опция', 'Сумма', 'Покупатель', 'Telegram', 'Telegram ID',
                   'Место на разбор', 'Открытые разделы', 'Платёж Prodamus']
 _SECTION_NAMES = {'shooting': 'Съёмка', 'editing': 'Монтаж'}
@@ -789,6 +795,13 @@ async def sync_finance():
                 await asyncio.to_thread(publish_course, book, props, course)
             except Exception:
                 logger.exception('finance_sheet: лист «Курс» не обновился')
+            try:
+                from services import settle
+                values = settle.sheet_values(await settle.state(), await db.get_partner_transfers())
+                await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, values,
+                                        (0, 7, 11, 14, 20, 22), 1)
+            except Exception:
+                logger.exception('finance_sheet: лист «Взаиморасчёт» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)
             return stats
 

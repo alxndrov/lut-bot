@@ -464,6 +464,23 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (user_id, section, lesson)
             )
         """)
+        # Взаиморасчёт как в Splitwise (services/settle.py): деньги проекта
+        # лежат и у Дани (Альфа: Prodamus, ЮKassa), и у Миши (PayAnyWay,
+        # lava.top, переводы ему). source у выплаты — чьими деньгами
+        # заплачена, payer у налога — кто его заплатил, переводы между нами —
+        # partner_transfers
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS partner_transfers (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                paid_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                from_who   TEXT NOT NULL,      -- danya | misha
+                to_who     TEXT NOT NULL,
+                amount     REAL NOT NULL,
+                comment    TEXT,
+                user_id    INTEGER,
+                user_name  TEXT
+            )
+        """)
         # Строки финансового листа без движения денег по счёту проекта
         # (взаимозачёты) — раньше заводилась вручную при сверке с банком
         await db.execute("CREATE TABLE IF NOT EXISTS cashflow_noncash"
@@ -848,6 +865,13 @@ async def init_db(existing_cdek_contract: str | None = None):
                     await db.execute("DROP TABLE cdek_account")
         except Exception:
             pass
+        # Взаиморасчёт: чьими деньгами выплата и кто заплатил налог (services/settle.py)
+        for sql in ("ALTER TABLE payouts ADD COLUMN source TEXT NOT NULL DEFAULT 'danya'",
+                    "ALTER TABLE npd_payments ADD COLUMN payer TEXT NOT NULL DEFAULT 'danya'"):
+            try:
+                await db.execute(sql)
+            except Exception:
+                pass
         # Отметки печати по каждому исполнителю: в разделённом заказе каждый
         # отмечает свою часть, и заказ считается распечатанным, когда отметились все
         await db.execute("""
@@ -3133,8 +3157,9 @@ def _yk_fee_rate_sql() -> str:
     import config
     # PayAnyWay (paw-) — процентом из настроек: суммы после комиссии он не присылает
     return (f"""(CASE WHEN pu.telegram_payment_id LIKE 'b2b-%' THEN 0
-                     WHEN pu.telegram_payment_id LIKE 'paw-%'
-                     THEN {float(config.PAYANYWAY_FEE_PERCENT) / 100}
+                     WHEN pu.telegram_payment_id LIKE 'paw-%' AND pu.amount > 0
+                     THEN MAX(pu.amount * {float(config.PAYANYWAY_FEE_PERCENT) / 100},
+                              {float(config.PAYANYWAY_FEE_MIN)}) / pu.amount
                      WHEN pu.telegram_payment_id LIKE 'lava-%'
                      THEN {float(config.LAVA_FEE_PERCENT) / 100}
                      WHEN y.income IS NOT NULL AND y.amount > 0
@@ -3615,22 +3640,17 @@ async def get_cdek_account(date_from: str | None = None,
 
 async def add_npd_payment(amount: float, comment: str = "",
                           user_id: int = 0, user_name: str = "",
-                          paid_at: str | None = None) -> int:
+                          paid_at: str | None = None, payer: str = "danya") -> int:
     """paid_at — если платёж закрывает конкретный прошлый месяц (кнопка
-    «месяц оплачен»), иначе пишется CURRENT_TIMESTAMP (реально сегодня)."""
+    «месяц оплачен»), иначе пишется CURRENT_TIMESTAMP (реально сегодня).
+    payer — чей налог (danya | misha): у каждого свой «Мой налог» и свой
+    резерв (services/settle.py)."""
     async with aiosqlite.connect(DB_PATH) as db:
-        if paid_at:
-            cur = await db.execute(
-                "INSERT INTO npd_payments (amount, comment, user_id, user_name, paid_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (float(amount), (comment or "").strip() or None, user_id, user_name, paid_at),
-            )
-        else:
-            cur = await db.execute(
-                "INSERT INTO npd_payments (amount, comment, user_id, user_name) "
-                "VALUES (?, ?, ?, ?)",
-                (float(amount), (comment or "").strip() or None, user_id, user_name),
-            )
+        cur = await db.execute(
+            "INSERT INTO npd_payments (amount, comment, user_id, user_name, paid_at, payer) "
+            "VALUES (?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?)",
+            (float(amount), (comment or "").strip() or None, user_id, user_name, paid_at, payer),
+        )
         await db.commit()
         return cur.lastrowid
 
@@ -3692,14 +3712,15 @@ async def get_npd_payments_summary_by_tax_month(date_from: str, date_to: str) ->
 
 async def add_payout(recipient: str, amount: float, comment: str = "",
                      user_id: int = 0, user_name: str = "",
-                     paid_at: str | None = None) -> int:
-    """paid_at — UTC 'YYYY-MM-DD HH:MM:SS'; по умолчанию текущее время."""
+                     paid_at: str | None = None, source: str = "danya") -> int:
+    """paid_at — UTC 'YYYY-MM-DD HH:MM:SS'; по умолчанию текущее время.
+    source — чьими деньгами проекта заплачено (danya | misha)."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO payouts (recipient, amount, comment, user_id, user_name, paid_at) "
-            "VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))",
+            "INSERT INTO payouts (recipient, amount, comment, user_id, user_name, paid_at, source) "
+            "VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?)",
             (recipient, float(amount), (comment or "").strip() or None, user_id, user_name,
-             paid_at),
+             paid_at, source),
         )
         await db.commit()
         return cur.lastrowid
@@ -3891,13 +3912,16 @@ async def paw_balance(provider: str = "payanyway") -> float:
     import config
     _, prefix, _, fee_attr = WALLETS[provider]
     async with aiosqlite.connect(DB_PATH) as db:
-        got = (await (await db.execute(
-            "SELECT COALESCE(SUM(amount), 0) FROM purchases WHERE telegram_payment_id LIKE ?",
-            (prefix + "%",))).fetchone())[0]
+        # PayAnyWay берёт не меньше минимальной комиссии с платежа
+        minimum = float(getattr(config, "PAYANYWAY_FEE_MIN", 0)) if provider == "payanyway" else 0.0
+        pct = getattr(config, fee_attr) / 100
+        net = (await (await db.execute(
+            "SELECT COALESCE(SUM(amount - MAX(amount * ?, ?)), 0) FROM purchases "
+            "WHERE telegram_payment_id LIKE ?", (pct, minimum, prefix + "%"))).fetchone())[0]
         out = (await (await db.execute(
             "SELECT COALESCE(SUM(amount), 0) FROM paw_withdrawals "
             "WHERE COALESCE(provider, 'payanyway') = ?", (provider,))).fetchone())[0]
-    return float(got) * (1 - getattr(config, fee_attr) / 100) - float(out)
+    return float(net) - float(out)
 
 
 async def get_cdek_payments_for_finance_export() -> list[dict]:
@@ -5363,9 +5387,8 @@ async def add_manual_sale(option: dict, amount: float, buyer_kind: str, buyer_in
                           buyer_name: str | None, wallet: str, receipt: str,
                           created_by: int) -> dict:
     """Записывает продажу курса и покупку b2b-<id> (user_id 0 — ученик получит
-    доступ подарочной ссылкой). Деньги у Миши — ещё и выплата Мише и пометки
-    «без движения денег»: на счёт проекта они не приходили (как взаимозачёт)."""
-    import config
+    доступ ссылкой). wallet — у кого лежат деньги (misha | danya): по нему
+    взаиморасчёт считает, у кого сколько денег проекта (services/settle.py)."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             "INSERT INTO manual_sales (option_id, amount, buyer_kind, buyer_inn, buyer_name, "
@@ -5373,31 +5396,22 @@ async def add_manual_sale(option: dict, amount: float, buyer_kind: str, buyer_in
             (option["id"], float(amount), buyer_kind, buyer_inn, buyer_name, wallet, receipt,
              created_by))
         sale_id = cur.lastrowid
-        code = f"b2b-{sale_id}"
         cur = await db.execute(
             "INSERT INTO purchases (user_id, username, product_id, telegram_payment_id, amount, "
             "course_option_id) VALUES (0, NULL, ?, ?, ?, ?)",
-            (option["product_id"], code, int(round(float(amount))), option["id"]))
-        purchase_id = cur.lastrowid
-        payout_id = None
-        if wallet == "misha":
-            who = buyer_name or "покупателя"
-            cur = await db.execute(
-                "INSERT INTO payouts (recipient, amount, comment, user_id, user_name) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (config.OWNER_NAME, float(amount), f"Оплата {who} ({code}) пришла Мише напрямую",
-                 created_by, "бот"))
-            payout_id = cur.lastrowid
-            reason = f"Оплата переводом напрямую Мише ({code}); на счёт проекта не поступала"
-            await db.execute("INSERT OR REPLACE INTO cashflow_noncash (code, reason) VALUES (?, ?)",
-                             (code, reason))
-            await db.execute("INSERT OR REPLACE INTO cashflow_noncash (code, reason) VALUES (?, ?)",
-                             (f"payout-{payout_id}", f"Взаимозачёт с {code}: деньги у Миши, "
-                                                    "банковского списания нет"))
-        await db.execute("UPDATE manual_sales SET purchase_id = ?, payout_id = ? WHERE id = ?",
-                         (purchase_id, payout_id, sale_id))
+            (option["product_id"], f"b2b-{sale_id}", int(round(float(amount))), option["id"]))
+        await db.execute("UPDATE manual_sales SET purchase_id = ? WHERE id = ?",
+                         (cur.lastrowid, sale_id))
         await db.commit()
     return await get_manual_sale(sale_id)
+
+
+async def get_manual_sale_by_gift(token: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM manual_sales WHERE gift_token = ?", (token,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 async def get_manual_sale(sale_id: int) -> Optional[dict]:
@@ -5413,3 +5427,120 @@ async def update_manual_sale(sale_id: int, **fields):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(f"UPDATE manual_sales SET {cols} WHERE id = ?", (*fields.values(), sale_id))
         await db.commit()
+
+
+# ── Чьи деньги: взаиморасчёт (services/settle.py) ──────────────────────────────
+
+def holder_sql(alias: str = "pu") -> str:
+    """У кого лежат деньги за покупку: PayAnyWay, lava.top и переводы Мише —
+    у Миши (его кабинеты и его «Мой налог»), остальное (Prodamus, ЮKassa,
+    переводы Дане) — у Дани."""
+    return (f"""(CASE WHEN {alias}.telegram_payment_id LIKE 'paw-%'
+                      OR {alias}.telegram_payment_id LIKE 'lava-%'
+                      OR EXISTS (SELECT 1 FROM manual_sales ms
+                                 WHERE 'b2b-' || ms.id = {alias}.telegram_payment_id
+                                   AND ms.wallet = 'misha')
+                 THEN 'misha' ELSE 'danya' END)""")
+
+
+def misha_tax_rate_sql(alias: str = "pu") -> str:
+    """Налог Миши с покупки: 6% — если платило юрлицо или ИП (/sale), иначе 4%."""
+    import config
+    return (f"""(CASE WHEN EXISTS (SELECT 1 FROM manual_sales ms
+                                  WHERE 'b2b-' || ms.id = {alias}.telegram_payment_id
+                                    AND ms.buyer_kind = 'legal')
+                 THEN 0.06 ELSE {float(config.NPD_PERCENT) / 100} END)""")
+
+
+async def misha_tax_codes() -> dict[str, float]:
+    """{код строки финансового листа: ставка НПД} для покупок, деньги и чек
+    по которым у Миши. Код у цифры — id платежа."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"""SELECT pu.telegram_payment_id, {misha_tax_rate_sql()} FROM purchases pu
+                WHERE {holder_sql()} = 'misha'""") as cur:
+            return {str(code): float(rate) for code, rate in await cur.fetchall()}
+
+
+async def income_by_holder() -> dict:
+    """Всё принятое и комиссия по тому, у кого лежат деньги, за всё время.
+    {'danya': {'gross', 'fee'}, 'misha': {...}}; налог Миши — 'misha_tax'."""
+    import config
+    rate = _yk_fee_rate_sql()
+    prodamus = float(config.PRODAMUS_FEE_PERCENT) / 100
+    out = {"danya": {"gross": 0.0, "fee": 0.0}, "misha": {"gross": 0.0, "fee": 0.0}}
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            f"""SELECT {holder_sql()} who, SUM(pu.amount),
+                       -- комиссия округляется по каждой оплате, как в листе cashflow
+                       SUM(ROUND(pu.amount * CASE WHEN pu.telegram_payment_id LIKE 'yk-%'
+                                              OR pu.telegram_payment_id LIKE 'paw-%'
+                                              OR pu.telegram_payment_id LIKE 'lava-%'
+                                              OR pu.telegram_payment_id LIKE 'b2b-%'
+                                            THEN {rate} ELSE {prodamus} END, 2)),
+                       SUM(CASE WHEN {holder_sql()} = 'misha'
+                                THEN pu.amount * {misha_tax_rate_sql()} ELSE 0 END)
+                FROM purchases pu {_YK_JOIN} GROUP BY who""") as cur:
+            misha_tax = 0.0
+            for who, gross, fee, tax in await cur.fetchall():
+                out[who] = {"gross": float(gross or 0), "fee": float(fee or 0)}
+                misha_tax += float(tax or 0)
+        async with db.execute("SELECT COALESCE(SUM(amount), 0) FROM refunds") as cur:
+            out["danya"]["refunds"] = float((await cur.fetchone())[0])   # возвраты — физтовары, у Дани
+    out["misha_tax"] = misha_tax
+    return out
+
+
+async def npd_paid_by() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT payer, COALESCE(SUM(amount), 0) FROM npd_payments "
+                              "GROUP BY payer") as cur:
+            return {who: float(v) for who, v in await cur.fetchall()}
+
+
+async def payouts_by_source() -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT source, COALESCE(SUM(amount), 0) FROM payouts "
+                              "GROUP BY source") as cur:
+            return {who: float(v) for who, v in await cur.fetchall()}
+
+
+async def expenses_by_payer() -> dict:
+    """{'project': со счёта проекта (у Дани), 'Миша'/'Даня': своими деньгами}."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COALESCE(paid_by, 'Проект'), COALESCE(SUM(amount), 0) "
+                              "FROM expenses GROUP BY 1") as cur:
+            rows = {who: float(v) for who, v in await cur.fetchall()}
+    return {"project": rows.pop("Проект", 0.0), **rows}
+
+
+async def add_partner_transfer(from_who: str, to_who: str, amount: float, comment: str = "",
+                               user_id: int = 0, user_name: str = "",
+                               paid_at: str | None = None) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO partner_transfers (from_who, to_who, amount, comment, user_id, user_name, "
+            "paid_at) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))",
+            (from_who, to_who, float(amount), comment or None, user_id, user_name, paid_at))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_partner_transfers(limit: int = 50) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM partner_transfers ORDER BY paid_at DESC, id DESC "
+                              "LIMIT ?", (limit,)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def transfers_net() -> dict:
+    """Сколько денег проекта каждый получил переводами от другого минус отдал."""
+    net = {"danya": 0.0, "misha": 0.0}
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT from_who, to_who, amount FROM partner_transfers") as cur:
+            for src, dst, amount in await cur.fetchall():
+                net[src] -= float(amount)
+                net[dst] += float(amount)
+    return net
+

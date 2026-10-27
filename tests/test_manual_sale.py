@@ -29,7 +29,7 @@ class ManualSaleTest(unittest.IsolatedAsyncioTestCase):
         async with aiosqlite.connect(db.DB_PATH) as c:
             return await (await c.execute(sql, args)).fetchone()
 
-    async def test_money_to_misha_is_offset(self):
+    async def test_sale_recorded_without_fee(self):
         sale = await db.add_manual_sale(self.option, 4990, "legal", "7700000000", "ООО Ромашка",
                                         "misha", "self", 1)
         code = f"b2b-{sale['id']}"
@@ -38,17 +38,10 @@ class ManualSaleTest(unittest.IsolatedAsyncioTestCase):
         # без комиссии, в листе — «Перевод»
         self.assertEqual((await db.get_yk_fee_by_code())[code], 0)
         self.assertEqual((await db.get_payment_providers())[code], "Перевод")
-        # деньги у Миши: выплата Мише и обе строки — без движения денег по счёту
-        self.assertEqual(await self._one("SELECT recipient, amount FROM payouts WHERE id = ?",
-                                         sale["payout_id"]), ("Миша", 4990.0))
-        noncash = {r[0] for r in [await self._one("SELECT code FROM cashflow_noncash WHERE code = ?", c)
-                                  for c in (code, f"payout-{sale['payout_id']}")] if r}
-        self.assertEqual(len(noncash), 2)
+        self.assertEqual(sale["wallet"], "misha")
 
     async def test_money_to_danya_is_plain_income(self):
         sale = await db.add_manual_sale(self.option, 4990, "person", None, None, "danya", "bot", 1)
-        self.assertIsNone(sale["payout_id"])
-        self.assertIsNone(await self._one("SELECT 1 FROM cashflow_noncash"))
         from handlers.finance import _pending_gross   # не ждём перевода от Prodamus
         from datetime import datetime, timezone
         self.assertEqual(await _pending_gross("1900-01-01 00:00:00", "2100-01-01 00:00:00",

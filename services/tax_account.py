@@ -8,6 +8,10 @@ import config
 import database as db
 
 
+def receipts() -> str:
+    return RECEIPTS.replace("{HOLDER}", db.holder_sql("pu"))
+
+
 def parse_amount(text: str) -> float:
     text = text.strip()
     if not re.fullmatch(r'(?:\d{1,3}(?:[ \u00a0]\d{3})+|\d+)(?:[.,]\d{1,2})?', text):
@@ -25,9 +29,13 @@ def validate_month(month: str):
 
 # Доход для НПД: оплаты плюс возвраты с минусом. Возврат уменьшает доход
 # месяца, когда деньги вернули (чек в «Мой налог» аннулируют/исправляют).
+# Помесячный налог Дани — по его чекам. Деньги и чеки Миши (PayAnyWay,
+# lava.top, переводы ему) в «Мой налог» Миши: его налог считается отдельно,
+# своей ставкой с каждой покупки (db.misha_tax_rate_sql) — без помесячных
+# поправок из кабинета
 RECEIPTS = """
     SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, amount
-    FROM purchases
+    FROM purchases pu WHERE {HOLDER} = 'danya'
     UNION ALL
     SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, -amount
     FROM refunds"""
@@ -37,10 +45,10 @@ async def _months(conn):
     conn.row_factory = aiosqlite.Row
     async with conn.execute(f"""
         WITH revenue AS (
-            SELECT month, SUM(amount) gross FROM ({RECEIPTS}) GROUP BY month
+            SELECT month, SUM(amount) gross FROM ({receipts()}) GROUP BY month
         ), paid AS (
             SELECT COALESCE(tax_month, strftime('%Y-%m', datetime(paid_at, '+3 hours'))) month,
-                   SUM(amount) paid FROM npd_payments GROUP BY month
+                   SUM(amount) paid FROM npd_payments WHERE payer = 'danya' GROUP BY month
         ), months AS (
             SELECT month FROM revenue UNION SELECT month FROM paid
             UNION SELECT month FROM npd_assessments
@@ -51,7 +59,7 @@ async def _months(conn):
         FROM months LEFT JOIN revenue USING(month) LEFT JOIN paid USING(month)
         LEFT JOIN npd_assessments a USING(month)
         WHERE months.month IS NOT NULL ORDER BY months.month DESC
-    """.replace("{RECEIPTS}", RECEIPTS), (config.NPD_PERCENT / 100,)) as cur:
+    """, (config.NPD_PERCENT / 100,)) as cur:
         return [dict(row) for row in await cur.fetchall()]
 
 
@@ -107,7 +115,8 @@ async def accrued_for_period(dt_from: str, dt_to: str, component: str = "total")
     """Allocate a corrected month across receipts proportionally to revenue.
 
     This preserves the monthly total and avoids charging the entire correction
-    twice when consecutive reports divide a month.
+    twice when consecutive reports divide a month. Покупки Миши — его ставкой
+    (4% или 6% для юрлиц), без помесячных поправок Дани.
     """
     dt_from, dt_to = db.period_bounds(dt_from, dt_to)
     # Fixed expressions only; no user-provided SQL.
@@ -122,19 +131,20 @@ async def accrued_for_period(dt_from: str, dt_to: str, component: str = "total")
         # уменьшает и общий налог, и физическую составляющую
         async with conn.execute(f'''
             WITH monthly AS (
-                SELECT month, SUM(amount) gross FROM ({RECEIPTS}) GROUP BY month
+                SELECT month, SUM(amount) gross FROM ({receipts()}) GROUP BY month
             ), p AS (
-                SELECT p.created_at, p.amount, p.delivery_amount, p.delivery_cost,
-                       pr.category
-                FROM purchases p LEFT JOIN products pr ON pr.id=p.product_id
+                SELECT pu.created_at, pu.amount, pu.delivery_amount, pu.delivery_cost,
+                       pr.category, {db.holder_sql("pu")} holder, {db.misha_tax_rate_sql("pu")} mrate
+                FROM purchases pu LEFT JOIN products pr ON pr.id=pu.product_id
                 UNION ALL
-                SELECT created_at, -amount, 0, 0, 'physical' FROM refunds
+                SELECT created_at, -amount, 0, 0, 'physical', 'danya', 0 FROM refunds
             )
             SELECT COALESCE(SUM(({base}) * CASE
+                WHEN p.holder = 'misha' THEN p.mrate
                 WHEN a.amount IS NOT NULL AND m.gross > 0 THEN a.amount / m.gross
                 ELSE ? END), 0)
             FROM p
-            JOIN monthly m ON m.month = strftime('%Y-%m', datetime(p.created_at, '+3 hours'))
+            LEFT JOIN monthly m ON m.month = strftime('%Y-%m', datetime(p.created_at, '+3 hours'))
             LEFT JOIN npd_assessments a ON a.month = m.month
             WHERE datetime(p.created_at) BETWEEN datetime(?) AND datetime(?)
         ''', (config.NPD_PERCENT / 100, dt_from, dt_to)) as cur:
