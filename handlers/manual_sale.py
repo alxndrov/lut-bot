@@ -1,14 +1,15 @@
-"""/sale в malimadmins — продажа курса вне бота: договорились в личке,
-оплата переводом (например, от юрлица по счёту).
+"""/sale в malimadmins — продажа вне бота: договорились в личке, оплата
+переводом (например, от юрлица по счёту). Любой товар каталога; у курса —
+ещё и вариант (съёмка, монтаж, пакет, VIP).
 
-Шаги: вариант курса → сумма → покупатель (физлицо или юрлицо/ИП с ИНН и
+Шаги: товар (у курса — вариант) → сумма → покупатель (физлицо или юрлицо/ИП с ИНН и
 названием) → кому пришли деньги (Мише или Дане) → чек (бот пробивает сам
 или уже пробит) → кому открыть курс (ник ученика или открытая ссылка) →
-подтверждение.
+подтверждение. Кому открыть — только у курса: остальные товары передают сами.
 
 Что делает бот: записывает покупку b2b-<id> без комиссии (database.
-add_manual_sale; деньги у Миши — ещё и взаимозачёт-выплату Мише), выдаёт
-подарочную ссылку на курс (handlers/course_gift.py), по желанию пробивает
+add_manual_sale; wallet — у кого деньги, для взаиморасчёта), у курса выдаёт
+ссылку на доступ (handlers/course_gift.py), по желанию пробивает
 чек в «Мой налог» того, кому пришли деньги (для юрлица — с его ИНН, налог
 6%), и присылает ссылку на чек — переслать клиенту.
 """
@@ -59,16 +60,14 @@ CANCEL = ("Отмена", "msale:cancel")
 @router.message(Command("sale"))
 async def cmd_sale(message: Message, state: FSMContext):
     await state.clear()
-    product = await db.get_course_product()
-    options = await db.get_course_options(product["id"]) if product else []
-    if not options:
-        await message.answer("Курса в базе нет — продавать нечего.")
+    products = await db.get_catalog_products(include_hidden=True)
+    if not products:
+        await message.answer("В каталоге нет товаров.")
         return
     await message.answer(
         "🧾 <b>Продажа вне бота</b> — оплата переводом (например, от юрлица).\n\nЧто купили?",
         parse_mode="HTML",
-        reply_markup=_kb(*[[(f"{o['title']} · {svc.price_for(o)} ₽", f"msale:opt:{o['id']}")]
-                           for o in options], [CANCEL]))
+        reply_markup=_kb(*[[(p["name"], f"msale:prod:{p['id']}")] for p in products], [CANCEL]))
 
 
 @router.callback_query(F.data == "msale:cancel")
@@ -78,19 +77,42 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext):
     await callback.message.edit_reply_markup(reply_markup=None)
 
 
+async def _ask_amount(callback: CallbackQuery, state: FSMContext, title: str, price: int, **data):
+    await state.set_state(SaleForm.amount)
+    await state.update_data(**data)
+    await callback.answer()
+    await callback.message.edit_text(
+        f"<b>{escape(title)}</b>\n\nСколько заплатили? Нажми цену или напиши сумму в рублях.",
+        parse_mode="HTML", reply_markup=_kb([(f"{price} ₽", f"msale:amt:{price}")], [CANCEL]))
+
+
+@router.callback_query(F.data.startswith("msale:prod:"))
+async def cb_product(callback: CallbackQuery, state: FSMContext):
+    product = await db.get_product(int(callback.data.split(":")[2]))
+    if not product:
+        await callback.answer("Нет такого товара", show_alert=True)
+        return
+    options = await db.get_course_options(product["id"])
+    if options:   # курс — сначала вариант
+        await callback.answer()
+        await callback.message.edit_text(
+            f"<b>{escape(product['name'])}</b>\n\nКакой вариант?", parse_mode="HTML",
+            reply_markup=_kb(*[[(f"{o['title']} · {svc.price_for(o)} ₽", f"msale:opt:{o['id']}")]
+                               for o in options], [CANCEL]))
+        return
+    price = await db.get_effective_price(product)
+    await _ask_amount(callback, state, product["name"], price, product_id=product["id"],
+                      option_id=None)
+
+
 @router.callback_query(F.data.startswith("msale:opt:"))
 async def cb_option(callback: CallbackQuery, state: FSMContext):
     option = await db.get_course_option(int(callback.data.split(":")[2]))
     if not option:
         await callback.answer("Нет такого варианта", show_alert=True)
         return
-    price = svc.price_for(option)
-    await state.set_state(SaleForm.amount)
-    await state.update_data(option_id=option["id"])
-    await callback.answer()
-    await callback.message.edit_text(
-        f"<b>{escape(option['title'])}</b>\n\nСколько заплатили? Нажми цену или напиши сумму в рублях.",
-        parse_mode="HTML", reply_markup=_kb([(f"{price} ₽", f"msale:amt:{price}")], [CANCEL]))
+    await _ask_amount(callback, state, option["title"], svc.price_for(option),
+                      product_id=option["product_id"], option_id=option["id"])
 
 
 async def _ask_kind(message: Message, state: FSMContext, amount: float):
@@ -174,9 +196,13 @@ async def cb_wallet(callback: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("msale:rc:"))
 async def cb_receipt(callback: CallbackQuery, state: FSMContext):
     await state.update_data(receipt=callback.data.split(":")[2])
-    await state.set_state(SaleForm.recipient)
     await callback.answer()
     await callback.message.edit_reply_markup(reply_markup=None)
+    if not (await state.get_data()).get("option_id"):   # не курс — доступ открывать не нужно
+        await state.update_data(recipient=None)
+        await _confirm(callback.message, state)
+        return
+    await state.set_state(SaleForm.recipient)
     await callback.message.answer(
         "Кому открыть курс? Напиши ник ученика в Telegram (@ник) — курс откроется только ему. "
         "Или «-» — дам открытую ссылку: курс получит тот, кто первым её откроет.")
@@ -190,25 +216,38 @@ async def msg_recipient(message: Message, state: FSMContext):
         await message.answer("Ник в Telegram — латиница, цифры и _, от 4 символов. Или «-».")
         return
     await state.update_data(recipient=recipient)
+    await _confirm(message, state)
+
+
+async def _title(d: dict) -> str:
+    if d.get("option_id"):
+        return (await db.get_course_option(d["option_id"]))["title"]
+    return (await db.get_product(d["product_id"]))["name"]
+
+
+async def _confirm(message: Message, state: FSMContext):
     await state.set_state(None)
     d = await state.get_data()
-    option = await db.get_course_option(d["option_id"])
+    recipient = d.get("recipient")
     buyer = ("физлицо" if d["buyer_kind"] == "person"
              else f"{escape(d['buyer_name'])}, ИНН {d['buyer_inn']}")
+    access = ((f"🎁 Курс откроется: {'@' + escape(recipient) if recipient else 'по открытой ссылке'}")
+              if d.get("option_id") else "📦 Товар передаёте сами — бот только записывает продажу")
     await message.answer(
         "Проверь и проведи:\n\n"
-        f"🎓 {escape(option['title'])}\n"
+        f"🛍 {escape(await _title(d))}\n"
         f"💰 {_rub(d['amount'])} — без комиссии\n"
         f"🧑‍💼 Покупатель: {buyer}\n"
         f"🏦 Деньги пришли {WALLETS[d['wallet']]}\n"
         f"🧾 Чек: {'пробьёт бот (' + npd.ACCOUNTS[d['wallet']] + ')' if d['receipt'] == 'bot' else 'уже пробит'}\n"
-        f"🎁 Курс откроется: {'@' + escape(recipient) if recipient else 'по открытой ссылке'}",
+        + access,
         parse_mode="HTML", reply_markup=_kb([("✅ Провести", "msale:go")], [CANCEL]))
 
 
 async def _issue_receipt(sale: dict) -> str:
     """Пробивает чек и возвращает ссылку на него. NpdError — наверх."""
-    name = await npd_receipts.receipt_name("c", sale["option_id"])
+    name = (await npd_receipts.receipt_name("c", sale["option_id"]) if sale.get("option_id")
+            else await npd_receipts.receipt_name("d", sale["product_id"]))
     uuid = await npd.create_receipt(name, sale["amount"], account=sale["wallet"],
                                     client_inn=sale["buyer_inn"], client_name=sale["buyer_name"])
     url = await npd.print_url(uuid, account=sale["wallet"])
@@ -227,35 +266,39 @@ def _receipt_text(url: str) -> str:
 @router.callback_query(F.data == "msale:go")
 async def cb_go(callback: CallbackQuery, state: FSMContext):
     d = await state.get_data()
-    if "option_id" not in d or "recipient" not in d:
+    if "product_id" not in d or "recipient" not in d:
         await callback.answer("Начни заново: /sale", show_alert=True)
         return
     await state.clear()
     await callback.answer("Провожу…")
     await callback.message.edit_reply_markup(reply_markup=None)
-    option = await db.get_course_option(d["option_id"])
-    sale = await db.add_manual_sale(option, d["amount"], d["buyer_kind"], d.get("buyer_inn"),
-                                    d.get("buyer_name"), d["wallet"], d["receipt"],
-                                    callback.from_user.id)
-    token = secrets.token_urlsafe(9)
-    await db.create_course_gift(token, sale["purchase_id"], 0, svc.option_sections(option),
-                                d["recipient"])
-    await db.update_manual_sale(sale["id"], gift_token=token)
-    link = await course_gift.gift_link(token)
-    logger.info(f"sale: b2b-{sale['id']} {option['title']} {d['amount']} ₽ → {d['wallet']} "
+    option = await db.get_course_option(d["option_id"]) if d.get("option_id") else None
+    title = await _title(d)
+    sale = await db.add_manual_sale(d["product_id"], option, d["amount"], d["buyer_kind"],
+                                    d.get("buyer_inn"), d.get("buyer_name"), d["wallet"],
+                                    d["receipt"], callback.from_user.id)
+    logger.info(f"sale: b2b-{sale['id']} {title} {d['amount']} ₽ → {d['wallet']} "
                 f"(админ {callback.from_user.id})")
+    lines = [f"✅ Продажа b2b-{sale['id']} проведена.", ""]
+    if option:   # курс — ссылка на доступ для ученика
+        token = secrets.token_urlsafe(9)
+        await db.create_course_gift(token, sale["purchase_id"], 0, svc.option_sections(option),
+                                    d["recipient"])
+        await db.update_manual_sale(sale["id"], gift_token=token)
+        lines.append("🎁 Ссылка на курс для ученика (одноразовая"
+                     + (f", только для @{escape(d['recipient'])}" if d["recipient"] else "")
+                     + f"):\n{await course_gift.gift_link(token)}")
+    else:
+        lines.append("📦 Товар передайте покупателю сами.")
 
     buyer = d.get("buyer_name") or "физлицо"
     from handlers.prodamus_webhook import _send_notify
-    await _send_notify(None, f"🎓 <b>Курс оплачен переводом</b>\n\n🧑‍💼 {escape(buyer)}\n"
-                             f"🛍 {escape(option['title'])}\n💵 {_rub(d['amount'])}\n"
+    await _send_notify(None, f"{'🎓 <b>Курс оплачен переводом</b>' if option else '🛍 <b>Продажа вне бота</b>'}"
+                             f"\n\n🧑‍💼 {escape(buyer)}\n🛍 {escape(title)}\n💵 {_rub(d['amount'])}\n"
                              f"🏦 Деньги у {'Миши' if d['wallet'] == 'misha' else 'Дани'}")
     from services import gsheets
     gsheets.request_finance_sync()
 
-    lines = [f"✅ Продажа b2b-{sale['id']} проведена.", "",
-             f"🎁 Ссылка на курс для ученика (одноразовая"
-             + (f", только для @{escape(d['recipient'])}" if d["recipient"] else "") + f"):\n{link}"]
     kb = None
     if d["receipt"] == "bot":
         try:

@@ -504,9 +504,14 @@ async def init_db(existing_cdek_contract: str | None = None):
                 gift_token   TEXT,
                 payout_id    INTEGER,
                 created_by   INTEGER,
-                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                product_id   INTEGER
             )
         """)
+        try:
+            await db.execute("ALTER TABLE manual_sales ADD COLUMN product_id INTEGER")
+        except Exception:
+            pass
         # Курс в подарок: покупатель отдаёт доступ по ссылке t.me/<бот>?start=gift_<token>
         # (handlers/course_gift.py). Доступ покупателя придержан, получатель
         # открывает ссылку — и разделы этой покупки открываются ему.
@@ -3854,10 +3859,11 @@ async def get_digital_purchases_for_finance_export() -> list[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT pu.telegram_payment_id AS order_code, pu.created_at,
-                      pu.amount, p.name AS product_name
+                      pu.amount, p.name AS product_name, p.category
                FROM purchases pu
                JOIN products p ON p.id = pu.product_id
-               WHERE p.category != 'physical'
+               -- физтовар, проданный вне бота (/sale), заказа не имеет — тоже здесь
+               WHERE p.category != 'physical' OR pu.telegram_payment_id LIKE 'b2b-%'
                ORDER BY pu.created_at"""
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -3943,7 +3949,7 @@ async def get_npd_payments_for_finance_export() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, paid_at, amount, comment FROM npd_payments ORDER BY paid_at"
+            "SELECT id, paid_at, amount, comment, payer FROM npd_payments ORDER BY paid_at"
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
@@ -3979,7 +3985,8 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
             "code": r["order_code"], "created_at": r["created_at"], "amount": r["amount"],
             "kind": "Приход", "comment": r["product_name"] or "",
             "delivery_cost": 0.0, "delivery_legacy": 0.0,
-            "goods_type": "Цифровой", "printer": "",
+            "goods_type": "Физический" if r.get("category") == "physical" else "Цифровой",
+            "printer": "",
         })
 
     # Возврат — приход с минусом и своим типом «Возврат»: формулы сводки
@@ -4033,6 +4040,21 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
         rows.append({
             "code": f"npd-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
             "kind": "Расход", "comment": comment,
+            "delivery_cost": None, "delivery_legacy": None,
+            "holder": "Миша" if r.get("payer") == "misha" else "Даня",
+        })
+
+    # Переводы между нами (взаиморасчёт): «Расход» с кодом transfer-N —
+    # формулы «Финансов» его не считают (там коды exp/cdek/npd/payout),
+    # лист «Взаиморасчёт» берёт: «У кого деньги» — кто отдал, «Получатель» — кто получил
+    names = {"danya": "Даня", "misha": "Миша"}
+    for r in await get_partner_transfers(limit=100000):
+        rows.append({
+            "code": f"transfer-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
+            "kind": "Расход",
+            "comment": f"Перевод {names[r['from_who']]} → {names[r['to_who']]}"
+                       + (f": {r['comment']}" if r.get("comment") else ""),
+            "recipient": names[r["to_who"]], "holder": names[r["from_who"]],
             "delivery_cost": None, "delivery_legacy": None,
         })
 
@@ -5383,23 +5405,23 @@ async def get_lesson_views(user_id: int) -> dict[str, list[int]]:
 
 # ── Продажи вне бота (/sale) ───────────────────────────────────────────────────
 
-async def add_manual_sale(option: dict, amount: float, buyer_kind: str, buyer_inn: str | None,
-                          buyer_name: str | None, wallet: str, receipt: str,
+async def add_manual_sale(product_id: int, option: dict | None, amount: float, buyer_kind: str,
+                          buyer_inn: str | None, buyer_name: str | None, wallet: str, receipt: str,
                           created_by: int) -> dict:
     """Записывает продажу курса и покупку b2b-<id> (user_id 0 — ученик получит
     доступ ссылкой). wallet — у кого лежат деньги (misha | danya): по нему
     взаиморасчёт считает, у кого сколько денег проекта (services/settle.py)."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO manual_sales (option_id, amount, buyer_kind, buyer_inn, buyer_name, "
-            "wallet, receipt, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (option["id"], float(amount), buyer_kind, buyer_inn, buyer_name, wallet, receipt,
-             created_by))
+            "INSERT INTO manual_sales (product_id, option_id, amount, buyer_kind, buyer_inn, "
+            "buyer_name, wallet, receipt, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (product_id, option["id"] if option else None, float(amount), buyer_kind, buyer_inn,
+             buyer_name, wallet, receipt, created_by))
         sale_id = cur.lastrowid
         cur = await db.execute(
             "INSERT INTO purchases (user_id, username, product_id, telegram_payment_id, amount, "
             "course_option_id) VALUES (0, NULL, ?, ?, ?, ?)",
-            (option["product_id"], f"b2b-{sale_id}", int(round(float(amount))), option["id"]))
+            (product_id, f"b2b-{sale_id}", int(round(float(amount))), option["id"] if option else None))
         await db.execute("UPDATE manual_sales SET purchase_id = ? WHERE id = ?",
                          (cur.lastrowid, sale_id))
         await db.commit()
@@ -5544,3 +5566,17 @@ async def transfers_net() -> dict:
                 net[dst] += float(amount)
     return net
 
+
+
+async def holders_by_code() -> dict[str, str]:
+    """{id платежа: 'Даня' | 'Миша'} — у кого деньги за покупку (лист cashflow)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(f"SELECT pu.telegram_payment_id, {holder_sql()} FROM purchases pu") as cur:
+            return {str(code): ("Миша" if who == "misha" else "Даня")
+                    for code, who in await cur.fetchall() if code}
+
+
+async def payout_sources() -> dict[int, str]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id, source FROM payouts") as cur:
+            return {i: ("Миша" if src == "misha" else "Даня") for i, src in await cur.fetchall()}

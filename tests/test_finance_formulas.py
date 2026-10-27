@@ -19,7 +19,7 @@ class FormulaTests(unittest.TestCase):
         with patch.object(fs, 'dashboard', return_value=[[''] * 10 for _ in range(50)]):
             rows = fs.formula_dashboard(snapshot, 0, {}, cols)
         gross = rows[2][1].expression
-        self.assertIn("'cashflow'!P2:P", gross)  # amount follows its header
+        self.assertIn("'cashflow'!Q2:Q", gross)  # amount follows its header
         self.assertIn('"<>Расход"', gross)
         self.assertIn('"Сверено"', gross)
         self.assertNotIn('Денежная операция', gross)  # includes noncash sales

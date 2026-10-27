@@ -84,3 +84,20 @@ class SettleTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SettleSheetTest(unittest.TestCase):
+    def test_sheet_is_formulas_on_cashflow(self):
+        from services import finance_sheet as fs
+        cols = {h: i for i, h in enumerate(fs.HEADERS)}
+        rows = settle.sheet_values(cols, {"settled_at": "2026-09-30 06:25:08",
+                                          "carry_partner": 10, "carry_owner": 0})
+        self.assertEqual(rows[15][0], "= На руках")                 # B16/C16 — ссылки «Финансов»
+        self.assertEqual(rows[41][0], "ИТОГ")                       # B42
+        self.assertIsInstance(rows[15][1], fs.Formula)
+        holder = "cashflow!$T:$T"                                   # «У кого деньги»
+        self.assertIn(holder, rows[5][1].expression)
+        self.assertIn('"Даня"', rows[5][1].expression)
+        self.assertIn('"Миша"', rows[5][2].expression)
+        self.assertEqual(rows[2][1], 10)                            # перенос — данные бота
+        self.assertIn("Миша переводит Дане", rows[41][1].expression)

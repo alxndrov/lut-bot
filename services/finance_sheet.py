@@ -31,6 +31,10 @@ HEADERS = [
     'Печатал', 'Позиций напечатал Даня', 'Получатель', 'Статус синхронизации',
     'Движение денег', 'Налоговый месяц', 'База процента партнёра', 'Кто внёс расход',
     'Платёжная система',   # Prodamus / ЮKassa — у них разный график выплат
+    # Чьи деньги проекта (лист «Взаиморасчёт»): приход — у кого лежит оплата,
+    # выплата — из чьих денег, налог — кто заплатил, перевод — кто отдал.
+    # Пусто — траты личными деньгами: со счетов проекта они не уходили
+    'У кого деньги',
 ]
 # Типы строк cashflow, которые считаются в выручку: возврат — приход с минусом,
 # но с собственным типом «Возврат», чтобы его было видно (решение Дани 19.10.2026)
@@ -150,8 +154,22 @@ async def _build_snapshot(year, now, monthly_split=True):
             row['partner_base'] = goods * (1 - fee_rate - rate) - float(row.get('delivery_legacy') or 0) * rate
     payments = await db.get_payouts_for_finance_export()
     recipients = {f"payout-{p['id']}": p['recipient'] for p in payments}
+    holders = await db.holders_by_code()
+    sources = await db.payout_sources()
     for row in rows:
-        row['recipient'] = recipients.get(row['code'], '')
+        row['recipient'] = row.get('recipient') or recipients.get(row['code'], '')
+        code = str(row['code'])
+        if row['kind'] in INCOME:
+            row['holder'] = 'Даня' if row.get('refund') else holders.get(code, 'Даня')
+        elif code.startswith('payout-'):
+            row['holder'] = sources.get(int(code.split('-')[1]), 'Даня')
+        elif code.startswith('cdek-'):
+            row['holder'] = 'Даня'
+        elif code.startswith(('pawout-', 'lavaout-')):
+            row['holder'] = 'Миша'
+        elif code.startswith('exp-'):
+            # Со счёта проекта (у Дани) — «Проект»; личными деньгами — пусто
+            row['holder'] = 'Даня' if row.get('paid_by') in ('Проект', 'Не уточнено') else ''
         if row.get('delivery_cost') is not None:
             row['delivery'] = payout.delivery_out(float(row['delivery_cost']),
                                                   float(row['delivery_legacy']),
@@ -284,7 +302,7 @@ def operation_values(row):
         row.get('recipient', ''), 'Сверено',
         'Взаимозачёт — без движения денег' if row.get('noncash') else 'Денежная операция',
         row.get('tax_month', ''), row.get('partner_base') if income and not row.get('refund') else None,
-        row.get('paid_by', ''), row.get('provider', ''),
+        row.get('paid_by', ''), row.get('provider', ''), row.get('holder', ''),
     ]))
 
 
@@ -320,7 +338,7 @@ def cashflow_plan(sheet_id, existing, rows):
         if code in expected and code not in seen:
             stats['updated'] += bool(changes(index, current, operation_values(expected[code])))
             seen.add(code)
-        elif code in expected or re.fullmatch(r'(exp|payout|cdek|npd|refund|pawout|lavaout)-\d+', code) or at(current, 'Статус синхронизации') in ('Сверено', 'Отменено', 'Дубликат'):
+        elif code in expected or re.fullmatch(r'(exp|payout|cdek|npd|refund|pawout|lavaout|transfer)-\d+', code) or at(current, 'Статус синхронизации') in ('Сверено', 'Отменено', 'Дубликат'):
             duplicate = code in expected
             desired = {h: None for h in HEADERS if h not in
                        ('Номер операции', 'Дата операции', 'Комментарий')}
@@ -681,7 +699,7 @@ def publish(book, props, values, snapshot, legacy, modern, *, preserve_summary=T
     return stats
 
 
-def _publish_bot_tab(book, props, title, values, bold_rows, frozen):
+def _publish_bot_tab(book, props, title, values, bold_rows, frozen, money_from=None):
     """Лист, которым целиком владеет бот: стереть и записать заново —
     отдельным запросом, чтобы сбой в нём не останавливал сверку операций,
     от которой зависят деньги."""
@@ -710,6 +728,12 @@ def _publish_bot_tab(book, props, title, values, bold_rows, frozen):
             'range': {'sheetId': sid, 'startRowIndex': row, 'endRowIndex': row + 1},
             'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
             'fields': 'userEnteredFormat.textFormat.bold'}})
+    if money_from is not None:   # колонки B:C с этой строки — рубли с копейками
+        requests.append({'repeatCell': {
+            'range': {'sheetId': sid, 'startRowIndex': money_from, 'startColumnIndex': 1,
+                      'endColumnIndex': 3},
+            'cell': {'userEnteredFormat': {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0.00'}}},
+            'fields': 'userEnteredFormat.numberFormat'}})
     requests.append({'updateSheetProperties': {'properties': {'sheetId': sid,
                      'gridProperties': {'frozenRowCount': frozen}},
                      'fields': 'gridProperties.frozenRowCount'}})
@@ -797,9 +821,12 @@ async def sync_finance():
                 logger.exception('finance_sheet: лист «Курс» не обновился')
             try:
                 from services import settle
-                values = settle.sheet_values(await settle.state(), await db.get_partner_transfers())
-                await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, values,
-                                        (0, 7, 11, 14, 20, 22), 1)
+                header, cols = header_columns(values[config.GOOGLE_SHEET_FINANCE_TAB][0]
+                                              if values[config.GOOGLE_SHEET_FINANCE_TAB] else [])
+                rows = settle.sheet_values(cols, await db.get_last_settlement(),
+                                           config.GOOGLE_SHEET_FINANCE_TAB)
+                await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, rows,
+                                        (0, 4, 15, 18, 23, 27, 33, 35, 39, 41), 1, 2)
             except Exception:
                 logger.exception('finance_sheet: лист «Взаиморасчёт» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)
