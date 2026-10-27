@@ -33,6 +33,8 @@ PREFIX = "gift_"
 
 
 def _who(user: dict | None, user_id: int) -> str:
+    if not user_id:   # продажа вне бота (/sale) — покупателя в боте нет
+        return "оплата переводом"
     if user and user.get("username"):
         return "@" + user["username"]
     return (user or {}).get("first_name") or f"id {user_id}"
@@ -120,8 +122,9 @@ async def claim(message: Message, user_id: int, token: str) -> None:
         buyer = await db.get_user(gift["buyer_id"])
         from handlers.prodamus_webhook import _send_notify
         await _send_notify(None, f"🎁 Подарок получен: курс открыт {escape(_who(recipient, user_id))} "
-                                 f"(подарил(а) {escape(_who(buyer, gift['buyer_id']))}).")
-        if gift["buyer_id"] != user_id:
+                                 + (f"(подарил(а) {escape(_who(buyer, gift['buyer_id']))})."
+                                    if gift["buyer_id"] else "(продажа вне бота, /sale)."))
+        if gift["buyer_id"] and gift["buyer_id"] != user_id:
             try:
                 await message.bot.send_message(
                     gift["buyer_id"], "🎁 Ваш подарок получен — курс открыт получателю. Спасибо! 🤍")

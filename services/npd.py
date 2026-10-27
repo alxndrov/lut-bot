@@ -221,17 +221,23 @@ def _iso(moment: datetime) -> str:
 
 
 async def create_receipt(name: str, amount: float, when: datetime | None = None,
-                         account: str = "danya") -> str:
-    """Регистрирует доход от физлица. Возвращает uuid чека."""
+                         account: str = "danya", client_inn: str | None = None,
+                         client_name: str | None = None) -> str:
+    """Регистрирует доход. Возвращает uuid чека. По умолчанию — от физлица;
+    с client_inn — от юрлица или ИП (налог 6%, в чеке ИНН и название
+    покупателя, оплата безналичная — продажа через /sale)."""
     now = datetime.now(MSK)
+    client = ({"contactPhone": None, "displayName": client_name,
+               "incomeType": "FROM_LEGAL_ENTITY", "inn": client_inn} if client_inn else
+              {"contactPhone": None, "displayName": None,
+               "incomeType": "FROM_INDIVIDUAL", "inn": None})
     data = await _post("/income", {
         "operationTime": _iso(when or now),
         "requestTime": _iso(now),
         "services": [{"name": name[:256], "amount": round(float(amount), 2), "quantity": 1}],
         "totalAmount": f"{float(amount):.2f}",
-        "client": {"contactPhone": None, "displayName": None,
-                   "incomeType": "FROM_INDIVIDUAL", "inn": None},
-        "paymentType": "CASH",
+        "client": client,
+        "paymentType": "ACCOUNT" if client_inn else "CASH",
         "ignoreMaxTotalIncomeRestriction": False,
     }, token=await _token(account))
     uuid = data.get("approvedReceiptUuid")

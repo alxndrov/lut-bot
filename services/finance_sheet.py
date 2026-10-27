@@ -449,7 +449,7 @@ def formula_dashboard(snapshot, legacy, stats, cols):
     put(39, f'ROUND(MAX(0;B4-{total("Отложено на СДЭК")});2)')
     date = ref('Дата операции')
     pending = (f'SUMPRODUCT(({ref("Тип")}<>"Расход")*({ref("Статус синхронизации")}="Сверено")*'
-               f'({ref("Движение денег")}="Денежная операция")*'
+               f'({ref("Движение денег")}="Денежная операция")*({ref("Платёжная система")}="Prodamus")*'
                f'(INT({date})+CHOOSE(WEEKDAY({date};2);2;2;2;4;3;2;2)>TODAY())*'
                f'({ref("Сумма")}-{ref("Комиссия Prodamus")}))')
     put(13, f'ROUND({pending};2)')
@@ -735,7 +735,8 @@ def course_values(buyers, options, review_limit):
             msk_date(b['created_at']).strftime('%d.%m.%Y %H:%M'), b['title'], money(b['amount']),
             b.get('first_name') or '', '@' + b['username'] if b.get('username') else '',
             str(b['user_id']), b['review_position'] or '',
-            ', '.join(_SECTION_NAMES.get(s, s) for s in sections) or 'Отозван',
+            ', '.join(_SECTION_NAMES.get(s, s) for s in sections)
+            or ('Ждёт ученика (ссылка)' if not b['user_id'] else 'Отозван'),
             b.get('telegram_payment_id') or '',
         ])
     head = [

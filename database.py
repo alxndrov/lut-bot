@@ -464,6 +464,32 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (user_id, section, lesson)
             )
         """)
+        # Строки финансового листа без движения денег по счёту проекта
+        # (взаимозачёты) — раньше заводилась вручную при сверке с банком
+        await db.execute("CREATE TABLE IF NOT EXISTS cashflow_noncash"
+                         "(code TEXT PRIMARY KEY, reason TEXT NOT NULL)")
+        # Продажи вне бота (/sale): оплата переводом, например от юрлица.
+        # Покупка в purchases с кодом b2b-<id>, без комиссии; доступ к курсу —
+        # подарочной ссылкой (course_gifts), чек — бот или вручную
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS manual_sales (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                purchase_id  INTEGER,
+                option_id    INTEGER,
+                amount       REAL NOT NULL,
+                buyer_kind   TEXT NOT NULL,          -- person | legal
+                buyer_inn    TEXT,
+                buyer_name   TEXT,
+                wallet       TEXT NOT NULL,          -- misha | danya — кому пришли деньги
+                receipt      TEXT NOT NULL,          -- bot | self
+                receipt_uuid TEXT,
+                receipt_url  TEXT,
+                gift_token   TEXT,
+                payout_id    INTEGER,
+                created_by   INTEGER,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # Курс в подарок: покупатель отдаёт доступ по ссылке t.me/<бот>?start=gift_<token>
         # (handlers/course_gift.py). Доступ покупателя придержан, получатель
         # открывает ссылку — и разделы этой покупки открываются ему.
@@ -3106,7 +3132,8 @@ def _yk_fee_rate_sql() -> str:
     комиссии и НДС), а если ЮKassa её не вернула — запасной процент."""
     import config
     # PayAnyWay (paw-) — процентом из настроек: суммы после комиссии он не присылает
-    return (f"""(CASE WHEN pu.telegram_payment_id LIKE 'paw-%'
+    return (f"""(CASE WHEN pu.telegram_payment_id LIKE 'b2b-%' THEN 0
+                     WHEN pu.telegram_payment_id LIKE 'paw-%'
                      THEN {float(config.PAYANYWAY_FEE_PERCENT) / 100}
                      WHEN pu.telegram_payment_id LIKE 'lava-%'
                      THEN {float(config.LAVA_FEE_PERCENT) / 100}
@@ -3137,7 +3164,7 @@ async def get_yk_fees(dt_from: str, dt_to: str) -> dict:
                 FROM purchases pu
                 {_YK_JOIN}
                 LEFT JOIN products pr ON pr.id = pu.product_id
-                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%' OR pu.telegram_payment_id LIKE 'lava-%')
+                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%' OR pu.telegram_payment_id LIKE 'lava-%' OR pu.telegram_payment_id LIKE 'b2b-%')
                   AND datetime(pu.created_at) BETWEEN datetime(?) AND datetime(?)""",
             (dt_from, dt_to),
         ) as cur:
@@ -3152,11 +3179,12 @@ async def get_payment_providers() -> dict:
         async with db.execute(
             """SELECT COALESCE(o.order_code, o.prodamus_order_id, pu.telegram_payment_id),
                       CASE WHEN pu.telegram_payment_id LIKE 'paw-%' THEN 'PayAnyWay'
-                           WHEN pu.telegram_payment_id LIKE 'lava-%' THEN 'lava.top' ELSE 'ЮKassa' END
+                           WHEN pu.telegram_payment_id LIKE 'lava-%' THEN 'lava.top'
+                           WHEN pu.telegram_payment_id LIKE 'b2b-%' THEN 'Перевод' ELSE 'ЮKassa' END
                FROM purchases pu
                LEFT JOIN orders o ON o.prodamus_order_id = pu.telegram_payment_id
                WHERE pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%'
-                  OR pu.telegram_payment_id LIKE 'lava-%'"""
+                  OR pu.telegram_payment_id LIKE 'lava-%' OR pu.telegram_payment_id LIKE 'b2b-%'"""
         ) as cur:
             return {str(code): name for code, name in await cur.fetchall()}
 
@@ -3172,7 +3200,7 @@ async def get_yk_fee_by_code() -> dict:
                 FROM purchases pu
                 {_YK_JOIN}
                 LEFT JOIN orders o ON o.prodamus_order_id = pu.telegram_payment_id
-                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%' OR pu.telegram_payment_id LIKE 'lava-%')
+                WHERE (pu.telegram_payment_id LIKE 'yk-%' OR pu.telegram_payment_id LIKE 'paw-%' OR pu.telegram_payment_id LIKE 'lava-%' OR pu.telegram_payment_id LIKE 'b2b-%')
                 GROUP BY 1"""
         ) as cur:
             return {str(code): float(fee) for code, fee in await cur.fetchall()}
@@ -4819,8 +4847,12 @@ async def get_course_buyers() -> list[dict]:
                       pu.telegram_payment_id,
                       COALESCE(u.username, pu.username) AS username, u.first_name,
                       o.slug, o.title, q.position AS review_position,
-                      (SELECT GROUP_CONCAT(a.section) FROM course_access a
-                        WHERE a.user_id = pu.user_id AND a.revoked_at IS NULL) AS sections
+                      -- продажа вне бота (user_id 0): разделы того, кто открыл ссылку
+                      CASE WHEN pu.user_id = 0
+                           THEN (SELECT GROUP_CONCAT(a.section) FROM course_access a
+                                 WHERE a.purchase_id = pu.id AND a.revoked_at IS NULL)
+                           ELSE (SELECT GROUP_CONCAT(a.section) FROM course_access a
+                                 WHERE a.user_id = pu.user_id AND a.revoked_at IS NULL) END AS sections
                FROM purchases pu
                JOIN course_options o ON o.id = pu.course_option_id
                LEFT JOIN users u ON u.user_id = pu.user_id
@@ -5323,3 +5355,61 @@ async def get_lesson_views(user_id: int) -> dict[str, list[int]]:
             for section, lesson in await cur.fetchall():
                 out.setdefault(section, []).append(lesson)
     return out
+
+
+# ── Продажи вне бота (/sale) ───────────────────────────────────────────────────
+
+async def add_manual_sale(option: dict, amount: float, buyer_kind: str, buyer_inn: str | None,
+                          buyer_name: str | None, wallet: str, receipt: str,
+                          created_by: int) -> dict:
+    """Записывает продажу курса и покупку b2b-<id> (user_id 0 — ученик получит
+    доступ подарочной ссылкой). Деньги у Миши — ещё и выплата Мише и пометки
+    «без движения денег»: на счёт проекта они не приходили (как взаимозачёт)."""
+    import config
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO manual_sales (option_id, amount, buyer_kind, buyer_inn, buyer_name, "
+            "wallet, receipt, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (option["id"], float(amount), buyer_kind, buyer_inn, buyer_name, wallet, receipt,
+             created_by))
+        sale_id = cur.lastrowid
+        code = f"b2b-{sale_id}"
+        cur = await db.execute(
+            "INSERT INTO purchases (user_id, username, product_id, telegram_payment_id, amount, "
+            "course_option_id) VALUES (0, NULL, ?, ?, ?, ?)",
+            (option["product_id"], code, int(round(float(amount))), option["id"]))
+        purchase_id = cur.lastrowid
+        payout_id = None
+        if wallet == "misha":
+            who = buyer_name or "покупателя"
+            cur = await db.execute(
+                "INSERT INTO payouts (recipient, amount, comment, user_id, user_name) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (config.OWNER_NAME, float(amount), f"Оплата {who} ({code}) пришла Мише напрямую",
+                 created_by, "бот"))
+            payout_id = cur.lastrowid
+            reason = f"Оплата переводом напрямую Мише ({code}); на счёт проекта не поступала"
+            await db.execute("INSERT OR REPLACE INTO cashflow_noncash (code, reason) VALUES (?, ?)",
+                             (code, reason))
+            await db.execute("INSERT OR REPLACE INTO cashflow_noncash (code, reason) VALUES (?, ?)",
+                             (f"payout-{payout_id}", f"Взаимозачёт с {code}: деньги у Миши, "
+                                                    "банковского списания нет"))
+        await db.execute("UPDATE manual_sales SET purchase_id = ?, payout_id = ? WHERE id = ?",
+                         (purchase_id, payout_id, sale_id))
+        await db.commit()
+    return await get_manual_sale(sale_id)
+
+
+async def get_manual_sale(sale_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM manual_sales WHERE id = ?", (sale_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def update_manual_sale(sale_id: int, **fields):
+    cols = ", ".join(f"{k} = ?" for k in fields)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(f"UPDATE manual_sales SET {cols} WHERE id = ?", (*fields.values(), sale_id))
+        await db.commit()

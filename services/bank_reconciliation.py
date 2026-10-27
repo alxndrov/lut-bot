@@ -22,7 +22,8 @@ async def load():
 
 def cash_components(snapshot):
     """Cash-only source totals; offsets still belong to profit/partner debt."""
-    noncash_income = sum(float(r['amount']) * (1 - snapshot['fee_percent'] / 100)
+    # Комиссия — своя у строки (у перевода от юрлица её нет), а не процент Prodamus
+    noncash_income = sum(float(r['amount']) - float(r.get('fee', float(r['amount']) * snapshot['fee_percent'] / 100))
                          for r in snapshot['rows']
                          if r['kind'] == 'Приход' and r.get('noncash'))
     noncash_payouts = {}

@@ -203,7 +203,7 @@ async def cancel_for_refund(payment_id: str) -> bool:
 
 def _is_prodamus(payment_id: str) -> bool:
     # paw- — PayAnyWay: чеки в «Мой налог» Миши, сюда не относятся
-    return not payment_id.startswith(("yk-", "paw-", "lava-", "manual", "test"))
+    return not payment_id.startswith(("yk-", "paw-", "lava-", "b2b-", "manual", "test"))
 
 
 async def prodamus_missing() -> list[dict]:
