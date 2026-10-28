@@ -701,7 +701,8 @@ def publish(book, props, values, snapshot, legacy, modern, *, preserve_summary=T
     return stats
 
 
-def _publish_bot_tab(book, props, title, values, bold_rows, frozen, money_from=None):
+def _publish_bot_tab(book, props, title, values, bold_rows, frozen, money_from=None,
+                     date_cells=()):
     """Лист, которым целиком владеет бот: стереть и записать заново —
     отдельным запросом, чтобы сбой в нём не останавливал сверку операций,
     от которой зависят деньги."""
@@ -730,11 +731,18 @@ def _publish_bot_tab(book, props, title, values, bold_rows, frozen, money_from=N
             'range': {'sheetId': sid, 'startRowIndex': row, 'endRowIndex': row + 1},
             'cell': {'userEnteredFormat': {'textFormat': {'bold': True}}},
             'fields': 'userEnteredFormat.textFormat.bold'}})
-    if money_from is not None:   # колонки B:C с этой строки — рубли с копейками
+    if money_from is not None:   # колонки B:F с этой строки — рубли с копейками
         requests.append({'repeatCell': {
             'range': {'sheetId': sid, 'startRowIndex': money_from, 'startColumnIndex': 1,
-                      'endColumnIndex': 3},
+                      'endColumnIndex': 6},
             'cell': {'userEnteredFormat': {'numberFormat': {'type': 'NUMBER', 'pattern': '#,##0.00'}}},
+            'fields': 'userEnteredFormat.numberFormat'}})
+    for row, col in date_cells:   # (строка, колонка) от нуля — дата и время
+        requests.append({'repeatCell': {
+            'range': {'sheetId': sid, 'startRowIndex': row, 'endRowIndex': row + 1,
+                      'startColumnIndex': col, 'endColumnIndex': col + 1},
+            'cell': {'userEnteredFormat': {'numberFormat': {'type': 'DATE_TIME',
+                                                            'pattern': 'dd.mm.yyyy hh:mm'}}},
             'fields': 'userEnteredFormat.numberFormat'}})
     requests.append({'updateSheetProperties': {'properties': {'sheetId': sid,
                      'gridProperties': {'frozenRowCount': frozen}},
@@ -828,7 +836,7 @@ async def sync_finance():
                 rows = settle.sheet_values(cols, await db.get_last_settlement(),
                                            config.GOOGLE_SHEET_FINANCE_TAB)
                 await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, rows,
-                                        (0, 4, 14, 17, 23, 27, 33, 35, 39, 41), 1, 2)
+                                        (0, 4, 7, 13, 15, 17), 1, 1, date_cells=[(1, 1)])
             except Exception:
                 logger.exception('finance_sheet: лист «Взаиморасчёт» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)

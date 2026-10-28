@@ -98,19 +98,24 @@ class PawWithdrawalFeeTest(unittest.TestCase):
 
 
 class SettleSheetTest(unittest.TestCase):
-    def test_sheet_is_formulas_on_cashflow(self):
+    def test_sheet_reads_finance_and_counts_shares(self):
         from services import finance_sheet as fs
         cols = {h: i for i, h in enumerate(fs.HEADERS)}
         rows = settle.sheet_values(cols, {"settled_at": "2026-09-30 06:25:08",
                                           "carry_partner": 10, "carry_owner": 0})
-        self.assertEqual(rows[14][0], "= На руках")                 # B15/C15 — ссылки «Финансов»
-        self.assertEqual(rows[41][0], "ИТОГ")                       # B42
-        self.assertIsInstance(rows[14][1], fs.Formula)
-        holder = "cashflow!$T:$T"                                   # «У кого деньги»
-        self.assertIn(holder, rows[5][1].expression)
-        self.assertIn('"Даня"', rows[5][1].expression)
-        self.assertIn('"Миша"', rows[5][2].expression)
-        self.assertEqual(rows[2][1], 10)                            # перенос — данные бота
-        self.assertIn("Миша переводит Дане", rows[41][1].expression)
-        self.assertEqual(rows[20][0], "Комиссия PayAnyWay при выводе")  # C21 — ссылка «Финансов»
-        self.assertFalse(any(r and "ранние" in str(r[0]).lower() for r in rows))
+        self.assertEqual(rows[4][1:3], ["Миша", "Даня"])
+        self.assertIn('MATCH("После резервов у Миши"', rows[5][1].expression)
+        self.assertEqual(rows[2][1:3], [0.0, 10.0])                 # перенос: Миша, Даня
+        self.assertIn("F2*80/100", rows[8][1].expression)          # цифра 80/20
+        self.assertIn("(F3-F4)*40/100", rows[9][2].expression)     # физтовары 60/40
+        self.assertEqual(rows[17][0], "КТО КОМУ ПЕРЕВОДИТ")         # B18 — ссылка «Финансов»
+        self.assertIn("Миша переводит Дане", rows[17][1].expression)
+
+    def test_finance_formulas_by_person(self):
+        from services import finance_sheet as fs
+        cols = {h: i for i, h in enumerate(fs.HEADERS)}
+        f = settle.finance_formulas(cols)
+        self.assertIn('cashflow!$T:$T;"Даня"', f["  из них у Дани"])
+        self.assertIn('MATCH("Ушло на СДЭК"', f["  из них у Дани"])
+        self.assertNotIn("Ушло на СДЭК", f["  из них у Миши"])
+        self.assertEqual(f["Взаиморасчёт"], "='Взаиморасчёт'!B18")
