@@ -195,7 +195,7 @@ def settled_text(res: dict) -> str:
 # Формулы: свободные деньги — из «Финансов» (строки «После резервов у …» по
 # подписи), доли — по cashflow. Значения бот пишет только для того, чего нет
 # в cashflow: даты последнего расчёта и перенесённого с него долга.
-# «Финансы» берут отсюда только итог — B18 (строка «Взаиморасчёт»).
+# «Финансы» берут отсюда только итог — B19 (строка «Взаиморасчёт»).
 
 def _col_letter(i: int) -> str:
     out = ""
@@ -215,6 +215,7 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
     c = {name: f"{cashflow}!${_col_letter(i)}:${_col_letter(i)}" for name, i in cols.items()}
     A, B, C, D = c["Дата операции"], c["Номер операции"], c["Тип"], c["Сумма"]
     H, J, M, R = c["К выплате"], c["Товар"], c["Получатель"], c["Кто внёс расход"]
+    U = c["На что расход"]
     fin = "'Финансы'"
 
     def f(expr):
@@ -229,6 +230,7 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
     # Проценты целыми: в русской локали таблицы дробь пишется через запятую
     digital = round(config.PARTNER_DIGITAL_PERCENT)      # доля Дани с цифры
     goods = round(config.PARTNER_GOODS_PERCENT_NEW)      # доля Дани с физтоваров
+    general = round(config.PARTNER_GENERAL_PERCENT)      # доля Дани в общих расходах
     if last:
         t = datetime.strptime(last["settled_at"][:19].replace("T", " "), "%Y-%m-%d %H:%M:%S")
         t = t.replace(tzinfo=timezone.utc).astimezone(MSK)
@@ -238,33 +240,39 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
     carry_m = float(last.get("carry_owner") or 0) if last else 0.0
     carry_d = float(last.get("carry_partner") or 0) if last else 0.0
     after = f'">"&$B$2'
+    def exp(purpose):
+        return f(f'SUMIFS({D};{B};"exp-*";{U};"{purpose}";{A};{after})')
+
     rows = [
         ["ВЗАИМОРАСЧЁТ", "", "", "", "ПРИБЫЛЬ С ПОСЛЕДНЕГО РАСЧЁТА", ""],
         ["Последний расчёт", since, "", "", "Чистыми с цифры",
          f(f'SUMIFS({H};{J};"Цифровой";{C};"<>Расход";{A};{after})')],
         ["Перенос с прошлого расчёта", carry_m, carry_d, "", "Чистыми с физтоваров",
          f(f'SUMIFS({H};{J};"<>Цифровой";{C};"<>Расход";{A};{after})')],
-        ["", "", "", "", "Расходы", f(f'SUMIFS({D};{B};"exp-*";{A};{after})')],
-        ["", "Миша", "Даня"],                                                         # 5
+        ["", "", "", "", "Расходы на цифру", exp("Цифра")],
+        ["", "Миша", "Даня", "", "Расходы на физтовары", exp("Физтовары")],              # 5
         ["Свободные деньги на руках", f(fin_row("После резервов у Миши")),
-         f(fin_row("После резервов у Дани"))],
+         f(fin_row("После резервов у Дани")), "", "Общие расходы", exp("Общее")],
         [],
         ["ДОЛЯ С ПОСЛЕДНЕГО РАСЧЁТА"],                                                # 8
-        [f"Цифра {100 - digital}/{digital}", f(f"F2*{100 - digital}/100"), f(f"F2*{digital}/100")],
-        [f"Физтовары минус расходы {100 - goods}/{goods}",
-         f(f"(F3-F4)*{100 - goods}/100"), f(f"(F3-F4)*{goods}/100")],
+        [f"Цифра минус её расходы {100 - digital}/{digital}",
+         f(f"(F2-F4)*{100 - digital}/100"), f(f"(F2-F4)*{digital}/100")],
+        [f"Физтовары минус их расходы {100 - goods}/{goods}",
+         f(f"(F3-F5)*{100 - goods}/100"), f(f"(F3-F5)*{goods}/100")],
+        [f"− общие расходы {100 - general}/{general}",
+         f(f"-F6*{100 - general}/100"), f(f"-F6*{general}/100")],
         ["+ возмещение трат, оплаченных лично",
          *both(f'SUMIFS({D};{B};"exp-*";{R};{{who}};{A};{after})')],
         ["− уже выплачено после расчёта",
          *both(f'SUMIFS({D};{B};"payout-*";{M};{{who}};{A};{after})')],
         ["+ перенос", f("B3"), f("C3")],
-        ["= Доля к выплате", f("B9+B10+B11-B12+B13"), f("C9+C10+C11-C12+C13")],     # 14
+        ["= Доля к выплате", f("SUM(B9:B11)+B12-B13+B14"), f("SUM(C9:C11)+C12-C13+C14")],  # 15
         [],
-        ["Лишнее (+) / не хватает (−)", f("B6-B14"), f("C6-C14")],                   # 16
+        ["Лишнее (+) / не хватает (−)", f("B6-B15"), f("C6-C15")],                   # 17
         [],
-        ["КТО КОМУ ПЕРЕВОДИТ",                                                        # 18
-         f('IF(AND(B16>=1;C16<=-1);"Миша переводит Дане "&TEXT(MIN(B16;-C16);"#,##0.00")&" ₽";'
-           'IF(AND(C16>=1;B16<=-1);"Даня переводит Мише "&TEXT(MIN(C16;-B16);"#,##0.00")&" ₽";'
+        ["КТО КОМУ ПЕРЕВОДИТ",                                                        # 19
+         f('IF(AND(B17>=1;C17<=-1);"Миша переводит Дане "&TEXT(MIN(B17;-C17);"#,##0.00")&" ₽";'
+           'IF(AND(C17>=1;B17<=-1);"Даня переводит Мише "&TEXT(MIN(C17;-B17);"#,##0.00")&" ₽";'
            '"Переводить друг другу ничего не нужно"))'), "",
          "Потом каждый забирает свою долю из своих денег"],
     ]
@@ -305,7 +313,7 @@ def finance_formulas(cols: dict[str, int], cashflow: str = "cashflow") -> dict[s
         "Ещё отложено на НПД у Миши": "=ROUND(" + tax("Миша") + ";2)",
         "Ещё возьмёт комиссию PayAnyWay у Миши":
             f"=IF({paw_bal}>=0,01;ROUND(MAX({paw_bal}*{paw_pct}/1000;{round(config.PAYANYWAY_FEE_MIN)});2);0)",
-        "Взаиморасчёт": "='Взаиморасчёт'!B18",
+        "Взаиморасчёт": "='Взаиморасчёт'!B19",
     }
 
 

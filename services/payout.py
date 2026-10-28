@@ -178,8 +178,16 @@ async def split(dt_from: str, dt_to: str, fee_pct: float | None = None) -> dict:
     digital_net_now = now["digital"] - now["digital_fee"] - digital_tax_now
     partner_digital = ((digital_net_was + digital_net_now)
                        * config.PARTNER_DIGITAL_PERCENT / 100)
-    partner_new = ((now["net"] - digital_net_now)
-                   * config.PARTNER_GOODS_PERCENT_NEW / 100)
+    # Расходы — по правилу своего товара (решение Дани 28.10.2026): на
+    # физтовары 60/40, на цифру 80/20, общие для магазина 50/50. now["net"]
+    # уже без всех расходов — цифровые и общие возвращаем в базу физтоваров
+    # и вычитаем каждый своей долей
+    exp_p = (await db.get_expenses_by_purpose(new_from, dt_to) if new_from <= dt_to
+             else {"physical": 0.0, "digital": 0.0, "general": 0.0})
+    partner_new = ((now["net"] - digital_net_now + exp_p["digital"] + exp_p["general"])
+                   * config.PARTNER_GOODS_PERCENT_NEW / 100
+                   - exp_p["digital"] * config.PARTNER_DIGITAL_PERCENT / 100
+                   - exp_p["general"] * config.PARTNER_GENERAL_PERCENT / 100)
     partner = partner_goods + partner_print + partner_digital + partner_new
 
     # Уже выплаченное внутри периода: доля начисляется за весь период, но

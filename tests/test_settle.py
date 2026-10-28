@@ -69,6 +69,17 @@ class SettleTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(st["transfer"]["from"], "misha")
         self.assertAlmostEqual(st["transfer"]["amount"], 1800, places=1)  # расходы делятся 60/40
 
+        # Общий расход 1 000 — поровну, на цифру 1 000 — 80/20
+        async with aiosqlite.connect(db.DB_PATH) as c:
+            await c.execute("INSERT INTO expenses (spent_at, category, amount, paid_by, purpose) VALUES "
+                            "('2026-10-22 10:00:00', 'Корпоратив', 1000, 'Проект', 'general'), "
+                            "('2026-10-22 10:00:00', 'Сервисы курса', 1000, 'Проект', 'digital')")
+            await c.commit()
+        st2 = await settle.state()
+        self.assertAlmostEqual(st2["share"]["danya"], st["share"]["danya"] - 500 - 200, places=1)
+        self.assertAlmostEqual(st2["share"]["misha"], st["share"]["misha"] - 500 - 800, places=1)
+        st = st2
+
         res = await settle.settle(1, "test")
         self.assertAlmostEqual(res["paid"]["danya"] + res["paid"]["misha"],
                                st["share"]["danya"] + st["share"]["misha"], places=1)
@@ -106,10 +117,12 @@ class SettleSheetTest(unittest.TestCase):
         self.assertEqual(rows[4][1:3], ["Миша", "Даня"])
         self.assertIn('MATCH("После резервов у Миши"', rows[5][1].expression)
         self.assertEqual(rows[2][1:3], [0.0, 10.0])                 # перенос: Миша, Даня
-        self.assertIn("F2*80/100", rows[8][1].expression)          # цифра 80/20
-        self.assertIn("(F3-F4)*40/100", rows[9][2].expression)     # физтовары 60/40
-        self.assertEqual(rows[17][0], "КТО КОМУ ПЕРЕВОДИТ")         # B18 — ссылка «Финансов»
-        self.assertIn("Миша переводит Дане", rows[17][1].expression)
+        self.assertIn("(F2-F4)*80/100", rows[8][1].expression)     # цифра и её расходы 80/20
+        self.assertIn("(F3-F5)*40/100", rows[9][2].expression)     # физтовары и их расходы 60/40
+        self.assertIn("-F6*50/100", rows[10][2].expression)        # общие расходы поровну
+        self.assertIn('"Общее"', rows[5][5].expression)
+        self.assertEqual(rows[18][0], "КТО КОМУ ПЕРЕВОДИТ")         # B19 — ссылка «Финансов»
+        self.assertIn("Миша переводит Дане", rows[18][1].expression)
 
     def test_finance_formulas_by_person(self):
         from services import finance_sheet as fs
@@ -118,4 +131,4 @@ class SettleSheetTest(unittest.TestCase):
         self.assertIn('cashflow!$T:$T;"Даня"', f["  из них у Дани"])
         self.assertIn('MATCH("Ушло на СДЭК"', f["  из них у Дани"])
         self.assertNotIn("Ушло на СДЭК", f["  из них у Миши"])
-        self.assertEqual(f["Взаиморасчёт"], "='Взаиморасчёт'!B18")
+        self.assertEqual(f["Взаиморасчёт"], "='Взаиморасчёт'!B19")

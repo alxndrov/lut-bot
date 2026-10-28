@@ -330,6 +330,23 @@ async def init_db(existing_cdek_contract: str | None = None):
                 position INTEGER DEFAULT 0
             )
         """)
+        # На что расход (решение Дани 28.10.2026): физтовары делятся 60/40,
+        # цифра 80/20, общее 50/50 (services/payout.py). У статьи — тип по
+        # умолчанию, у самого расхода — выбранный при вводе
+        for table in ("expense_categories", "expenses"):
+            try:
+                await db.execute(f"ALTER TABLE {table} ADD COLUMN purpose TEXT NOT NULL "
+                                 "DEFAULT 'physical'")
+                if table == "expense_categories":
+                    await db.execute("UPDATE expense_categories SET purpose = 'general' "
+                                     "WHERE name IN ('Развитие', 'Корпоратив')")
+                else:
+                    await db.execute("UPDATE expenses SET purpose = 'general' "
+                                     "WHERE category IN ('Развитие', 'Корпоратив')")
+            except Exception:
+                pass
+        await db.execute("INSERT OR IGNORE INTO expense_categories (name, position, purpose) "
+                         "VALUES ('Сервисы курса', 99, 'digital')")
         for pos, name in enumerate(("Пластик", "Упаковка", "Поп-фильтр")):
             await db.execute(
                 "INSERT OR IGNORE INTO expense_categories (name, position) VALUES (?, ?)",
@@ -3400,14 +3417,41 @@ async def add_expense_category(name: str) -> bool:
         return cur.rowcount > 0
 
 
+PURPOSES = {"physical": "Физтовары", "digital": "Цифра", "general": "Общее"}
+
+
+async def category_purpose(category: str) -> str:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT purpose FROM expense_categories WHERE name = ?",
+                              (category,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else "physical"
+
+
+async def get_expenses_by_purpose(dt_from: str, dt_to: str) -> dict[str, float]:
+    """Расходы за период по типу: physical / digital / general."""
+    dt_from, dt_to = period_bounds(dt_from, dt_to)
+    out = {k: 0.0 for k in PURPOSES}
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT purpose, COALESCE(SUM(amount), 0) FROM expenses "
+            "WHERE datetime(spent_at) BETWEEN datetime(?) AND datetime(?) GROUP BY purpose",
+            (dt_from, dt_to)) as cur:
+            for purpose, total in await cur.fetchall():
+                out[purpose if purpose in out else "physical"] += float(total)
+    return out
+
+
 async def add_expense(category: str, amount: float, comment: str = "",
-                      user_id: int = 0, user_name: str = "", paid_by: str | None = None) -> int:
+                      user_id: int = 0, user_name: str = "", paid_by: str | None = None,
+                      purpose: str | None = None) -> int:
+    purpose = purpose or await category_purpose(category)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO expenses (category, amount, comment, user_id, user_name, paid_by) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO expenses (category, amount, comment, user_id, user_name, paid_by, purpose) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
             (category, float(amount), (comment or "").strip() or None,
-             user_id, user_name, paid_by),
+             user_id, user_name, paid_by, purpose),
         )
         await db.commit()
         return cur.lastrowid
@@ -3884,7 +3928,7 @@ async def get_expenses_for_finance_export() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT id, spent_at, category, amount, comment, paid_by FROM expenses ORDER BY spent_at"
+            "SELECT id, spent_at, category, amount, comment, paid_by, purpose FROM expenses ORDER BY spent_at"
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
 
@@ -4032,6 +4076,7 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
         rows.append({
             "code": f"exp-{r['id']}", "created_at": r["spent_at"], "amount": r["amount"],
             "kind": "Расход", "comment": comment, "paid_by": r["paid_by"] or "Не уточнено",
+            "purpose": PURPOSES.get(r.get("purpose") or "physical", "Физтовары"),
             "delivery_cost": None, "delivery_legacy": None,
         })
 

@@ -137,6 +137,8 @@ OWNER_NAME: str = os.getenv("OWNER_NAME", "Миша")
 PARTNER_GOODS_PERCENT: float = float(os.getenv("PARTNER_GOODS_PERCENT", "10"))
 PARTNER_PRINT_FEE: int = int(os.getenv("PARTNER_PRINT_FEE", "200"))
 PARTNER_DIGITAL_PERCENT: float = float(os.getenv("PARTNER_DIGITAL_PERCENT", "20"))
+# Общие расходы магазина (не физтовары и не цифра) — поровну (решение Дани 28.10.2026)
+PARTNER_GENERAL_PERCENT: float = float(os.getenv("PARTNER_GENERAL_PERCENT", "50"))
 # С 02.09.2026 условия по физтоварам другие: печатает всё Даня, отдельной
 # платы за печать нет, прибыль с таких заказов делится 60/40 в пользу Миши.
 # Заказы до этой даты считаются по-старому — задним числом ничего не

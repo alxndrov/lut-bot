@@ -30,6 +30,7 @@ def _nav_row(current: str) -> list[list[InlineKeyboardButton]]:
 
 class ExpenseStates(StatesGroup):
     waiting_amount = State()
+    waiting_purpose = State()
     waiting_payer = State()
     waiting_category_name = State()
 
@@ -147,7 +148,30 @@ async def on_expense_amount(message: Message, state: FSMContext):
         return
 
     await state.update_data(amount=amount, comment=comment)
+    # На что расход: делится по правилу своего товара (физтовары 60/40,
+    # цифра 80/20, общее 50/50). По умолчанию — тип статьи, отмечен ✓
+    default = await db.category_purpose((await state.get_data()).get("category") or "")
+    await state.set_state(ExpenseStates.waiting_purpose)
+    labels = {"physical": "📦 Физтовары (60/40)", "digital": "💻 Цифра — курс, LUT (80/20)",
+              "general": "🏪 Общее для магазина (50/50)"}
+    await message.answer("На что расход?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=("✓ " if key == default else "") + label,
+                              callback_data=f"exp_purpose:{key}")]
+        for key, label in labels.items()] + [
+        [InlineKeyboardButton(text="Отмена", callback_data="exp_cancel")]]))
+
+
+@router.callback_query(ExpenseStates.waiting_purpose, F.data.startswith("exp_purpose:"))
+async def on_expense_purpose(callback: CallbackQuery, state: FSMContext):
+    purpose = callback.data.split(":", 1)[1]
+    if purpose not in db.PURPOSES:
+        await callback.answer()
+        return
+    await state.update_data(purpose=purpose)
     await state.set_state(ExpenseStates.waiting_payer)
+    await callback.answer()
+    await callback.message.edit_text(f"На что расход: {db.PURPOSES[purpose]}")
+    message = callback.message
     await message.answer("Кто оплатил расход?", reply_markup=InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Со счёта проекта", callback_data="exp_payer:project")],
         [InlineKeyboardButton(text=f"{config.OWNER_NAME} — личными деньгами", callback_data="exp_payer:owner")],
@@ -172,7 +196,8 @@ async def on_expense_payer(callback: CallbackQuery, state: FSMContext):
     u = callback.from_user
     message = callback.message
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
-    expense_id = await db.add_expense(category, amount, comment, u.id, name, paid_by=paid_by)
+    expense_id = await db.add_expense(category, amount, comment, u.id, name, paid_by=paid_by,
+                                      purpose=data.get("purpose"))
     await callback.answer("Записано")
     await message.edit_reply_markup(reply_markup=None)
     await state.clear()
@@ -184,7 +209,8 @@ async def on_expense_payer(callback: CallbackQuery, state: FSMContext):
 
     tail = f"\n💬 {comment}" if comment else ""
     await message.answer(
-        f"✅ Записал расход\n\n🧾 <b>{category}</b> — <b>{amount:,.2f} ₽</b>{tail}\nОплатил: {paid_by}",
+        f"✅ Записал расход\n\n🧾 <b>{category}</b> — <b>{amount:,.2f} ₽</b>{tail}\n"
+        f"На что: {db.PURPOSES.get(data.get('purpose') or 'physical')}\nОплатил: {paid_by}",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="🗑 Удалить", callback_data=f"exp_del:{expense_id}")

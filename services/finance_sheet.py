@@ -35,6 +35,8 @@ HEADERS = [
     # выплата — из чьих денег, налог — кто заплатил, перевод — кто отдал.
     # Пусто — траты личными деньгами: со счетов проекта они не уходили
     'У кого деньги',
+    # Расход: на что — «Физтовары» 60/40, «Цифра» 80/20, «Общее» 50/50 (Миша/Даня)
+    'На что расход',
 ]
 # Типы строк cashflow, которые считаются в выручку: возврат — приход с минусом,
 # но с собственным типом «Возврат», чтобы его было видно (решение Дани 19.10.2026)
@@ -305,6 +307,7 @@ def operation_values(row):
         'Взаимозачёт — без движения денег' if row.get('noncash') else 'Денежная операция',
         row.get('tax_month', ''), row.get('partner_base') if income and not row.get('refund') else None,
         row.get('paid_by', ''), row.get('provider', ''), row.get('holder', ''),
+        row.get('purpose', ''),
     ]))
 
 
@@ -836,7 +839,7 @@ async def sync_finance():
                 rows = settle.sheet_values(cols, await db.get_last_settlement(),
                                            config.GOOGLE_SHEET_FINANCE_TAB)
                 await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, rows,
-                                        (0, 4, 7, 13, 15, 17), 1, 1, date_cells=[(1, 1)])
+                                        (0, 4, 7, 14, 16, 18), 1, 1, date_cells=[(1, 1)])
             except Exception:
                 logger.exception('finance_sheet: лист «Взаиморасчёт» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)
