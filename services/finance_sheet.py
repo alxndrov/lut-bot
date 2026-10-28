@@ -243,7 +243,7 @@ async def free_cash(now=None) -> dict:
     now = now or datetime.now(timezone.utc)
     snap = await build_snapshot(now.year, now, monthly_split=False)
     on_account = money(snap['arrived'] - snap['cdek_paid'] - snap['tax_paid']
-                       - snap['expenses'] - snap['payouts']['total'] - config.EARLY_PAYOUTS)
+                       - snap['expenses'] - snap['payouts']['total'])
     return {'on_account': on_account, 'pending': snap['pending'],
             'cdek_reserve': snap['cdek_reserve'], 'tax_reserve': snap['tax_reserve'],
             'free': money(on_account - snap['cdek_reserve'] - snap['tax_reserve'])}
@@ -826,7 +826,7 @@ async def sync_finance():
                 rows = settle.sheet_values(cols, await db.get_last_settlement(),
                                            config.GOOGLE_SHEET_FINANCE_TAB)
                 await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, rows,
-                                        (0, 4, 15, 18, 23, 27, 33, 35, 39, 41), 1, 2)
+                                        (0, 4, 14, 17, 22, 26, 32, 34, 38, 40), 1, 2)
             except Exception:
                 logger.exception('finance_sheet: лист «Взаиморасчёт» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)

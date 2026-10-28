@@ -180,10 +180,9 @@ class SnapshotTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_free_cash_matches_summary_formula(self):
         snapshot = await fs.build_snapshot(2026, self.now)
-        with patch.object(config, 'EARLY_PAYOUTS', 50):
-            cash = await fs.free_cash(self.now)
+        cash = await fs.free_cash(self.now)   # ранние выплаты — обычная строка payout
         on_account = (snapshot['arrived'] - snapshot['cdek_paid'] - snapshot['tax_paid']
-                      - snapshot['expenses'] - snapshot['payouts']['total'] - 50)
+                      - snapshot['expenses'] - snapshot['payouts']['total'])
         self.assertAlmostEqual(cash['on_account'], on_account, places=2)
         self.assertAlmostEqual(cash['free'], on_account - snapshot['cdek_reserve']
                                - snapshot['tax_reserve'], places=2)

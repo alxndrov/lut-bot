@@ -26,7 +26,7 @@ class SettleTest(unittest.IsolatedAsyncioTestCase):
                 await c.execute("INSERT INTO purchases (user_id, product_id, telegram_payment_id, amount, "
                                 "created_at) VALUES (7, 1, ?, ?, '2026-10-20 10:00:00')", (code, amount))
             await c.commit()
-        for k, v in dict(EARLY_PAYOUTS=0.0, PRODAMUS_FEE_PERCENT=4.0, PAYANYWAY_FEE_PERCENT=4.0,
+        for k, v in dict(PRODAMUS_FEE_PERCENT=4.0, PAYANYWAY_FEE_PERCENT=4.0,
                          NPD_PERCENT=4.0).items():
             p = mock.patch.object(config, k, v)
             p.start()
@@ -92,12 +92,13 @@ class SettleSheetTest(unittest.TestCase):
         cols = {h: i for i, h in enumerate(fs.HEADERS)}
         rows = settle.sheet_values(cols, {"settled_at": "2026-09-30 06:25:08",
                                           "carry_partner": 10, "carry_owner": 0})
-        self.assertEqual(rows[15][0], "= На руках")                 # B16/C16 — ссылки «Финансов»
-        self.assertEqual(rows[41][0], "ИТОГ")                       # B42
-        self.assertIsInstance(rows[15][1], fs.Formula)
+        self.assertEqual(rows[14][0], "= На руках")                 # B15/C15 — ссылки «Финансов»
+        self.assertEqual(rows[40][0], "ИТОГ")                       # B41
+        self.assertIsInstance(rows[14][1], fs.Formula)
         holder = "cashflow!$T:$T"                                   # «У кого деньги»
         self.assertIn(holder, rows[5][1].expression)
         self.assertIn('"Даня"', rows[5][1].expression)
         self.assertIn('"Миша"', rows[5][2].expression)
         self.assertEqual(rows[2][1], 10)                            # перенос — данные бота
-        self.assertIn("Миша переводит Дане", rows[41][1].expression)
+        self.assertIn("Миша переводит Дане", rows[40][1].expression)
+        self.assertFalse(any(r and "ранние" in str(r[0]).lower() for r in rows))
