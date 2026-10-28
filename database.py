@@ -755,9 +755,16 @@ async def init_db(existing_cdek_contract: str | None = None):
                 comment   TEXT,
                 user_id   INTEGER,
                 user_name TEXT,
-                provider  TEXT DEFAULT 'payanyway'
+                provider  TEXT DEFAULT 'payanyway',
+                fee       REAL NOT NULL DEFAULT 0
             )
         """)
+        # amount — сколько списано с баланса, fee — сколько из этого взял сервис
+        # (PayAnyWay берёт комиссию при выводе, а не с оплаты)
+        try:
+            await db.execute("ALTER TABLE paw_withdrawals ADD COLUMN fee REAL NOT NULL DEFAULT 0")
+        except Exception:
+            pass
         # /help: вопрос клиента улетает всем админам, ответ — Reply на него в
         # админском боте. Строка на каждую отправленную копию (у каждого
         # админа свой message_id той же копии) — так реплай любого из них
@@ -3162,9 +3169,10 @@ def _yk_fee_rate_sql() -> str:
     import config
     # PayAnyWay (paw-) — процентом из настроек: суммы после комиссии он не присылает
     return (f"""(CASE WHEN pu.telegram_payment_id LIKE 'b2b-%' THEN 0
-                     WHEN pu.telegram_payment_id LIKE 'paw-%' AND pu.amount > 0
-                     THEN MAX(pu.amount * {float(config.PAYANYWAY_FEE_PERCENT) / 100},
-                              {float(config.PAYANYWAY_FEE_MIN)}) / pu.amount
+                     -- PayAnyWay удерживает комиссию при выводе (4,5%, не меньше 40 ₽ за
+                     -- вывод); в прибыль она начисляется процентом с каждой продажи
+                     WHEN pu.telegram_payment_id LIKE 'paw-%'
+                     THEN {float(config.PAYANYWAY_FEE_PERCENT) / 100}
                      WHEN pu.telegram_payment_id LIKE 'lava-%'
                      THEN {float(config.LAVA_FEE_PERCENT) / 100}
                      WHEN y.income IS NOT NULL AND y.amount > 0
@@ -3859,11 +3867,13 @@ async def get_digital_purchases_for_finance_export() -> list[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT pu.telegram_payment_id AS order_code, pu.created_at,
-                      pu.amount, p.name AS product_name, p.category
+                      pu.amount, COALESCE(p.name, 'Проверка оплаты') AS product_name, p.category
                FROM purchases pu
-               JOIN products p ON p.id = pu.product_id
-               -- физтовар, проданный вне бота (/sale), заказа не имеет — тоже здесь
-               WHERE p.category != 'physical' OR pu.telegram_payment_id LIKE 'b2b-%'
+               LEFT JOIN products p ON p.id = pu.product_id
+               -- физтовар, проданный вне бота (/sale), заказа не имеет — тоже здесь;
+               -- без товара — проверочные платежи (1 ₽ через PayAnyWay 23.10)
+               WHERE COALESCE(p.category, 'digital') != 'physical'
+                  OR pu.telegram_payment_id LIKE 'b2b-%'
                ORDER BY pu.created_at"""
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -3894,13 +3904,28 @@ WALLETS = {"payanyway": ("PayAnyWay", "paw-", "pawout", "PAYANYWAY_FEE_PERCENT")
            "lava": ("lava.top", "lava-", "lavaout", "LAVA_FEE_PERCENT")}
 
 
+def paw_withdrawal_fee(received: float) -> tuple[float, float]:
+    """PayAnyWay при выводе берёт 4,5%, но не меньше 40 ₽. По сумме, пришедшей
+    на карту, — (списано с баланса, комиссия)."""
+    import config
+    pct, minimum = config.PAYANYWAY_FEE_PERCENT / 100, config.PAYANYWAY_FEE_MIN
+    gross = received / (1 - pct)
+    if gross * pct < minimum:
+        gross = received + minimum
+    gross = round(gross, 2)
+    return gross, round(gross - received, 2)
+
+
 async def add_paw_withdrawal(amount: float, comment: str = "", user_id: int = 0,
                              user_name: str = "", provider: str = "payanyway") -> int:
+    """amount — сколько пришло на карту; с баланса PayAnyWay списывается больше
+    на его комиссию (paw_withdrawal_fee)."""
+    gross, fee = paw_withdrawal_fee(amount) if provider == "payanyway" else (float(amount), 0.0)
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
-            "INSERT INTO paw_withdrawals (amount, comment, user_id, user_name, provider) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (float(amount), (comment or "").strip() or None, user_id, user_name, provider))
+            "INSERT INTO paw_withdrawals (amount, comment, user_id, user_name, provider, fee) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (gross, (comment or "").strip() or None, user_id, user_name, provider, fee))
         await db.commit()
         return cur.lastrowid
 
@@ -3913,17 +3938,17 @@ async def get_paw_withdrawals() -> list[dict]:
 
 
 async def paw_balance(provider: str = "payanyway") -> float:
-    """Сколько лежит на балансе PayAnyWay / lava.top: оплаты за вычетом
-    комиссии минус всё выведенное (/payments → «Вывод с …»)."""
+    """Сколько лежит на балансе PayAnyWay / lava.top: оплаты (у lava.top — за
+    вычетом её комиссии) минус всё списанное выводами (/payments → «Вывод с …»)."""
     import config
     _, prefix, _, fee_attr = WALLETS[provider]
     async with aiosqlite.connect(DB_PATH) as db:
-        # PayAnyWay берёт не меньше минимальной комиссии с платежа
-        minimum = float(getattr(config, "PAYANYWAY_FEE_MIN", 0)) if provider == "payanyway" else 0.0
-        pct = getattr(config, fee_attr) / 100
+        # PayAnyWay держит оплаты целиком (комиссия — при выводе), lava.top
+        # удерживает свою сразу
+        pct = 0.0 if provider == "payanyway" else getattr(config, fee_attr) / 100
         net = (await (await db.execute(
-            "SELECT COALESCE(SUM(amount - MAX(amount * ?, ?)), 0) FROM purchases "
-            "WHERE telegram_payment_id LIKE ?", (pct, minimum, prefix + "%"))).fetchone())[0]
+            "SELECT COALESCE(SUM(amount * (1 - ?)), 0) FROM purchases "
+            "WHERE telegram_payment_id LIKE ?", (pct, prefix + "%"))).fetchone())[0]
         out = (await (await db.execute(
             "SELECT COALESCE(SUM(amount), 0) FROM paw_withdrawals "
             "WHERE COALESCE(provider, 'payanyway') = ?", (provider,))).fetchone())[0]
@@ -4030,7 +4055,7 @@ async def get_cashflow_export_rows(admin_ids: list[int] | None = None,
         name, _, code, _ = WALLETS.get(r.get("provider") or "payanyway", WALLETS["payanyway"])
         rows.append({
             "code": f"{code}-{r['id']}", "created_at": r["paid_at"], "amount": r["amount"],
-            "kind": "Расход",
+            "kind": "Расход", "fee": float(r.get("fee") or 0),
             "comment": f"Вывод с баланса {name}" + (f": {r['comment']}" if r["comment"] else ""),
             "delivery_cost": None, "delivery_legacy": None,
         })
@@ -5501,14 +5526,20 @@ async def income_by_holder() -> dict:
                                               OR pu.telegram_payment_id LIKE 'b2b-%'
                                             THEN {rate} ELSE {prodamus} END, 2)),
                        SUM(CASE WHEN {holder_sql()} = 'misha'
-                                THEN pu.amount * {misha_tax_rate_sql()} ELSE 0 END)
+                                THEN pu.amount * {misha_tax_rate_sql()} ELSE 0 END),
+                       SUM(CASE WHEN pu.telegram_payment_id LIKE 'paw-%'
+                                THEN ROUND(pu.amount * {rate}, 2) ELSE 0 END)
                 FROM purchases pu {_YK_JOIN} GROUP BY who""") as cur:
             misha_tax = 0.0
-            for who, gross, fee, tax in await cur.fetchall():
-                out[who] = {"gross": float(gross or 0), "fee": float(fee or 0)}
+            for who, gross, fee, tax, paw_fee in await cur.fetchall():
+                # paw_fee — начислена в прибыль, но PayAnyWay возьмёт её только при выводе
+                out[who] = {"gross": float(gross or 0), "fee": float(fee or 0),
+                            "paw_fee": float(paw_fee or 0)}
                 misha_tax += float(tax or 0)
         async with db.execute("SELECT COALESCE(SUM(amount), 0) FROM refunds") as cur:
             out["danya"]["refunds"] = float((await cur.fetchone())[0])   # возвраты — физтовары, у Дани
+        async with db.execute("SELECT COALESCE(SUM(fee), 0) FROM paw_withdrawals") as cur:
+            out["misha"]["withdraw_fee"] = float((await cur.fetchone())[0])   # выводит Миша
     out["misha_tax"] = misha_tax
     return out
 

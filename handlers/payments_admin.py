@@ -322,10 +322,12 @@ async def cb_pawout(callback: CallbackQuery, state: FSMContext):
     await state.update_data(provider=provider)
     bal = await db.paw_balance(provider)
     name = db.WALLETS[provider][0]
+    fee_note = ("\nКомиссию PayAnyWay (4,5%, не меньше 40 ₽) посчитаю сам — с баланса "
+                "спишется пришедшее плюс она." if provider == "payanyway" else "")
     await callback.message.answer(
-        f"💸 Сколько рублей пришло на счёт с {name}? По боту на балансе ≈{bal:,.2f} ₽.\n"
-        "Пришли сумму, которая пришла на счёт (можно с комментарием через пробел). "
-        "Отмена — /cancel.".replace(",", " "))
+        f"💸 Сколько рублей пришло на счёт с {name}? По боту на балансе ≈{bal:,.2f} ₽.\n".replace(",", " ")
+        + "Пришли сумму, которая пришла на счёт (можно с комментарием через пробел)."
+        + fee_note + " Отмена — /cancel.")
 
 
 @router.message(Command("cancel"), StateFilter(PawOut.amount))
@@ -354,5 +356,7 @@ async def msg_pawout(message: Message, state: FSMContext):
     bal = await db.paw_balance(provider)
     name = db.WALLETS[provider][0]
     logger.info(f"payments: вывод с {name} {amount} ({u.id})")
-    await message.answer(f"✅ Записал вывод {amount:,.2f} ₽. На балансе {name} по боту осталось "
-                         f"{bal:,.2f} ₽.".replace(",", " "))
+    fee = db.paw_withdrawal_fee(amount)[1] if provider == "payanyway" else 0.0
+    await message.answer((f"✅ Записал вывод {amount:,.2f} ₽"
+                          + (f" (+ комиссия PayAnyWay {fee:,.2f} ₽)" if fee else "")
+                          + f". На балансе {name} по боту осталось {bal:,.2f} ₽.").replace(",", " "))

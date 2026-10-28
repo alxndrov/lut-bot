@@ -43,13 +43,16 @@ class SettleTest(unittest.IsolatedAsyncioTestCase):
     async def test_split_hold_and_settle(self):
         st = await settle.state()
         self.assertAlmostEqual(st["held"]["danya"], 9600)          # 10 000 − 4% комиссии
-        self.assertAlmostEqual(st["held"]["misha"], 38400)         # 40 000 − 4%
+        # PayAnyWay берёт комиссию при выводе: у Миши все 40 000, а 4% — его резерв
+        self.assertAlmostEqual(st["held"]["misha"], 40000)
+        self.assertAlmostEqual(st["paw_fee"], 1600)
         self.assertAlmostEqual(st["tax"]["danya"], 400)            # 4% с его чеков
         self.assertAlmostEqual(st["tax"]["misha"], 1600)           # 4% с чеков Миши
         # цифра 80/20: чистыми 50 000 − 2 000 комиссии − 2 000 налога = 46 000
         self.assertAlmostEqual(st["share"]["misha"] + st["share"]["danya"], 46000, places=1)
         self.assertAlmostEqual(st["share"]["danya"], 9200, places=1)
-        # у Миши лишнее: 38 400 − 1 600 налога − 36 800 доли = 0; у Дани: 9 600 − 400 − 9 200 = 0
+        # у Миши: 40 000 − 1 600 налога − 1 600 комиссии при выводе − 36 800 доли = 0;
+        # у Дани: 9 600 − 400 − 9 200 = 0
         self.assertIsNone(st["transfer"])
 
         # Миша заранее взял себе 5 000 из своих: денег у него меньше, но и доля к выплате тоже
@@ -86,6 +89,14 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class PawWithdrawalFeeTest(unittest.TestCase):
+    def test_fee_on_withdrawal(self):
+        with mock.patch.object(config, "PAYANYWAY_FEE_PERCENT", 4.5), \
+             mock.patch.object(config, "PAYANYWAY_FEE_MIN", 40.0):
+            self.assertEqual(db.paw_withdrawal_fee(9550), (10000.0, 450.0))   # 4,5% от списанного
+            self.assertEqual(db.paw_withdrawal_fee(500), (540.0, 40.0))       # минимум 40 ₽
+
+
 class SettleSheetTest(unittest.TestCase):
     def test_sheet_is_formulas_on_cashflow(self):
         from services import finance_sheet as fs
@@ -93,12 +104,13 @@ class SettleSheetTest(unittest.TestCase):
         rows = settle.sheet_values(cols, {"settled_at": "2026-09-30 06:25:08",
                                           "carry_partner": 10, "carry_owner": 0})
         self.assertEqual(rows[14][0], "= На руках")                 # B15/C15 — ссылки «Финансов»
-        self.assertEqual(rows[40][0], "ИТОГ")                       # B41
+        self.assertEqual(rows[41][0], "ИТОГ")                       # B42
         self.assertIsInstance(rows[14][1], fs.Formula)
         holder = "cashflow!$T:$T"                                   # «У кого деньги»
         self.assertIn(holder, rows[5][1].expression)
         self.assertIn('"Даня"', rows[5][1].expression)
         self.assertIn('"Миша"', rows[5][2].expression)
         self.assertEqual(rows[2][1], 10)                            # перенос — данные бота
-        self.assertIn("Миша переводит Дане", rows[40][1].expression)
+        self.assertIn("Миша переводит Дане", rows[41][1].expression)
+        self.assertEqual(rows[20][0], "Комиссия PayAnyWay при выводе")  # C21 — ссылка «Финансов»
         self.assertFalse(any(r and "ранние" in str(r[0]).lower() for r in rows))

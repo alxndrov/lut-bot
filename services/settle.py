@@ -56,15 +56,20 @@ async def state() -> dict:
         "danya": (d["gross"] - d["fee"] - d.get("refunds", 0) - cdek["paid"]
                   - npd_paid.get("danya", 0) - exp["project"] - from_whose.get("danya", 0)
                   - pending + moved["danya"]),
-        "misha": (m["gross"] - m["fee"] - npd_paid.get("misha", 0)
-                  - from_whose.get("misha", 0) + moved["misha"]),
+        # Комиссию PayAnyWay сервис берёт при выводе: с денег Миши вычитаем
+        # только уже взятую, остальное — его резерв (ниже)
+        "misha": (m["gross"] - (m["fee"] - m.get("paw_fee", 0)) - m.get("withdraw_fee", 0)
+                  - npd_paid.get("misha", 0) - from_whose.get("misha", 0) + moved["misha"]),
     }
+    paw_left = await db.paw_balance("payanyway")
+    paw_fee = (max(paw_left * config.PAYANYWAY_FEE_PERCENT / 100, config.PAYANYWAY_FEE_MIN)
+               if paw_left >= 0.01 else 0.0)
     months = await tax_account.months()
     tax = {"danya": sum(r["accrued"] - r["paid"] for r in months),
            "misha": inc["misha_tax"] - npd_paid.get("misha", 0)}
     cdek_due = cdek["due"]
     share = {"danya": s["partner_left"], "misha": s["owner_left"]}
-    reserve = {"danya": tax["danya"] + cdek_due, "misha": tax["misha"]}
+    reserve = {"danya": tax["danya"] + cdek_due, "misha": tax["misha"] + paw_fee}
     pos = {"danya": held["danya"] + pending - reserve["danya"] - share["danya"],
            "misha": held["misha"] - reserve["misha"] - share["misha"]}
     # Сколько реально можно отдать: у Дани — без денег в пути
@@ -77,6 +82,7 @@ async def state() -> dict:
         "since": last["settled_at"] if last else None, "split": s, "now": now_utc,
         "held": {k: _r(v) for k, v in held.items()}, "pending": _r(pending),
         "tax": {k: _r(v) for k, v in tax.items()}, "cdek_due": _r(cdek_due),
+        "paw_fee": _r(paw_fee),
         "reserve": {k: _r(v) for k, v in reserve.items()},
         "share": {k: _r(v) for k, v in share.items()},
         "reimb": {"danya": _r(s.get("reimb_partner", 0)), "misha": _r(s.get("reimb_owner", 0))},
@@ -120,7 +126,8 @@ def text(st: dict) -> str:
         "",
         "🔒 <b>Резервы — остаются у того, кто платит</b>",
         f"• Даня: налог {_rub(st['tax'][d])}, СДЭК {_rub(st['cdek_due'])}",
-        f"• Миша: налог {_rub(st['tax'][m])}",
+        f"• Миша: налог {_rub(st['tax'][m])}"
+        + (f", комиссия PayAnyWay при выводе {_rub(st['paw_fee'])}" if st["paw_fee"] >= 0.01 else ""),
         "",
         f"💰 <b>Доли к выплате {_since(st)}</b>",
         f"• Даня: {_rub(st['share'][d])}" + (f" (в т.ч. возмещение личных трат {_rub(st['reimb'][d])})"
@@ -188,7 +195,8 @@ def settled_text(res: dict) -> str:
 # Всё на листе — формулы по cashflow (решение Дани 27.10.2026). Бот пишет
 # только исходные факты, которых в cashflow нет: дату последнего расчёта и
 # перенесённый с него долг. Ссылки «Финансов» на этот лист — по адресам
-# (B/C15 — на руках, B41 — итог): порядок строк не менять без правки ссылок.
+# (B/C15 — на руках, B/C19 — налог, C21 — комиссия PayAnyWay, B42 — итог):
+# порядок строк не менять без правки ссылок.
 
 def _col_letter(i: int) -> str:
     out = ""
@@ -206,6 +214,7 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
     A, B, C, D = c["Дата операции"], c["Номер операции"], c["Тип"], c["Сумма"]
     E, F, G, H = c["Комиссия Prodamus"], c["Налог"], c["Отложено на СДЭК"], c["К выплате"]
     J, M, R, T = c["Товар"], c["Получатель"], c["Кто внёс расход"], c["У кого деньги"]
+    S = c["Платёжная система"]
     fin = "'Финансы'"
 
     def f(expr):
@@ -228,6 +237,9 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
         since = 0
     carry_d = float(last.get("carry_partner") or 0) if last else 0.0
     carry_m = float(last.get("carry_owner") or 0) if last else 0.0
+    paw_bal = f'(SUMIFS({D};{S};"PayAnyWay";{C};"<>Расход")-SUMIF({B};"pawout-*";{D}))'
+    paw_pct = round(config.PAYANYWAY_FEE_PERCENT * 10)   # 4,5% → 45/1000: дробь в локали — запятая
+    paw_min = round(config.PAYANYWAY_FEE_MIN)
     rows = [
         ["ВЗАИМОРАСЧЁТ ДАНИ И МИШИ", "", "", "Всё считается формулами по листу cashflow. "
          "Строки 2–4 — исходные данные, их пишет бот при расчёте"],
@@ -237,7 +249,9 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
         ["ДЕНЬГИ ПРОЕКТА", "Даня", "Миша", ""],                                    # 5
         ["Принято (с возвратами)", *both(f'SUMIFS({D};{C};"<>Расход";{T};{{who}})'),
          "Даня — Prodamus, ЮKassa, переводы ему; Миша — PayAnyWay, lava.top, переводы ему"],
-        ["− комиссия", *both(f'SUMIFS({E};{C};"<>Расход";{T};{{who}})'), ""],
+        ["− комиссия", *both(f'SUMIFS({E};{C};"<>Расход";{T};{{who}};{S};"<>PayAnyWay")'
+                             f'+SUMIFS({E};{B};"pawout-*";{T};{{who}})'),
+         "Уже взятая: Prodamus, ЮKassa, lava.top — сразу, PayAnyWay — при выводе"],
         ["− СДЭК оплачено", f(f'SUMIF({B};"cdek-*";{D})'), 0, "Платит Даня"],
         ["− налог оплачено", *both(f'SUMIFS({D};{B};"npd-*";{T};{{who}})'), "Каждый — свой"],
         ["− расходы со счёта проекта", *both(f'SUMIFS({D};{B};"exp-*";{T};{{who}})'),
@@ -256,32 +270,35 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
         ["РЕЗЕРВЫ (у того, кто платит)", "Даня", "Миша", ""],                     # 18
         ["Налог НПД к уплате", *both(f'SUMIFS({F};{C};"<>Расход";{T};{{who}})-{{col}}9'), ""],
         ["СДЭК к оплате", f(f"SUM({G})-B8"), 0, ""],
-        ["Итого резервы", f("B19+B20"), f("C19+C20"), ""],
+        ["Комиссия PayAnyWay при выводе", 0,
+         f(f'IF({paw_bal}>=0,01;MAX({paw_bal}*{paw_pct}/1000;{paw_min});0)'),
+         f"{config.PAYANYWAY_FEE_PERCENT:g}%, не меньше {config.PAYANYWAY_FEE_MIN:g} ₽ — с того, что лежит в PayAnyWay"],
+        ["Итого резервы", f("B19+B20+B21"), f("C19+C20+C21"), ""],
         [],
-        ["ДОЛИ С ПОСЛЕДНЕГО РАСЧЁТА", "", "", ""],                                 # 23
+        ["ДОЛИ С ПОСЛЕДНЕГО РАСЧЁТА", "", "", ""],                                 # 24
         ["Чистыми с цифры", f(f'SUMIFS({H};{J};"Цифровой";{C};"<>Расход";{A};">"&$B$2)'), "",
          "После комиссии и налога"],
         ["Чистыми с физтоваров", f(f'SUMIFS({H};{J};"<>Цифровой";{C};"<>Расход";{A};">"&$B$2)'), "",
          "После комиссии, налога и СДЭК, с возвратами"],
         ["Расходы", f(f'SUMIFS({D};{B};"exp-*";{A};">"&$B$2)'), "", "Все, в том числе личными деньгами"],
-        ["", "Даня", "Миша", ""],                                                   # 27
+        ["", "Даня", "Миша", ""],                                                   # 28
         [f"Цифра {digital}/{100 - digital}",
-         f(f"B24*{digital}/100"), f(f"B24*{100 - digital}/100"), ""],
+         f(f"B25*{digital}/100"), f(f"B25*{100 - digital}/100"), ""],
         [f"Физтовары и расходы {goods}/{100 - goods}",
-         f(f"(B25-B26)*{goods}/100"), f(f"(B25-B26)*{100 - goods}/100"), ""],
+         f(f"(B26-B27)*{goods}/100"), f(f"(B26-B27)*{100 - goods}/100"), ""],
         ["+ возмещение личных трат", *both(f'SUMIFS({D};{B};"exp-*";{R};{{who}};{A};">"&$B$2)'), ""],
         ["− уже выплачено", *both(f'SUMIFS({D};{B};"payout-*";{M};{{who}};{A};">"&$B$2)'), ""],
         ["+ перенос", f("B3"), f("C3"), ""],
-        ["= Доля к выплате", f("B28+B29+B30-B31+B32"), f("C28+C29+C30-C31+C32"), ""],
+        ["= Доля к выплате", f("B29+B30+B31-B32+B33"), f("C29+C30+C31-C32+C33"), ""],
         [],
-        ["ПОЗИЦИЯ", "Даня", "Миша", ""],                                           # 35
+        ["ПОЗИЦИЯ", "Даня", "Миша", ""],                                           # 36
         ["На руках (с деньгами в пути)", f("B15+B12"), f("C15"), ""],
-        ["− резервы", f("B21"), f("C21"), ""],
-        ["− доля к выплате", f("B33"), f("C33"), ""],
-        ["= Лишнее (+) / не хватает (−)", f("B36-B37-B38"), f("C36-C37-C38"), ""],
+        ["− резервы", f("B22"), f("C22"), ""],
+        ["− доля к выплате", f("B34"), f("C34"), ""],
+        ["= Лишнее (+) / не хватает (−)", f("B37-B38-B39"), f("C37-C38-C39"), ""],
         [],
-        ["ИТОГ", f('IF(AND(C39>=1;B39<=-1);"Миша переводит Дане "&TEXT(MIN(C39;-B39);"#,##0.00")&" ₽";'
-                   'IF(AND(B39-B12>=1;C39<=-1);"Даня переводит Мише "&TEXT(MIN(B39-B12;-C39);"#,##0.00")&" ₽";'
+        ["ИТОГ", f('IF(AND(C40>=1;B40<=-1);"Миша переводит Дане "&TEXT(MIN(C40;-B40);"#,##0.00")&" ₽";'
+                   'IF(AND(B40-B12>=1;C40<=-1);"Даня переводит Мише "&TEXT(MIN(B40-B12;-C40);"#,##0.00")&" ₽";'
                    '"Переводить друг другу ничего не нужно"))'), "", "Потом каждый забирает свою долю из своих денег"],
     ]
     return rows

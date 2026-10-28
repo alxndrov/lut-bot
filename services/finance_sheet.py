@@ -290,6 +290,8 @@ def operation_values(row):
     income = row['kind'] in INCOME
     amount = float(row['amount'])
     fee = (row['fee'] if 'fee' in row else money(amount * config.PRODAMUS_FEE_PERCENT / 100)) if income else None
+    if str(row['code']).startswith('pawout-'):   # PayAnyWay берёт комиссию при выводе
+        fee = row.get('fee') or 0.0
     if row.get('refund'):
         fee = 0.0
     tax = row.get('tax', 0) if income else None
@@ -826,7 +828,7 @@ async def sync_finance():
                 rows = settle.sheet_values(cols, await db.get_last_settlement(),
                                            config.GOOGLE_SHEET_FINANCE_TAB)
                 await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, rows,
-                                        (0, 4, 14, 17, 22, 26, 32, 34, 38, 40), 1, 2)
+                                        (0, 4, 14, 17, 23, 27, 33, 35, 39, 41), 1, 2)
             except Exception:
                 logger.exception('finance_sheet: лист «Взаиморасчёт» не обновился')
             logger.info('finance_sheet: сверено %s операций, %s', len(snapshot['rows']), stats)
