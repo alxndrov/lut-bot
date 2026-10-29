@@ -122,12 +122,12 @@ def text(st: dict) -> str:
         f"• у Дани: {_rub(st['held'][d])}" + (f" (+ {_rub(st['pending'])} ещё в пути от Prodamus/ЮKassa)"
                                              if st["pending"] >= 0.01 else ""),
         f"• у Миши: {_rub(st['held'][m])}" + (f" (из них на балансе PayAnyWay/lava.top {_rub(st['paw_balance'])})"
-                                             if st["paw_balance"] >= 0.01 else ""),
+                                             if st["paw_balance"] >= 0.01 else "")
+        + (f"; PayAnyWay при выводе удержит ≈{_rub(st['paw_fee'])}" if st["paw_fee"] >= 0.01 else ""),
         "",
         "🔒 <b>Резервы — остаются у того, кто платит</b>",
         f"• Даня: налог {_rub(st['tax'][d])}, СДЭК {_rub(st['cdek_due'])}",
-        f"• Миша: налог {_rub(st['tax'][m])}"
-        + (f", комиссия PayAnyWay при выводе {_rub(st['paw_fee'])}" if st["paw_fee"] >= 0.01 else ""),
+        f"• Миша: налог {_rub(st['tax'][m])}",
         "",
         f"💰 <b>Доли к выплате {_since(st)}</b>",
         f"• Даня: {_rub(st['share'][d])}" + (f" (в т.ч. возмещение личных трат {_rub(st['reimb'][d])})"
@@ -180,7 +180,13 @@ def my_text(st: dict, me: str) -> str:
              + (f" (+ {_rub(st['pending'])} ещё в пути от Prodamus/ЮKassa — тратить их пока нельзя)"
                 if me == "danya" and st["pending"] >= 0.01 else "")
              + (f", из них на балансе PayAnyWay/lava.top {_rub(st['paw_balance'])}"
-                if me == "misha" and st["paw_balance"] >= 0.01 else ""), ""]
+                if me == "misha" and st["paw_balance"] >= 0.01 else "")]
+    if me == "misha" and st["paw_fee"] >= 0.01:
+        # Комиссию PayAnyWay сервис удержит сам при выводе — откладывать её не
+        # нужно, просто на карту придёт меньше (замечание Дани 29.10.2026)
+        lines.append(f"PayAnyWay при выводе удержит ≈{_rub(st['paw_fee'])} — на деле у тебя "
+                     f"<b>{_rub(st['held'][me] - st['paw_fee'])}</b>.")
+    lines.append("")
     step = 1
     if t and t["from"] == me:
         lines.append(f"{step}️⃣ <b>Отправь {DATIVE[other]} {_rub(t['amount'])}</b>")
@@ -196,21 +202,20 @@ def my_text(st: dict, me: str) -> str:
     if carry[me] >= 1:   # копейки округления не показываем
         lines.append(f"   Ещё {_rub(carry[me])} твоей доли пока не из чего взять — перейдёт в следующий расчёт.")
     step += 1
-    res = []
-    if me == "danya":
-        res.append(f"налог {_rub(st['tax'][me])}")
-        if st["cdek_due"] >= 0.01:
-            res.append(f"СДЭК {_rub(st['cdek_due'])}")
-    else:
-        res.append(f"налог {_rub(st['tax'][me])}")
-        if st["paw_fee"] >= 0.01:
-            res.append(f"будущая комиссия PayAnyWay при выводе {_rub(st['paw_fee'])}")
-    lines.append(f"{step}️⃣ <b>Оставь в резерве {_rub(st['reserve'][me])}</b> — " + ", ".join(res))
+    # Что реально откладывать: у Миши комиссия PayAnyWay — не резерв на руках,
+    # её удержит сервис при выводе
+    keep = _r(st["reserve"][me] - (st["paw_fee"] if me == "misha" else 0.0))
+    res = [f"налог {_rub(st['tax'][me])}"]
+    if me == "danya" and st["cdek_due"] >= 0.01:
+        res.append(f"СДЭК {_rub(st['cdek_due'])}")
+    lines.append(f"{step}️⃣ <b>Оставь в резерве {_rub(keep)}</b> — "
+                 + (", ".join(res) if len(res) > 1 else "это налог к уплате"))
     rest = _r(held[me] - st["reserve"][me] - paid[me])
-    lines += ["", f"После этого у тебя останется денег проекта {_rub(st['reserve'][me] + max(rest, 0.0))}"
+    lines += ["", f"После этого у тебя останется денег проекта {_rub(keep + max(rest, 0.0))}"
               + (f" (резерв + {_rub(rest)} свободных)" if rest >= 1 else " — ровно резерв") + "."]
     if me == "misha" and st["paw_balance"] >= 0.01:
-        lines.append("Долю бери с баланса PayAnyWay выводом — запиши его кнопкой «💸 Вывод с PayAnyWay» в /payments.")
+        lines.append("Деньги с баланса PayAnyWay/lava.top выводи на карту и записывай вывод кнопкой "
+                     "«💸 Вывод с …» в /payments (сумму, что пришла на карту).")
     lines += ["", "Когда переведёте — любой из вас жмёт «✅ Перевели — зафиксировать расчёт»."]
     return "\n".join(lines)
 
@@ -250,7 +255,7 @@ def settled_text(res: dict) -> str:
             line += f"; ещё {_rub(res['carry'][who])} — в следующий расчёт"
         lines.append(line)
     lines += ["", f"🔒 Остаются в резерве: у Дани {_rub(st['reserve']['danya'])}, "
-                  f"у Миши {_rub(st['reserve']['misha'])}"]
+                  f"у Миши {_rub(st['tax']['misha'])}"]
     return "\n".join(lines)
 
 
