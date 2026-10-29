@@ -106,6 +106,7 @@ class PawWithdrawalFeeTest(unittest.TestCase):
              mock.patch.object(config, "PAYANYWAY_FEE_MIN", 40.0):
             self.assertEqual(db.paw_withdrawal_fee(9550), (10000.0, 450.0))   # 4,5% от списанного
             self.assertEqual(db.paw_withdrawal_fee(500), (540.0, 40.0))       # минимум 40 ₽
+            self.assertEqual(db.paw_withdrawal_fee(38611.60), (40431.0, 1819.4))  # вывод Миши 28.10
 
 
 class SettleSheetTest(unittest.TestCase):

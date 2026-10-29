@@ -3952,11 +3952,25 @@ def paw_withdrawal_fee(received: float) -> tuple[float, float]:
     """PayAnyWay при выводе берёт 4,5%, но не меньше 40 ₽. По сумме, пришедшей
     на карту, — (списано с баланса, комиссия)."""
     import config
+    from decimal import Decimal, ROUND_HALF_UP
     pct, minimum = config.PAYANYWAY_FEE_PERCENT / 100, config.PAYANYWAY_FEE_MIN
     gross = received / (1 - pct)
     if gross * pct < minimum:
         gross = received + minimum
     gross = round(gross, 2)
+    # PayAnyWay округляет комиссию от списанного до копейки вверх с половины,
+    # и обратный пересчёт бывает неоднозначен на копейку (38 611,60 на карту ←
+    # 40 431,00 или 40 430,99). Берём согласованный вариант, предпочитая целые
+    # рубли — на балансе копятся суммы оплат, обычно без копеек.
+    cents = Decimal("0.01")
+    fits = []
+    for g in (gross - 0.01, gross, gross + 0.01):
+        g = Decimal(str(round(g, 2)))
+        fee = max((g * Decimal(str(pct))).quantize(cents, ROUND_HALF_UP), Decimal(str(minimum)))
+        if (Decimal(str(received)).quantize(cents) + fee) == g:
+            fits.append(g)
+    if fits:
+        gross = float(next((g for g in fits if g == g.to_integral_value()), fits[len(fits) // 2]))
     return gross, round(gross - received, 2)
 
 
