@@ -89,7 +89,9 @@ async def state() -> dict:
         "pos": {k: _r(v) for k, v in pos.items()}, "transfer": transfer,
         "on_accounts": _r(held["danya"] + held["misha"]),
         "unallocated": _r(pos["danya"] + pos["misha"]),
-        "paw_balance": _r(await db.paw_balance("payanyway") + await db.paw_balance("lava")),
+        "paw_balance": _r(paw_left + await db.paw_balance("lava")),
+        "paw_rub": _r(paw_left), "lava_rub": _r(await db.paw_balance("lava")),
+        "lava_usd": await db.lava_usd_balance(),
     }
 
 
@@ -107,6 +109,29 @@ def _since(st: dict) -> str:
 DATIVE = {"danya": "Дане", "misha": "Мише"}
 
 
+def _usd(x: float) -> str:
+    return f"${x:,.2f}".replace(",", " ")
+
+
+def misha_where(st: dict) -> list[str]:
+    """Где лежат деньги Миши — по отдельности, как он видит в кабинетах:
+    PayAnyWay (и сколько придёт на карту после комиссии), lava.top в долларах,
+    остальное — уже выведено на карту."""
+    out = []
+    if st["paw_rub"] >= 0.01:
+        line = f"на балансе PayAnyWay {_rub(st['paw_rub'])}"
+        if st["paw_fee"] >= 0.01:
+            line += (f" — при выводе сервис удержит ≈{_rub(st['paw_fee'])}, "
+                     f"на карту придёт ≈{_rub(st['paw_rub'] - st['paw_fee'])}")
+        out.append(line)
+    if st["lava_rub"] >= 0.01:
+        out.append(f"на балансе lava.top {_usd(st['lava_usd'])} (≈{_rub(st['lava_rub'])} по курсу дня оплаты)")
+    card = _r(st["held"]["misha"] - st["paw_rub"] - st["lava_rub"])
+    if card >= 1:
+        out.append(f"уже выведено к тебе на карту {_rub(card)}")
+    return out
+
+
 def verdict(st: dict) -> str:
     t = st["transfer"]
     if not t:
@@ -121,9 +146,8 @@ def text(st: dict) -> str:
         f"💼 <b>Деньги проекта у нас: {_rub(st['held'][d] + st['held'][m])}</b>",
         f"• у Дани: {_rub(st['held'][d])}" + (f" (+ {_rub(st['pending'])} ещё в пути от Prodamus/ЮKassa)"
                                              if st["pending"] >= 0.01 else ""),
-        f"• у Миши: {_rub(st['held'][m])}" + (f" (из них на балансе PayAnyWay/lava.top {_rub(st['paw_balance'])})"
-                                             if st["paw_balance"] >= 0.01 else "")
-        + (f"; PayAnyWay при выводе удержит ≈{_rub(st['paw_fee'])}" if st["paw_fee"] >= 0.01 else ""),
+        f"• у Миши: {_rub(st['held'][m])}",
+        *[f"   – {x.replace('уже выведено к тебе', 'уже выведено ему')}" for x in misha_where(st)],
         "",
         "🔒 <b>Резервы — остаются у того, кто платит</b>",
         f"• Даня: налог {_rub(st['tax'][d])}, СДЭК {_rub(st['cdek_due'])}",
@@ -179,13 +203,15 @@ def my_text(st: dict, me: str) -> str:
              f"Сейчас у тебя денег проекта: <b>{_rub(st['held'][me])}</b>"
              + (f" (+ {_rub(st['pending'])} ещё в пути от Prodamus/ЮKassa — тратить их пока нельзя)"
                 if me == "danya" and st["pending"] >= 0.01 else "")
-             + (f", из них на балансе PayAnyWay/lava.top {_rub(st['paw_balance'])}"
-                if me == "misha" and st["paw_balance"] >= 0.01 else "")]
-    if me == "misha" and st["paw_fee"] >= 0.01:
-        # Комиссию PayAnyWay сервис удержит сам при выводе — откладывать её не
+             ]
+    if me == "misha":
+        # Балансы по отдельности — чтобы в кабинете PayAnyWay сумма совпадала;
+        # комиссию PayAnyWay сервис удержит сам при выводе — откладывать её не
         # нужно, просто на карту придёт меньше (замечание Дани 29.10.2026)
-        lines.append(f"PayAnyWay при выводе удержит ≈{_rub(st['paw_fee'])} — на деле у тебя "
-                     f"<b>{_rub(st['held'][me] - st['paw_fee'])}</b>.")
+        lines += [f"• {x}" for x in misha_where(st)]
+        if st["paw_fee"] >= 0.01:
+            lines.append(f"За вычетом комиссии PayAnyWay у тебя на деле "
+                         f"<b>{_rub(st['held'][me] - st['paw_fee'])}</b>.")
     lines.append("")
     step = 1
     if t and t["from"] == me:

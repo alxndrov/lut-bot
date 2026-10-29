@@ -4013,6 +4013,23 @@ async def paw_balance(provider: str = "payanyway") -> float:
     return float(net) - float(out)
 
 
+async def lava_usd_balance() -> float:
+    """Сколько долларов на балансе lava.top — так, как Миша видит в кабинете:
+    оплаты за вычетом комиссии lava.top. Выводы мы пишем в рублях, их вычитаем
+    в той же пропорции, что рублёвый остаток (paw_balance("lava"))."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        usd = (await (await db.execute(
+            "SELECT COALESCE(SUM(amount_usd - COALESCE(fee_usd, 0)), 0) FROM lava_payments "
+            "WHERE status = 'succeeded'")).fetchone())[0]
+        out = (await (await db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM paw_withdrawals WHERE provider = 'lava'")).fetchone())[0]
+    if not usd:
+        return 0.0
+    left = await paw_balance("lava")
+    total = left + float(out)
+    return round(float(usd) * (left / total if total > 0 else 0.0), 2)
+
+
 async def get_cdek_payments_for_finance_export() -> list[dict]:
     """Все оплаченные счета СДЭК (см. /cdek) — расходные строки финансового
     листа. В отличие от «Отложено на СДЭК» в строке прихода (это оценка

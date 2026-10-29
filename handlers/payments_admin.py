@@ -57,8 +57,9 @@ async def _screen() -> tuple[str, InlineKeyboardMarkup]:
                      + " — выводится вручную; выведенное запиши кнопкой «💸 Вывод с PayAnyWay».")
     if config.LAVA_ENABLED:
         bal = await db.paw_balance("lava")
-        lines.append(f"На балансе lava.top: <b>≈{bal:,.2f} ₽</b>".replace(",", " ")
-                     + " (по курсу ЦБ в день оплаты) — тоже выводится вручную.")
+        usd = await db.lava_usd_balance()
+        lines.append(f"На балансе lava.top: <b>${usd:,.2f}</b> (≈{bal:,.2f} ₽".replace(",", " ")
+                     + " по курсу ЦБ в день оплаты) — тоже выводится вручную.")
     lines.append("Зарубежные карты: цифра — lava.top (Миша, в $), физтовары — Prodamus (Даня).")
     lines.append("ЮKassa: " + ("✅ подключена" if config.YOOKASSA_ENABLED else "❌ не подключена"))
     if not config.PAY_BASE_URL:
@@ -322,10 +323,11 @@ async def cb_pawout(callback: CallbackQuery, state: FSMContext):
     await state.update_data(provider=provider)
     bal = await db.paw_balance(provider)
     name = db.WALLETS[provider][0]
+    usd = f" (${await db.lava_usd_balance():,.2f})".replace(",", " ") if provider == "lava" else ""
     fee_note = ("\nКомиссию PayAnyWay (4,5%, не меньше 40 ₽) посчитаю сам — с баланса "
                 "спишется пришедшее плюс она." if provider == "payanyway" else "")
     await callback.message.answer(
-        f"💸 Сколько рублей пришло на счёт с {name}? По боту на балансе ≈{bal:,.2f} ₽.\n".replace(",", " ")
+        f"💸 Сколько рублей пришло на счёт с {name}? По боту на балансе ≈{bal:,.2f} ₽{usd}.\n".replace(",", " ")
         + "Пришли сумму, которая пришла на счёт (можно с комментарием через пробел)."
         + fee_note + " Отмена — /cancel.")
 
