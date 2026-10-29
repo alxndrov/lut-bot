@@ -146,6 +146,75 @@ def text(st: dict) -> str:
     return "\n".join(lines)
 
 
+def plan(st: dict) -> tuple[dict, dict, dict]:
+    """Что будет после перевода: (на руках, забирает себе, переносится долгом).
+    Себе — доля, но не больше, чем остаётся сверх резервов."""
+    held = dict(st["held"])
+    t = st["transfer"]
+    if t:
+        held[t["from"]] -= t["amount"]
+        held[t["to"]] += t["amount"]
+    paid, carry = {}, {}
+    for who in ("danya", "misha"):
+        can = max(0.0, held[who] - st["reserve"][who])
+        paid[who] = _r(max(0.0, min(st["share"][who], can)))
+        carry[who] = _r(max(0.0, st["share"][who] - paid[who]))
+    return held, paid, carry
+
+
+def who_is(user_id: int) -> str:
+    return "danya" if user_id == config.PARTNER_ID else "misha"
+
+
+GENITIVE = {"danya": "Дани", "misha": "Миши"}
+
+
+def my_text(st: dict, me: str) -> str:
+    """«Что мне сделать для взаиморасчёта» — то же, что text(), но от лица me."""
+    other = "misha" if me == "danya" else "danya"
+    held, paid, carry = plan(st)
+    t = st["transfer"]
+    lines = [f"🙋 <b>{NAMES[me]}, что тебе сделать для взаиморасчёта</b>",
+             f"<i>{st['now'].astimezone(MSK).strftime('%d.%m.%Y %H:%M')}, доли {_since(st)}</i>", "",
+             f"Сейчас у тебя денег проекта: <b>{_rub(st['held'][me])}</b>"
+             + (f" (+ {_rub(st['pending'])} ещё в пути от Prodamus/ЮKassa — тратить их пока нельзя)"
+                if me == "danya" and st["pending"] >= 0.01 else "")
+             + (f", из них на балансе PayAnyWay/lava.top {_rub(st['paw_balance'])}"
+                if me == "misha" and st["paw_balance"] >= 0.01 else ""), ""]
+    step = 1
+    if t and t["from"] == me:
+        lines.append(f"{step}️⃣ <b>Отправь {DATIVE[other]} {_rub(t['amount'])}</b>")
+        step += 1
+    elif t:
+        lines.append(f"{step}️⃣ <b>Запроси у {GENITIVE[other]} {_rub(t['amount'])}</b> — "
+                     f"это его лишние деньги проекта сверх резервов и доли")
+        step += 1
+    else:
+        lines.append("Переводить друг другу ничего не нужно.")
+    lines.append(f"{step}️⃣ <b>Забери себе {_rub(paid[me])}</b> — твоя доля прибыли"
+                 + (f" (в т.ч. возмещение личных трат {_rub(st['reimb'][me])})" if st["reimb"][me] >= 0.01 else ""))
+    if carry[me] >= 1:   # копейки округления не показываем
+        lines.append(f"   Ещё {_rub(carry[me])} твоей доли пока не из чего взять — перейдёт в следующий расчёт.")
+    step += 1
+    res = []
+    if me == "danya":
+        res.append(f"налог {_rub(st['tax'][me])}")
+        if st["cdek_due"] >= 0.01:
+            res.append(f"СДЭК {_rub(st['cdek_due'])}")
+    else:
+        res.append(f"налог {_rub(st['tax'][me])}")
+        if st["paw_fee"] >= 0.01:
+            res.append(f"будущая комиссия PayAnyWay при выводе {_rub(st['paw_fee'])}")
+    lines.append(f"{step}️⃣ <b>Оставь в резерве {_rub(st['reserve'][me])}</b> — " + ", ".join(res))
+    rest = _r(held[me] - st["reserve"][me] - paid[me])
+    lines += ["", f"После этого у тебя останется денег проекта {_rub(st['reserve'][me] + max(rest, 0.0))}"
+              + (f" (резерв + {_rub(rest)} свободных)" if rest >= 1 else " — ровно резерв") + "."]
+    if me == "misha" and st["paw_balance"] >= 0.01:
+        lines.append("Долю бери с баланса PayAnyWay выводом — запиши его кнопкой «💸 Вывод с PayAnyWay» в /payments.")
+    lines += ["", "Когда переведёте — любой из вас жмёт «✅ Перевели — зафиксировать расчёт»."]
+    return "\n".join(lines)
+
+
 async def settle(user_id: int, user_name: str) -> dict:
     """«Перевели»: записывает перевод между нами, выплаты обоим их долей из их
     же денег (не больше, чем у них есть сверх резервов) и сам расчёт —
@@ -154,18 +223,12 @@ async def settle(user_id: int, user_name: str) -> dict:
     now = datetime.now(timezone.utc)
     paid_at = (now - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S")
     comment = f"Взаиморасчёт {now.astimezone(MSK).strftime('%d.%m.%Y')}"
-    held = dict(st["held"])
     t = st["transfer"]
     if t:
         await db.add_partner_transfer(t["from"], t["to"], t["amount"], comment, user_id, user_name,
                                       paid_at)
-        held[t["from"]] -= t["amount"]
-        held[t["to"]] += t["amount"]
-    paid, carry = {}, {}
+    _, paid, carry = plan(st)
     for who in ("danya", "misha"):
-        can = max(0.0, held[who] - st["reserve"][who])
-        paid[who] = _r(max(0.0, min(st["share"][who], can)))
-        carry[who] = _r(max(0.0, st["share"][who] - paid[who]))
         if paid[who] >= 0.01:
             payout_id = await db.add_payout(NAMES[who], paid[who], comment, user_id, user_name,
                                             paid_at=paid_at, source=who)

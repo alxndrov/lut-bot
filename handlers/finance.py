@@ -382,6 +382,7 @@ def _back_to_finance_keyboard() -> InlineKeyboardMarkup:
 
 def _settle_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🙋 Что мне сделать для взаиморасчёта", callback_data="settle_me")],
         [InlineKeyboardButton(text="✅ Перевели — зафиксировать расчёт", callback_data="fin_settle")],
         [InlineKeyboardButton(text="🧾 Миша заплатил свой налог", callback_data="misha_tax")],
         [InlineKeyboardButton(text=f"👤 Выплата {_dative(config.OWNER_NAME)} (со счёта Дани)", callback_data="payout:owner")],
@@ -442,6 +443,23 @@ async def cb_settle_menu(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
         reply_markup=_settle_menu_keyboard(),
     )
+
+
+@router.callback_query(F.data == "settle_me")
+async def cb_settle_me(callback: CallbackQuery):
+    """Взаиморасчёт от лица нажавшего: сколько отправить или запросить, сколько
+    забрать себе, сколько оставить в резерве."""
+    if not await _admin_only(callback):
+        return
+    await callback.answer()
+    from services import settle
+    try:
+        text = settle.my_text(await settle.state(), settle.who_is(callback.from_user.id))
+    except Exception as e:
+        logger.exception("settle: расчёт не посчитался")
+        text = f"❌ Не удалось посчитать взаиморасчёт: {e}"
+    await callback.message.answer(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🤝 Весь взаиморасчёт", callback_data="fin_settle_menu")]]))
 
 
 @router.callback_query(F.data == "fin_settle")

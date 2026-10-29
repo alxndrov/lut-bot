@@ -68,6 +68,12 @@ class SettleTest(unittest.IsolatedAsyncioTestCase):
         st = await settle.state()
         self.assertEqual(st["transfer"]["from"], "misha")
         self.assertAlmostEqual(st["transfer"]["amount"], 1800, places=1)  # расходы делятся 60/40
+        # «Что мне сделать»: Мише — отправить, Дане — запросить ту же сумму
+        self.assertIn("Отправь Дане 1 800,00 ₽", settle.my_text(st, "misha"))
+        self.assertIn("Запроси у Миши 1 800,00 ₽", settle.my_text(st, "danya"))
+        _, paid, _ = settle.plan(st)
+        self.assertIn(f"Забери себе {settle._rub(paid['danya'])}", settle.my_text(st, "danya"))
+        self.assertEqual(settle.who_is(config.PARTNER_ID), "danya")
 
         # Общий расход 1 000 — поровну, на цифру 1 000 — 80/20
         async with aiosqlite.connect(db.DB_PATH) as c:
