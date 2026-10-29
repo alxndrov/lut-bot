@@ -7,6 +7,7 @@
 """
 import html
 import logging
+import mimetypes
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -628,12 +629,25 @@ async def app_index(request: web.Request) -> web.Response:
                         headers={"Cache-Control": "no-store"})
 
 
+async def app_static(request: web.Request) -> web.Response:
+    # Статику — тоже целиком (200), без Range: Telegram Desktop (WebView2)
+    # запрашивал telegram-web-app.js кусками (206), скрипт не догружался и
+    # приложение висло на белом экране. Скрипты и стили — без кэша, шрифты кэшируем.
+    root = (WEBAPP_DIR / "static").resolve()
+    path = (root / request.match_info["path"]).resolve()
+    if root not in path.parents or not path.is_file():
+        raise web.HTTPNotFound()
+    ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    cache = "public, max-age=604800" if path.suffix in (".woff2", ".woff", ".ttf") else "no-store"
+    return web.Response(body=path.read_bytes(), content_type=ctype,
+                        headers={"Cache-Control": cache, "Accept-Ranges": "none"})
+
+
 def setup_web(app: web.Application, bot_username: str = ""):
     app["bot_username"] = bot_username
     app.router.add_get("/app", lambda r: web.HTTPFound("/app/"))
     app.router.add_get("/app/", app_index)
-    if (WEBAPP_DIR / "static").is_dir():
-        app.router.add_static("/app/static/", WEBAPP_DIR / "static", show_index=False)
+    app.router.add_get("/app/static/{path:.+}", app_static)
     app.router.add_post("/api/course/me", api_me)
     app.router.add_post("/api/course/log", api_log)
     app.router.add_post("/api/course/test", api_test)
