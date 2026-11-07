@@ -154,9 +154,12 @@ OFFER_URL: str = os.getenv("OFFER_URL", "")
 # пока его ссылки нет, ведём на политику (в старой редакции согласие было внутри)
 CONSENT_URL: str = os.getenv("CONSENT_URL", "") or PRIVACY_POLICY_URL
 
-# Kinescope — видео уроков с DRM (services/kinescope.py). API-токен (UUID)
-# из «Настройки → API-токены» кладёт в .env Даня
-KINESCOPE_API_TOKEN: str = os.getenv("KINESCOPE_API_TOKEN", "")
+# Bunny Stream — видео уроков (services/bunny.py). Ключи библиотеки из кабинета
+# Миши кладёт в .env Даня: ID библиотеки, её API-ключ и ключ подписи ссылок
+# (Security → Embed view token authentication)
+BUNNY_LIBRARY_ID: str = os.getenv("BUNNY_LIBRARY_ID", "").strip()
+BUNNY_API_KEY: str = os.getenv("BUNNY_API_KEY", "").strip().lstrip("…")
+BUNNY_TOKEN_KEY: str = os.getenv("BUNNY_TOKEN_KEY", "").strip().lstrip("…")
 POLICY_REQUIRED: bool = bool(PRIVACY_POLICY_URL)
 
 # Google Таблица (финансовый лист). Пока не заданы — выгрузка выключена.

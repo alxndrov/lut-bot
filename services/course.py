@@ -21,8 +21,8 @@ SECTIONS = {
 }
 SECTION_SHORT = {"shooting": "Съёмка", "editing": "Монтаж"}
 
-# Программа для мини-приложения — по оферте (раздел 7.1). Видео и длительности
-# появятся на этапе 2 (видеохостинг); пока у уроков только названия.
+# Программа для мини-приложения. Уроки монтажа — по новой структуре курса (07.11.2026);
+# в оферте (п. 7.1) пока прежний список тем. Видео — Bunny Stream (services/bunny.py).
 PROGRAM = {
     "shooting": {
         "name": "Shot on iPhone",
@@ -39,31 +39,18 @@ PROGRAM = {
         "name": "Cut by MALIMABI",
         "lead": "Монтаж в Premiere Pro: от первого проекта до финального рендера.",
         "lessons": [
-            "Старт и настройка проекта",
-            "Монтаж под музыку и саунд-дизайн",
-            "Нейросети для переходов и динамики",
-            "Цвет и film look",
-            "Работа с текстом",
-            "Чёткость и мастер-экспорт",
-            "Финальный рендер в Topaz",
+            "Знакомство с Premiere",
+            "Отбор",
+            "Разбор монтажа",
+            "Музыка и саунд-дизайн",
+            "Цвет",
+            "Нейросети",
+            "Экспорт и Topaz",
         ],
     },
 }
 
-# Вкладка «Материалы». sections — кому положено (хватает любого из разделов);
-# url пустой — файл ещё не загружен, в приложении «откроется с уроками».
-MATERIALS = [
-    {"kind": "file", "badge": "LUT", "title": "Авторский лут",
-     "note": ".cube · для Blackmagic и Premiere", "sections": ["shooting", "editing"], "url": ""},
-    {"kind": "file", "badge": "PH", "title": "Playhead",
-     "note": "Трекер времени · Mac и Windows", "sections": ["editing"], "url": ""},
-    {"kind": "file", "badge": "BIN", "title": "Bin",
-     "note": "Порядок в файлах · Mac", "sections": ["editing"], "url": ""},
-    {"kind": "pdf", "title": "Баланс белого", "sections": ["shooting"], "url": ""},
-    {"kind": "pdf", "title": "Выдержка", "sections": ["shooting"], "url": ""},
-    {"kind": "pdf", "title": "ISO без шума", "sections": ["shooting"], "url": ""},
-    {"kind": "pdf", "title": "False color", "sections": ["shooting"], "url": ""},
-]
+# Файлы уроков и вкладка «Материалы» — services/course_files.py (загружает админ в бот).
 
 
 def _msk_date_start(date_str: str) -> datetime:

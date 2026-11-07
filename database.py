@@ -467,8 +467,8 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (user_id, section)
             )
         """)
-        # Просмотры уроков: Kinescope спрашивает наш бэкенд при старте ролика
-        # (handlers/kinescope_drm.py). По ним считается возврат за
+        # Просмотры уроков: запуск ролика урока
+        # (мини-приложение: плеер Bunny → /api/course/view). По ним считается возврат за
         # непросмотренные уроки (оферта, п. 7.10.2)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS course_lesson_views (
@@ -5481,7 +5481,7 @@ async def claim_course_gift(token: str, user_id: int) -> bool:
         return cur.rowcount > 0
 
 
-# ── Просмотры уроков (Kinescope) ───────────────────────────────────────────────
+# ── Просмотры уроков (плеер Bunny) ───────────────────────────────────────────────
 
 async def record_lesson_view(user_id: int, section: str, lesson: int):
     async with aiosqlite.connect(DB_PATH) as db:

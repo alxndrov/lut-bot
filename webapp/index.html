@@ -29,6 +29,7 @@
      пользователей telegram.org грузится долго или не грузится, и страница оставалась белой -->
 <script src="/app/static/telegram-web-app.js?v=20261029"></script>
 <script>window.__appStage = "tg-script-loaded";</script>
+<script src="/app/static/playerjs-0.1.0.min.js"></script>
 <link rel="stylesheet" href="/app/static/fonts/fonts.css">
 <style>
   :root {
@@ -136,6 +137,27 @@
                  font-size: 12px; }
   .video.player { aspect-ratio: 16 / 9; background: #000; }
   .video.player iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  .video.player.tall { aspect-ratio: 4 / 3; }
+  /* ID зрителя поверх ролика: не мешает нажатиям, раз в 20 с переезжает */
+  .wm { position: absolute; z-index: 3; pointer-events: none; color: #fff; opacity: .28; font-size: 12px;
+        font-weight: 600; letter-spacing: .06em; text-shadow: 0 1px 2px rgba(0,0,0,.6); white-space: nowrap;
+        transition: top .8s, left .8s; }
+  .fs-btn { position: absolute; z-index: 4; right: 10px; top: 10px; width: 34px; height: 34px; border-radius: 10px;
+            border: 0; background: rgba(0,0,0,.55); color: #fff; display: grid; place-items: center; }
+  .fs-btn svg { width: 18px; height: 18px; }
+  /* Свой полный экран: разворачиваем блок целиком (плеер + ID), на телефоне
+     в портрете поворачиваем горизонтальный ролик на 90° */
+  .video.player.fs { position: fixed; inset: 0; z-index: 100; aspect-ratio: auto; border-radius: 0; border: 0;
+                     margin: 0; width: 100vw; height: 100vh; }
+  .video.player.fs.rot { width: 100vh; height: 100vw; top: 50%; left: 50%; inset: auto;
+                         transform: translate(-50%, -50%) rotate(90deg); }
+  .video.player.fs:not(.rot) .fs-btn { top: calc(10px + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)); }
+  body.fs-on { overflow: hidden; }
+  body.fs-on .tabs, body.fs-on .next-card { display: none; }
+  .files { margin-top: 26px; border-top: 1px solid var(--line); }
+  .files .pdf { width: 100%; background: none; border-left: 0; border-right: 0; border-top: 0; text-align: left; }
+  .btn.ghost { background: none; border: 1px solid var(--border); color: var(--text); margin-top: 14px; }
+  .group-title { margin-top: 26px; }
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
   .pair button { display: flex; align-items: center; gap: 10px; background: none; border: 1px solid var(--border);
                  border-radius: 16px; padding: 15px 16px; font-weight: 600; }
@@ -245,6 +267,9 @@
     lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>',
     doc: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5"/></svg>',
     lut: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.5"/><path d="M12 3.5v17M3.5 12h17"/></svg>',
+    fs: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>',
+    fsOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/></svg>',
+    send: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3 10 14M21 3l-7 18-4-7-7-4z"/></svg>',
     dl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg>'
   };
 
@@ -371,13 +396,14 @@
     h += title2(s.name) + '<p class="lead">' + esc(s.lead) + '</p>';
     h += '<div class="rows lessons" style="margin-top:22px;border-top:1px solid var(--line)">';
     s.lessons.forEach(function (l, i) {
-      var meta = l.open ? '' : (s.owned ? esc(data.open_date) : ICON.lock);
+      var meta = l.open ? (l.watched ? '✓ ' : '') + esc(l.duration || '') : (s.owned ? esc(data.open_date) : ICON.lock);
       h += '<button class="row' + (l.open && i === 0 ? ' next' : '') + '" type="button"' + (l.open ? ' data-go="lesson:' + s.slug + ':' + l.n + '"' : ' data-locked') + '>' +
            '<span class="num">' + pad(l.n) + '</span><span class="t">' + esc(l.title) + '</span><span class="meta">' + meta + '</span></button>';
     });
     h += '</div>';
-    var mats = s.slug === 'shooting' ? '4 шпаргалки PDF и авторский лут' : 'Авторский лут, Playhead и Bin';
-    h += '<button class="hint-card" type="button" data-tab-go="materials">' + ICON.doc + '<span>' + mats + ' — в «Материалах»</span></button>';
+    var mats = s.slug === 'shooting' ? 'Шпаргалки PDF — под уроками, авторский лут — в «Материалах»'
+                                     : 'Шпаргалки и шаблоны — под уроками; лут, Playhead и Library — в «Материалах»';
+    h += '<button class="hint-card" type="button" data-tab-go="materials">' + ICON.doc + '<span>' + mats + '</span></button>';
     if (!s.owned) {
       h += '<button class="btn red" type="button" data-buy>Купить' + (s.price ? ' · ' + rub(s.price) : '') + '</button>';
       if (!data.full_price) h += '<p class="note" style="text-align:center">' + (data.price_stage === 'presale' ? 'Цена предпродажи' : 'Эта цена') + ' — до ' + esc(data.price_until) + '</p>';
@@ -390,15 +416,33 @@
   function screenLesson(slug, n) {
     var s = section(slug), l = s.lessons[n - 1], next = s.lessons[n];
     var h = '<button class="back" type="button" data-back>' + ICON.back + esc(s.name) + '</button>';
-    // Ролик Kinescope с DRM: в ссылке токен зрителя (drmauthtoken) и водяной знак с его ID
-    h += l.video
-      ? '<div class="video player"><iframe src="' + esc(l.video) + '" allow="autoplay; fullscreen; ' +
-        'picture-in-picture; encrypted-media;" allowfullscreen></iframe></div>'
-      : '<div class="video"><span class="label">[Видео урока]</span><span class="play">' + ICON.playFill + '</span>' +
-        '<span class="soon">' + (l.open ? 'Видео скоро появится здесь' : 'Видео появится здесь в день старта') + '</span></div>';
-    h += '<p class="eyebrow">Урок ' + pad(l.n) + ' · ' + esc(s.name) + '</p>' + title2(l.title);
-    h += '<div class="pair"><button type="button" data-tab-go="materials">' + ICON.doc + 'Шпаргалки</button>' +
-         '<button type="button" data-tab-go="materials">' + ICON.lut + 'Лут</button></div>';
+    // Ролик Bunny по подписанной ссылке. Полный экран — свой (кнопка справа сверху),
+    // чтобы ID зрителя оставался поверх видео и там
+    if (l.video) {
+      h += '<div class="video player' + (l.landscape === false ? ' tall' : '') + '" id="player">' +
+           '<iframe id="lesson-video" src="' + esc(l.video) + '" allow="autoplay; encrypted-media; picture-in-picture" ' +
+           'loading="eager"></iframe><span class="wm" id="wm">' + esc(data.wm || '') + '</span>' +
+           '<button class="fs-btn" type="button" data-fs aria-label="Во весь экран">' + ICON.fs + '</button></div>';
+    } else {
+      h += '<div class="video"><span class="label">[Видео урока]</span><span class="play">' + ICON.playFill + '</span>' +
+           '<span class="soon">' + (!l.open ? 'Видео появится здесь в день старта'
+                                   : l.processing ? 'Видео обрабатывается — загляни чуть позже'
+                                   : 'Видео скоро появится здесь') + '</span></div>';
+    }
+    h += '<p class="eyebrow">Урок ' + pad(l.n) + ' · ' + esc(s.name) + (l.duration ? ' · ' + esc(l.duration) : '') + '</p>' + title2(l.title);
+    var files = l.files || [];
+    if (files.length) {
+      h += '<p class="eyebrow section-title">' + (files.length > 1 ? 'Файлы урока' : 'Файл урока') + '</p><div class="files">';
+      files.forEach(function (f, i) {
+        h += '<button class="pdf" type="button" data-file="' + esc(f.key) + '"><span class="n">' + pad(i + 1) + '</span>' +
+             '<span class="t">' + esc(f.title) + '</span><span class="act">' + esc(f.ext) + '</span></button>';
+      });
+      h += '</div>';
+      if (files.length > 1) h += '<button class="btn ghost" type="button" data-lesson-files="' + s.slug + ':' + l.n + '">' + ICON.send + 'Прислать все в чат</button>';
+      h += '<p class="note">Файлы приходят в чат с ботом.</p>';
+    }
+    h += '<div class="pair"><button type="button" data-tab-go="materials">' + ICON.lut + 'Лут и материалы</button>' +
+         '<button type="button" data-back>' + ICON.doc + 'Все уроки</button></div>';
     if (next) {
       h += '<div style="height:70px"></div><button class="next-card" type="button" data-go="lesson:' + s.slug + ':' + next.n + '">' +
            '<span><small>СЛЕДУЮЩИЙ</small>' + pad(next.n) + ' · ' + esc(next.title) + '</span>' + ICON.arrow + '</button>';
@@ -413,28 +457,24 @@
            '<button class="btn red" type="button" data-buy>Выбрать раздел</button>';
       return h;
     }
-    var act = function (m) {
-      if (m.url) return m.kind === 'pdf' ? 'PDF' : ICON.dl;
-      return data.open ? 'скоро' : esc(data.open_date);
-    };
-    data.materials.filter(function (m) { return m.kind !== 'pdf'; }).forEach(function (m) {
-      var tag = m.url ? 'a href="' + esc(m.url) + '" target="_blank" rel="noopener"' : 'div';
-      h += '<' + tag + ' class="file"><span class="badge">' + esc(m.badge) + '</span><span class="main"><b>' + esc(m.title) +
-           '</b><small>' + esc(m.note) + '</small></span><span class="act">' + act(m) + '</span></' + tag.split(' ')[0] + '>';
-    });
-    var pdfs = data.materials.filter(function (m) { return m.kind === 'pdf'; });
-    if (pdfs.length) {
-      h += '<p class="eyebrow section-title">Шпаргалки PDF</p>';
-      pdfs.forEach(function (m, i) {
-        var tag = m.url ? 'a href="' + esc(m.url) + '" target="_blank" rel="noopener"' : 'div';
-        h += '<' + tag + ' class="pdf"><span class="n">' + pad(i + 1) + '</span><span class="t">' + esc(m.title) +
-             '</span><span class="act">' + act(m) + '</span></' + tag.split(' ')[0] + '>';
+    data.materials.forEach(function (g) {
+      if (g.items.length === 1) {
+        var m = g.items[0];
+        h += '<button class="file" type="button"' + (m.key ? ' data-file="' + esc(m.key) + '"' : ' data-soon') + ' style="width:100%;text-align:left">' +
+             '<span class="badge">' + esc(g.badge) + '</span><span class="main"><b>' + esc(m.title) + '</b><small>' + esc(m.note) +
+             '</small></span><span class="act">' + (m.key ? ICON.dl : (data.open ? 'скоро' : esc(data.open_date))) + '</span></button>';
+        return;
+      }
+      h += '<p class="eyebrow section-title group-title">' + esc(g.title) + '</p>';
+      g.items.forEach(function (m) {
+        h += '<button class="file" type="button"' + (m.key ? ' data-file="' + esc(m.key) + '"' : ' data-soon') + ' style="width:100%;text-align:left">' +
+             '<span class="badge">' + esc(g.badge) + '</span><span class="main"><b>' + esc(m.title) + '</b><small>' + esc(m.note) +
+             '</small></span><span class="act">' + (m.key ? ICON.dl : (data.open ? 'скоро' : esc(data.open_date))) + '</span></button>';
       });
-    }
-    if (!data.open) h += '<p class="note">Файлы откроются ' + esc(data.open_date) + ' вместе с уроками.</p>';
+    });
+    h += '<p class="note">' + (data.open ? 'Нажми на файл — бот пришлёт его в чат.' : 'Файлы откроются ' + esc(data.open_date) + ' вместе с уроками.') + '</p>';
     return h;
   }
-
   // VIP: личный созвон с Мишей на 1 час
   function callBlock() {
     var c = data.call;
@@ -507,8 +547,10 @@
     else if (view.tab === 'materials') h = screenMaterials();
     else if (view.tab === 'review') h = screenReview();
     else h = screenHome();
+    if (fsOn) fsExit();
     root.innerHTML = h;
     tabsEl.hidden = false;
+    setupPlayer();
     [].forEach.call(tabsEl.querySelectorAll('button'), function (b) {
       b.classList.toggle('on', b.getAttribute('data-tab') === view.tab);
     });
@@ -520,7 +562,79 @@
     view.tab = 'lessons';
     render(); window.scrollTo(0, 0);
   }
+  // ── плеер урока: ID зрителя, свой полный экран, отметка просмотра ──
+  var wmTimer = null, fsOn = false, fsNative = false, viewSent = {};
+  function setupPlayer() {
+    clearInterval(wmTimer); wmTimer = null;
+    var box = document.getElementById('player');
+    if (!box) return;
+    var wm = document.getElementById('wm');
+    var spots = [[6, 7], [58, 9], [8, 72], [56, 76], [32, 42]], at = Math.floor(Math.random() * spots.length);
+    var move = function () {
+      at = (at + 1 + Math.floor(Math.random() * (spots.length - 1))) % spots.length;
+      wm.style.left = spots[at][0] + '%'; wm.style.top = spots[at][1] + '%';
+    };
+    move(); wmTimer = setInterval(move, 20000);
+    var slug = view.section, n = view.lesson, key = slug + ':' + n;
+    if (demo || !window.playerjs) return;
+    try {
+      var p = new playerjs.Player(document.getElementById('lesson-video'));
+      p.on('ready', function () {
+        p.on('play', function () {
+          if (viewSent[key]) return;
+          viewSent[key] = true;
+          api('/api/course/view', { section: slug, lesson: n }).catch(function () { viewSent[key] = false; });
+        });
+      });
+    } catch (e) { __appLog('playerjs', e && (e.stack || e.message)); }
+  }
+  function tgFs() { return !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0') && /^(ios|android)/.test(tg.platform || '')); }
+  function fsLayout() {
+    var box = document.getElementById('player');
+    if (!box) return;
+    // телефон в портрете, ролик горизонтальный — поворачиваем, чтобы видео было на весь экран
+    box.classList.toggle('rot', fsOn && !box.classList.contains('tall') && innerHeight > innerWidth * 1.1);
+  }
+  function fsIcon() {
+    var b = document.querySelector('[data-fs]');
+    if (b) b.innerHTML = fsOn ? ICON.fsOff : ICON.fs;
+  }
+  function fsEnter() {
+    var box = document.getElementById('player');
+    if (!box) return;
+    fsOn = true; fsNative = false;
+    box.classList.add('fs'); document.body.classList.add('fs-on');
+    if (tgFs()) { try { tg.requestFullscreen(); } catch (e) {} }
+    else if (box.requestFullscreen) {
+      fsNative = true;
+      try { var pr = box.requestFullscreen(); pr && pr.catch && pr.catch(function () { fsNative = false; }); } catch (e) { fsNative = false; }
+    }
+    fsLayout(); fsIcon();
+  }
+  function fsExit() {
+    var box = document.getElementById('player');
+    fsOn = false;
+    if (box) box.classList.remove('fs', 'rot');
+    document.body.classList.remove('fs-on');
+    try { if (tgFs() && tg.isFullscreen) tg.exitFullscreen(); } catch (e) {}
+    try { if (fsNative && document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
+    fsNative = false; fsIcon();
+  }
+  window.addEventListener('resize', fsLayout);
+  document.addEventListener('fullscreenchange', function () { if (fsOn && fsNative && !document.fullscreenElement) fsExit(); });
+  if (tg && tg.onEvent) tg.onEvent('fullscreenChanged', function () { if (fsOn && tgFs() && !tg.isFullscreen) fsExit(); else fsLayout(); });
+
+  function sendFiles(extra, one) {
+    if (demo) return toast('Демо: бот прислал бы файл в чат');
+    haptic('medium');
+    toast('Отправляем…');
+    api('/api/course/file', extra).then(function (r) {
+      toast(r.sent > 1 ? 'Прислали ' + r.sent + ' ' + plural(r.sent, 'файл', 'файла', 'файлов') + ' в чат с ботом ✓' : 'Прислали в чат с ботом ✓');
+    }).catch(function (e) { toast(e.message || 'Не получилось'); });
+  }
+
   function back() {
+    if (fsOn) { fsExit(); return; }
     if (view.screen === 'lesson') { view.screen = 'section'; view.lesson = null; }
     else { view.screen = null; view.section = null; }
     render(); window.scrollTo(0, 0);
@@ -544,6 +658,10 @@
     else if (el.hasAttribute('data-tab-go')) { haptic(); setTab(el.getAttribute('data-tab-go')); }
     else if (el.hasAttribute('data-go')) { haptic(); go(el.getAttribute('data-go')); }
     else if (el.hasAttribute('data-back')) { back(); }
+    else if (el.hasAttribute('data-fs')) { haptic(); fsOn ? fsExit() : fsEnter(); }
+    else if (el.hasAttribute('data-file')) { sendFiles({ key: el.getAttribute('data-file') }); }
+    else if (el.hasAttribute('data-lesson-files')) { sendFiles({ lesson: el.getAttribute('data-lesson-files') }); }
+    else if (el.hasAttribute('data-soon')) { toast(data.open ? 'Скоро добавим' : 'Откроется ' + data.open_date); }
     else if (el.hasAttribute('data-buy')) { buy(); }
     else if (el.hasAttribute('data-locked')) {
       var s = section(view.section);
@@ -584,7 +702,9 @@
 
   // ── демо-данные для просмотра вне Telegram (#demo) ──
   function demoData() {
-    var lessons = function (titles, open) { return titles.map(function (t, i) { return { n: i + 1, title: t, open: open }; }); };
+    var lessons = function (titles, open) { return titles.map(function (t, i) {
+      return { n: i + 1, title: t, open: open, duration: open ? (12 + i * 3) + ' мин' : '', processing: open && i === 1,
+               files: open ? [{ key: 'demo' + i, title: 'Шпаргалка к уроку', ext: 'PDF' }] : [] }; }); };
     var open = previewOpen;
     return {
       first_name: 'Миша', admin: true, open: open, preview: open, open_date: '8 ноября', days_left: 32,
@@ -595,14 +715,13 @@
           lessons: lessons(['Blackmagic Camera', 'Оборудование и съёмка себя', 'Линзы', 'Как снимать под лут', 'Мои приёмы и движение камеры'], open) },
         { slug: 'editing', title: 'Cut by MALIMABI — монтаж', name: 'Cut by MALIMABI', owned: false, test: false, price: 2990,
           lead: 'Монтаж в Premiere Pro: от первого проекта до финального рендера.',
-          lessons: lessons(['Старт и настройка проекта', 'Монтаж под музыку и саунд-дизайн', 'Нейросети для переходов и динамики', 'Цвет и film look', 'Работа с текстом', 'Чёткость и мастер-экспорт', 'Финальный рендер в Topaz'], false) }
+          lessons: lessons(['Знакомство с Premiere', 'Отбор', 'Разбор монтажа', 'Музыка и саунд-дизайн', 'Цвет', 'Нейросети', 'Экспорт и Topaz'], false) }
       ],
       bundle: { title: 'Пакет: съёмка + монтаж', price: 4490, price_full: 5990 },
       materials: [
-        { kind: 'file', badge: 'LUT', title: 'Авторский лут', note: '.cube · для Blackmagic и Premiere', url: '' },
-        { kind: 'pdf', title: 'Баланс белого', url: '' }, { kind: 'pdf', title: 'Выдержка', url: '' },
-        { kind: 'pdf', title: 'ISO без шума', url: '' }, { kind: 'pdf', title: 'False color', url: '' }
+        { group: 'lut', badge: 'LUT', title: 'Авторский лут', items: [{ key: open ? 'lut' : '', title: 'Авторский лут', note: '.cube · для Blackmagic и Premiere' }] }
       ],
+      wm: 'ID 123456789',
       review: { eligible: true, test: true, position: null, limit: 10, left: 10, reviewer: 'Миша', sent: false, status: null },
       options: [{ id: 1, title: 'Shot on iPhone — съёмка' }, { id: 2, title: 'Cut by MALIMABI — монтаж' }, { id: 3, title: 'Пакет: съёмка + монтаж' }],
       buy_url: ''

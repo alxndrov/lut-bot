@@ -87,6 +87,11 @@ class FakeBot:
 
 class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        from services import bunny
+        self._videos = bunny.videos
+        async def no_videos(force=False):   # без походов в API Bunny
+            return {}
+        bunny.videos = no_videos
         self.tmp = tempfile.TemporaryDirectory()
         self.old_path = db.DB_PATH
         db.DB_PATH = os.path.join(self.tmp.name, "test.db")
@@ -106,6 +111,8 @@ class TestPaymentTest(unittest.IsolatedAsyncioTestCase):
             await conn.commit()
 
     async def asyncTearDown(self):
+        from services import bunny
+        bunny.videos = self._videos
         db.DB_PATH = self.old_path
         self.tmp.cleanup()
 

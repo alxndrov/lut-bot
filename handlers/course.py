@@ -5,6 +5,7 @@
 статическая страница /app/ и /api/course/me, который отдаёт доступы
 только по проверенному initData.
 """
+import asyncio
 import html
 import logging
 import mimetypes
@@ -75,8 +76,9 @@ async def sync_menu_button(bot: Bot):
 
 
 async def set_admin_commands(bot: Bot, commands: list[BotCommand]):
-    """Админам в меню команд — ещё /app (приложение курса)."""
-    admin_commands = commands + [BotCommand(command="app", description="📱 Приложение курса")]
+    """Админам в меню команд — ещё /app (приложение курса) и /coursefiles (файлы и видео уроков)."""
+    admin_commands = commands + [BotCommand(command="app", description="📱 Приложение курса"),
+                                 BotCommand(command="coursefiles", description="📎 Файлы и видео курса")]
     for admin_id in config.ADMIN_IDS:
         try:
             await bot.set_my_commands(admin_commands, scope=BotCommandScopeChat(chat_id=admin_id))
@@ -447,15 +449,37 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
     is_open = svc.is_open() or (admin and preview_open)
     bundle = svc.bundle_option(options)
     paid = await db.get_user_course_paid(user_id)
-    # Ролики уроков (Kinescope с DRM) — ссылка с токеном только на открытые уроки
-    from services import kinescope
-    videos = await kinescope.videos()
+    # Ролики уроков — Bunny Stream: подписанная ссылка только на открытые уроки
+    from services import bunny
+    from services import course_files as cf
+    videos = await bunny.videos()
+    uploaded = await cf.all_files()
+    files = uploaded if is_open else {}
     watched = await db.get_lesson_views(user_id)
     sections = []
     for slug, title in svc.SECTIONS.items():
         program = svc.PROGRAM[slug]
         option = next((o for o in options if svc.option_sections(o) == [slug]), None)
         has = slug in owned
+        lessons = []
+        for i, t in enumerate(program["lessons"]):
+            n = i + 1
+            video = videos.get(slug, {}).get(str(n))
+            show = has and is_open
+            lesson_files = sorted((k for k, f in files.items() if f.get("place") == "lesson"
+                                   and f["section"] == slug and f["lesson"] == n),
+                                  key=cf.lesson_order) if show else []
+            lessons.append({
+                "n": n, "title": t, "open": show,
+                "watched": n in watched.get(slug, []),
+                "video": bunny.embed_url(video["id"]) if show and bunny.ready(video) else "",
+                "processing": bool(show and video and not bunny.ready(video)),
+                "duration": bunny.duration_text(video["length"]) if video and bunny.ready(video) else "",
+                "landscape": not video or video["width"] >= video["height"],
+                "files": [{"key": k, "title": files[k]["title"],
+                           "ext": files[k]["file_name"].rsplit(".", 1)[-1].upper()[:4]}
+                          for k in lesson_files],
+            })
         sections.append({
             "slug": slug, "title": title, "name": program["name"], "lead": program["lead"],
             "owned": has, "test": slug in test_owned,
@@ -464,21 +488,23 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             "price": svc.price_for_user(option, paid, bundle) if option else None,
             "price_full": (svc.price_for(option) if paid else option["price_full"])
                           if option else None,
-            "lessons": [{"n": i + 1, "title": t, "open": has and is_open,
-                         "watched": i + 1 in watched.get(slug, []),
-                         "video": kinescope.embed_url(videos[slug][str(i + 1)], user_id)
-                                  if has and is_open and str(i + 1) in videos.get(slug, {}) else ""}
-                        for i, t in enumerate(program["lessons"])],
+            "lessons": lessons,
         })
     vip = next((o for o in options if svc.is_call_option(o)), None)
     call = await db.get_user_course_call(user_id)
+    # «Материалы»: группы (лут, Playhead, Library, квест) из загруженных в бот файлов;
+    # до старта — только список того, что придёт, без файлов
     materials = []
-    for m in svc.MATERIALS:
-        has = bool(set(m["sections"]) & owned)
-        if not has:
+    for group, (badge, gtitle) in cf.MATERIAL_GROUPS.items():
+        slots = [k for k, (secs, g, _, _) in cf.MATERIAL_SLOTS.items()
+                 if g == group and set(secs) & owned]
+        if not slots:
             continue
-        materials.append({k: m.get(k) for k in ("kind", "badge", "title", "note")}
-                         | {"url": m["url"] if is_open else ""})
+        items = [{"key": k if k in files else "", "title": cf.MATERIAL_SLOTS[k][2],
+                  "note": cf.MATERIAL_SLOTS[k][3]} for k in slots]
+        if not any(k in uploaded for k in slots):
+            continue   # ещё не загружен (квест в работе) — не показываем пустую группу
+        materials.append({"group": group, "badge": badge, "title": gtitle, "items": items})
 
     position = await db.get_bundle_review_position(user_id)
     taken = await db.count_bundle_reviews()
@@ -529,6 +555,7 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
         "options": [{"id": o["id"], "slug": o["slug"], "title": o["title"]} for o in options]
                    if admin else [],
         "buy_url": f"https://t.me/{bot_username}?start=course" if bot_username else "",
+        "wm": f"ID {user_id}",
     }
 
 
@@ -610,6 +637,71 @@ async def api_call(request: web.Request) -> web.Response:
                                               bool(body.get("preview_open"))))
 
 
+async def _file_allowed(user_id: int, info: dict, preview_open: bool) -> bool:
+    admin = user_id in config.ADMIN_IDS
+    owned = await db.get_user_course_sections(user_id)
+    if not (svc.is_open() or (admin and preview_open)):
+        return False
+    secs = [info["section"]] if info.get("place") == "lesson" else info.get("sections") or []
+    return bool(set(secs) & owned)
+
+
+async def api_file(request: web.Request) -> web.Response:
+    """Файл урока или материал → бот присылает его в чат. {key} — один файл,
+    {lesson: "editing:7"} — все файлы урока."""
+    user, body = await _app_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    from services import course_files as cf
+    files = await cf.all_files()
+    lesson = str(body.get("lesson") or "")
+    if lesson:
+        slug, _, n = lesson.partition(":")
+        keys = sorted((k for k, f in files.items() if f.get("place") == "lesson"
+                       and f["section"] == slug and str(f["lesson"]) == n), key=cf.lesson_order)
+    else:
+        keys = [str(body.get("key") or "")]
+    keys = [k for k in keys if k in files]
+    if not keys:
+        return web.json_response({"error": "Файл пока не загружен."}, status=404)
+    preview = bool(body.get("preview_open"))
+    if not all([await _file_allowed(user["id"], files[k], preview) for k in keys]):
+        return web.json_response({"error": "Файл откроется вместе с уроками."}, status=403)
+    bot: Bot = request.app["bot"]
+    try:
+        for k in keys:
+            f = files[k]
+            await bot.send_document(user["id"], f["file_id"], caption=f["title"])
+            if len(keys) > 1:
+                await asyncio.sleep(0.4)
+    except Exception as e:
+        logger.warning(f"course file {keys} → {user['id']}: {e}")
+        return web.json_response({"error": "Не получилось отправить — открой чат с ботом и нажми «Старт»."},
+                                 status=502)
+    logger.info(f"course file: {user['id']} ← {', '.join(keys)}")
+    return web.json_response({"ok": True, "sent": len(keys)})
+
+
+async def api_view(request: web.Request) -> web.Response:
+    """Ученик запустил ролик урока (событие play плеера Bunny) — для возвратов."""
+    user, body = await _app_user(request)
+    if not user:
+        return web.json_response({"error": "unauthorized"}, status=401)
+    slug = str(body.get("section") or "")
+    try:
+        n = int(body.get("lesson"))
+    except (TypeError, ValueError):
+        return web.json_response({"error": "bad lesson"}, status=400)
+    if slug not in svc.PROGRAM or not 1 <= n <= len(svc.PROGRAM[slug]["lessons"]):
+        return web.json_response({"error": "bad lesson"}, status=400)
+    admin = user["id"] in config.ADMIN_IDS
+    if not admin and not (svc.is_open() and slug in await db.get_user_course_sections(user["id"])):
+        return web.json_response({"error": "forbidden"}, status=403)
+    await db.record_lesson_view(user["id"], slug, n)
+    logger.info(f"course view: {user['id']} смотрит {slug} {n}")
+    return web.json_response({"ok": True})
+
+
 async def api_log(request: web.Request) -> web.Response:
     """Сбой загрузки мини-приложения у пользователя (см. __appLog в index.html)."""
     try:
@@ -653,3 +745,5 @@ def setup_web(app: web.Application, bot_username: str = ""):
     app.router.add_post("/api/course/test", api_test)
     app.router.add_post("/api/course/review", api_review)
     app.router.add_post("/api/course/call", api_call)
+    app.router.add_post("/api/course/file", api_file)
+    app.router.add_post("/api/course/view", api_view)

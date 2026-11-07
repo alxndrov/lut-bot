@@ -10,7 +10,7 @@ import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
-from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget, course_gift, kinescope_drm, manual_sale
+from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget, course_gift, course_files, manual_sale
 from handlers import course, course_admin, course_orders, course_invoice, npd_admin, friend_order
 from handlers import pay_router, payments_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
@@ -43,6 +43,7 @@ async def main():
     dp.callback_query.middleware(start.PolicyGate())   # новое согласие после смены оператора
 
     # Регистрируем роутеры
+    dp.include_router(course_files.router)  # /coursefiles — файлы курса от админа (раньше всех)
     dp.include_router(admin.router)   # Сначала админ, чтобы перехватывал FSM-состояния
     dp.include_router(start.router)
     dp.include_router(forget.router)        # /forget — удалить свои данные
@@ -99,7 +100,6 @@ async def main():
         bot_username = ""
     course.setup_web(webhook_app, bot_username)
     pay_router.setup_web(webhook_app, bot_username)
-    kinescope_drm.setup_web(webhook_app)   # DRM: Kinescope спрашивает, можно ли смотреть
     asyncio.create_task(pay_router.pay_worker(bot))
     # Кнопка приложения курса: до анонса — только админам
     await course.sync_menu_button(bot)
@@ -122,7 +122,6 @@ async def main():
         admin_dp.include_router(refunds.router)
         admin_dp.include_router(course_admin.router)
         admin_dp.include_router(course_gift.router)   # /gift — курс в подарок
-        admin_dp.include_router(kinescope_drm.router)  # /kinescope — ролики уроков
         admin_dp.include_router(manual_sale.router)    # /sale — продажа вне бота
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)
@@ -153,7 +152,6 @@ async def main():
                 BotCommand(command="courseorders", description="🎓 Заказы по курсу"),
                 BotCommand(command="sale", description="🧾 Продажа вне бота (перевод)"),
                 BotCommand(command="gift", description="🎁 Курс в подарок"),
-                BotCommand(command="kinescope", description="🎬 Видео уроков"),
                 BotCommand(command="nalog", description="🧾 Чеки «Мой налог» (ЮKassa)"),
                 BotCommand(command="finance", description="💳 Финансы"),
                 BotCommand(command="payments", description="🔀 Оплата: Prodamus / ЮKassa"),
