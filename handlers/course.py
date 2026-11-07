@@ -556,6 +556,9 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
                    if admin else [],
         "buy_url": f"https://t.me/{bot_username}?start=course" if bot_username else "",
         "wm": f"ID {user_id}",
+        # Вкладка «Разбор» — только тем, у кого разбор (первые покупатели пакета) или VIP
+        "review_tab": bool(position or review_test or call),
+        "faq": svc.FAQ,
     }
 
 

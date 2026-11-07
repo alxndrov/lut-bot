@@ -157,7 +157,21 @@
   .files { margin-top: 26px; border-top: 1px solid var(--line); }
   .files .pdf { width: 100%; background: none; border-left: 0; border-right: 0; border-top: 0; text-align: left; }
   .btn.ghost { background: none; border: 1px solid var(--border); color: var(--text); margin-top: 14px; }
-  .group-title { margin-top: 26px; }
+  .group-title { margin-top: 26px; margin-bottom: -2px; }
+  .faq { margin-top: 18px; border-top: 1px solid var(--line); }
+  .faq details { border-bottom: 1px solid var(--line); }
+  .faq summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 14px; padding: 18px 0;
+                 font-weight: 600; font-size: 15px; line-height: 1.35; }
+  .faq summary::-webkit-details-marker { display: none; }
+  .faq summary .t { flex: 1; }
+  .faq summary .pm { color: var(--hint); font-size: 22px; line-height: 1; width: 18px; text-align: center; flex: none;
+                     transition: transform .2s; }
+  .faq details[open] summary .pm { transform: rotate(45deg); color: var(--red); }
+  .faq .a { color: var(--dim); font-size: 14px; line-height: 1.55; padding: 0 0 18px; }
+  .faq .a p { margin: 0 0 10px; }
+  .faq .a p:last-child { margin-bottom: 0; }
+  .faq .a ul { margin: 0 0 10px; padding-left: 18px; }
+  .faq .a li { margin-bottom: 6px; }
   .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 20px; }
   .pair button { display: flex; align-items: center; gap: 10px; background: none; border: 1px solid var(--border);
                  border-radius: 16px; padding: 15px 16px; font-weight: 600; }
@@ -229,6 +243,7 @@
                     align-items: center; gap: 4px; font-size: 12px; padding: 4px 0; }
   nav.tabs button svg { width: 22px; height: 22px; }
   nav.tabs button.on { color: var(--text); font-weight: 600; }
+  nav.tabs button[hidden] { display: none; }
 
   .muted { text-align: center; color: var(--hint); padding: 80px 12px; }
   .toast { position: fixed; left: 50%; bottom: calc(90px + var(--safe-b)); transform: translateX(-50%);
@@ -244,6 +259,7 @@
   <button type="button" data-tab="lessons"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M10 9.2v5.6l4.6-2.8z" fill="currentColor" stroke-linejoin="round"/></svg>Уроки</button>
   <button type="button" data-tab="materials"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M6 3h8l5 5v13H6z"/><path d="M14 3v5h5"/></svg>Материалы</button>
   <button type="button" data-tab="review"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>Разбор</button>
+  <button type="button" data-tab="faq"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.6"/><circle cx="12" cy="17" r=".6" fill="currentColor"/></svg>FAQ</button>
 </div></nav>
 <div class="toast" id="toast"></div>
 <script>
@@ -458,13 +474,6 @@
       return h;
     }
     data.materials.forEach(function (g) {
-      if (g.items.length === 1) {
-        var m = g.items[0];
-        h += '<button class="file" type="button"' + (m.key ? ' data-file="' + esc(m.key) + '"' : ' data-soon') + ' style="width:100%;text-align:left">' +
-             '<span class="badge">' + esc(g.badge) + '</span><span class="main"><b>' + esc(m.title) + '</b><small>' + esc(m.note) +
-             '</small></span><span class="act">' + (m.key ? ICON.dl : (data.open ? 'скоро' : esc(data.open_date))) + '</span></button>';
-        return;
-      }
       h += '<p class="eyebrow section-title group-title">' + esc(g.title) + '</p>';
       g.items.forEach(function (m) {
         h += '<button class="file" type="button"' + (m.key ? ' data-file="' + esc(m.key) + '"' : ' data-soon') + ' style="width:100%;text-align:left">' +
@@ -475,6 +484,26 @@
     h += '<p class="note">' + (data.open ? 'Нажми на файл — бот пришлёт его в чат.' : 'Файлы откроются ' + esc(data.open_date) + ' вместе с уроками.') + '</p>';
     return h;
   }
+  function faqAnswer(text) {
+    return String(text || '').split('\n\n').map(function (block) {
+      var lines = block.split('\n');
+      if (lines.every(function (l) { return l.indexOf('• ') === 0; })) {
+        return '<ul>' + lines.map(function (l) { return '<li>' + esc(l.slice(2)) + '</li>'; }).join('') + '</ul>';
+      }
+      return '<p>' + lines.map(esc).join('<br>') + '</p>';
+    }).join('');
+  }
+  function screenFaq() {
+    var h = '<p class="eyebrow">Вопросы</p><h1 class="display"><span>Частые</span><span class="dim">вопросы.</span></h1>';
+    h += '<div class="faq">';
+    (data.faq || []).forEach(function (f) {
+      h += '<details><summary><span class="t">' + esc(f.q) + '</span><span class="pm">+</span></summary>' +
+           '<div class="a">' + faqAnswer(f.a) + '</div></details>';
+    });
+    h += '</div><p class="note">Не нашёл ответ — напиши в поддержку: команда /help в боте.</p>';
+    return h;
+  }
+
   // VIP: личный созвон с Мишей на 1 час
   function callBlock() {
     var c = data.call;
@@ -545,12 +574,15 @@
     if (view.screen === 'section') h = screenSection(view.section);
     else if (view.screen === 'lesson') h = screenLesson(view.section, view.lesson);
     else if (view.tab === 'materials') h = screenMaterials();
-    else if (view.tab === 'review') h = screenReview();
+    else if (view.tab === 'review' && data.review_tab) h = screenReview();
+    else if (view.tab === 'faq') h = screenFaq();
     else h = screenHome();
     if (fsOn) fsExit();
     root.innerHTML = h;
     tabsEl.hidden = false;
     setupPlayer();
+    var reviewBtn = tabsEl.querySelector('[data-tab="review"]');
+    if (reviewBtn) reviewBtn.hidden = !data.review_tab;
     [].forEach.call(tabsEl.querySelectorAll('button'), function (b) {
       b.classList.toggle('on', b.getAttribute('data-tab') === view.tab);
     });
@@ -739,7 +771,8 @@
       materials: [
         { group: 'lut', badge: 'LUT', title: 'Авторский лут', items: [{ key: open ? 'lut' : '', title: 'Авторский лут', note: '.cube · для Blackmagic и Premiere' }] }
       ],
-      wm: 'ID 123456789',
+      wm: 'ID 123456789', review_tab: true,
+      faq: [{ q: 'Где взять Premiere Pro?', a: 'Демо-ответ.\n\n• Пункт один\n• Пункт два' }, { q: 'Доступ навсегда?', a: 'Да.' }],
       review: { eligible: true, test: true, position: null, limit: 10, left: 10, reviewer: 'Миша', sent: false, status: null },
       options: [{ id: 1, title: 'Shot on iPhone — съёмка' }, { id: 2, title: 'Cut by MALIMABI — монтаж' }, { id: 3, title: 'Пакет: съёмка + монтаж' }],
       buy_url: ''

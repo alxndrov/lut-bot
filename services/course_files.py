@@ -53,12 +53,12 @@ LESSON_FILES = {
 
 # Материалы: слот → (разделы, кому положено; группа во вкладке; название; пояснение)
 MATERIAL_SLOTS = {
-    "lut": (["shooting", "editing"], "lut", "Авторский лут", ".cube · для Blackmagic и Premiere"),
+    "lut": (["shooting", "editing"], "lut", "MALIMABI LUT", ".cube · для Blackmagic Camera и Premiere"),
     "playhead_mac_arm": (["editing"], "playhead", "Mac на M1–M4", "Apple Silicon · .dmg"),
     "playhead_mac_intel": (["editing"], "playhead", "Mac на Intel", ".dmg"),
     "playhead_windows": (["editing"], "playhead", "Windows", ".exe"),
     "playhead_guide": (["editing"], "playhead", "Как установить", "Инструкция PDF"),
-    "library": (["editing"], "library", "MALIMABI Library", "Библиотека для монтажа · .zip"),
+    "library": (["editing"], "library", "MALIMABI Library", "Архив .zip"),
     "quest": (["editing"], "quest", "Квест «Собери свой ролик»", "Задание PDF"),
 }
 
@@ -66,7 +66,7 @@ MATERIAL_SLOTS = {
 MATERIAL_GROUPS = {
     "lut": ("LUT", "Авторский лут"),
     "playhead": ("PH", "Playhead"),
-    "library": ("LIB", "MALIMABI Library"),
+    "library": ("LIB", "Library"),
     "quest": ("Q", "Квест"),
 }
 

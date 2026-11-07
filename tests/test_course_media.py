@@ -144,6 +144,14 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("", keys)                                       # Mac ещё нет — «скоро»
         self.assertEqual(state["wm"], "ID 5")
 
+    async def test_review_tab_only_for_review_or_vip_and_faq_for_all(self):
+        await db.grant_course_access(5, ["shooting"], None)
+        state = await course_handler._app_state({"id": 5}, "bot")
+        self.assertFalse(state["review_tab"])
+        self.assertTrue(state["faq"] and state["faq"][0]["q"].startswith("Где взять Premiere"))
+        groups = [g["title"] for g in state["materials"]]
+        self.assertEqual(groups, ["Авторский лут"])
+
     async def test_file_sending_checks_access(self):
         await db.grant_course_access(5, ["shooting"], None)
         status, _ = await self.post("/api/course/file", 5, key="cut_07_eksport")
