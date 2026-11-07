@@ -158,6 +158,13 @@
   .files { margin-top: 26px; border-top: 1px solid var(--line); }
   .files .pdf { width: 100%; background: none; border-left: 0; border-right: 0; border-top: 0; text-align: left; }
   .btn.ghost { background: none; border: 1px solid var(--border); color: var(--text); margin-top: 14px; }
+  /* Содержание урока: таймкоды, как в описании на ютубе — нажал и ролик перемотался */
+  .chapters { margin-top: 14px; border-top: 1px solid var(--line); }
+  .chapters .ch { width: 100%; display: flex; gap: 14px; align-items: baseline; padding: 13px 0; background: none;
+                  border: 0; border-bottom: 1px solid var(--line); color: var(--text); text-align: left;
+                  font: inherit; font-size: 15px; line-height: 1.35; cursor: pointer; }
+  .chapters .ch .tc { color: var(--red); font-weight: 600; font-variant-numeric: tabular-nums; min-width: 44px; flex: none; }
+  .chapters .ch.on .t { font-weight: 600; }
   .group-title { margin-top: 26px; margin-bottom: -2px; }
   .faq { margin-top: 18px; border-top: 1px solid var(--line); }
   .faq details { border-bottom: 1px solid var(--line); }
@@ -447,6 +454,15 @@
                                    : 'Видео скоро появится здесь') + '</span></div>';
     }
     h += '<p class="eyebrow">Урок ' + pad(l.n) + ' · ' + esc(s.name) + (l.duration ? ' · ' + esc(l.duration) : '') + '</p>' + title2(l.title);
+    var chapters = l.video ? (l.chapters || []) : [];
+    if (chapters.length) {
+      h += '<p class="eyebrow section-title">Содержание</p><div class="chapters">';
+      chapters.forEach(function (c) {
+        h += '<button class="ch" type="button" data-seek="' + (+c.start || 0) + '"><span class="tc">' + esc(c.time) + '</span>' +
+             '<span class="t">' + esc(c.title) + '</span></button>';
+      });
+      h += '</div>';
+    }
     var files = l.files || [];
     if (files.length) {
       h += '<p class="eyebrow section-title">' + (files.length > 1 ? 'Файлы урока' : 'Файл урока') + '</p><div class="files">';
@@ -597,8 +613,22 @@
   }
   // ── плеер урока: ID зрителя, свой полный экран, отметка просмотра ──
   var wmTimer = null, fsOn = false, fsNative = false, viewSent = {};
+  var player = null, playerReady = false, pendingSeek = null;
+  // Перемотка по таймкоду: плеер ещё не готов — запомним и перемотаем, когда будет
+  function seekTo(sec) {
+    var box = document.getElementById('player');
+    if (box) box.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    if (!player || !playerReady) { pendingSeek = sec; return; }
+    try { player.setCurrentTime(sec); player.play(); } catch (e) { __appLog('seek', e && e.message); }
+  }
+  function chapterMark(sec) {
+    var all = document.querySelectorAll('.chapters .ch'), cur = null;
+    for (var i = 0; i < all.length; i++) if (+all[i].getAttribute('data-seek') <= sec + 0.5) cur = all[i];
+    for (var j = 0; j < all.length; j++) all[j].classList.toggle('on', all[j] === cur);
+  }
   function setupPlayer() {
     clearInterval(wmTimer); wmTimer = null;
+    player = null; playerReady = false; pendingSeek = null;
     var box = document.getElementById('player');
     if (!box) return;
     var wm = document.getElementById('wm');
@@ -611,8 +641,18 @@
     var slug = view.section, n = view.lesson, key = slug + ':' + n;
     if (demo || !window.playerjs) return;
     try {
-      var p = new playerjs.Player(document.getElementById('lesson-video'));
+      var p = player = new playerjs.Player(document.getElementById('lesson-video'));
       p.on('ready', function () {
+        if (player !== p) return;
+        playerReady = true;
+        if (pendingSeek !== null) { var at = pendingSeek; pendingSeek = null; seekTo(at); }
+        if (document.querySelector('.chapters')) {
+          var last = -1;
+          p.on('timeupdate', function (d) {
+            var sec = Math.floor((d && d.seconds) || 0);
+            if (sec !== last) { last = sec; chapterMark(sec); }
+          });
+        }
         p.on('play', function () {
           if (viewSent[key]) return;
           viewSent[key] = true;
@@ -739,6 +779,7 @@
     else if (el.hasAttribute('data-go')) { haptic(); go(el.getAttribute('data-go')); }
     else if (el.hasAttribute('data-back')) { back(); }
     else if (el.hasAttribute('data-fs')) { haptic(); fsOn ? fsExit() : fsEnter(); }
+    else if (el.hasAttribute('data-seek')) { haptic(); seekTo(+el.getAttribute('data-seek') || 0); }
     else if (el.hasAttribute('data-file')) { sendFiles({ key: el.getAttribute('data-file') }); }
     else if (el.hasAttribute('data-lesson-files')) { sendFiles({ lesson: el.getAttribute('data-lesson-files') }); }
     else if (el.hasAttribute('data-soon')) { toast(data.open ? 'Скоро добавим' : 'Откроется ' + data.open_date); }

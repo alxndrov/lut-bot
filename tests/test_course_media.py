@@ -68,6 +68,15 @@ class BunnyTest(unittest.TestCase):
         self.assertEqual(picked["shooting"]["2"]["id"], "d")
         self.assertEqual(picked["shooting"]["2"]["duplicates"], 1)
 
+    def test_chapters_sorted_and_cleaned(self):
+        picked = bunny._pick([{"guid": "a", "title": "CUT 5 TSVET.mp4", "status": 4, "chapters": [
+            {"title": "Film look", "start": 610, "end": 900}, {"title": " Вступление ", "start": 0, "end": 30},
+            {"title": "", "start": 50}, {"title": "Битый", "start": "x"}]}])
+        self.assertEqual(picked["editing"]["5"]["chapters"],
+                         [{"start": 0, "title": "Вступление"}, {"start": 610, "title": "Film look"}])
+        self.assertEqual(bunny.time_text(610), "10:10")
+        self.assertEqual(bunny.time_text(3725), "1:02:05")
+
     def test_embed_url_signed(self):
         with mock.patch.object(config, "BUNNY_LIBRARY_ID", "77"), \
              mock.patch.object(config, "BUNNY_TOKEN_KEY", "key"):
@@ -95,7 +104,8 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         self._videos = bunny.videos
 
         async def fake_videos(force=False):
-            return {"editing": {"2": {"id": "v2", "status": 4, "length": 2101, "width": 1920, "height": 1080},
+            return {"editing": {"2": {"id": "v2", "status": 4, "length": 2101, "width": 1920, "height": 1080,
+                                      "chapters": [{"start": 0, "title": "Старт"}, {"start": 95, "title": "Отбор"}]},
                                 "3": {"id": "v3", "status": 3, "progress": 40, "length": 0, "width": 0, "height": 0}}}
         bunny.videos = fake_videos
         for name in ("cut_07_eksport.pdf", "seyfzona_tiktok_1080x1920.png", "MALIMABI LUT.cube",
@@ -132,7 +142,10 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         l2, l3, l7 = editing["lessons"][1], editing["lessons"][2], editing["lessons"][6]
         self.assertTrue(l2["video"].startswith("https://iframe.mediadelivery.net/embed/"))
         self.assertEqual(l2["duration"], "35 мин")
+        self.assertEqual(l2["chapters"], [{"start": 0, "time": "0:00", "title": "Старт"},
+                                          {"start": 95, "time": "1:35", "title": "Отбор"}])
         self.assertEqual(l3["video"], "")
+        self.assertEqual(l3["chapters"], [])
         self.assertTrue(l3["processing"])
         self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт и Topaz", "Сейф-зона · TikTok"])
         shooting = next(s for s in state["sections"] if s["slug"] == "shooting")

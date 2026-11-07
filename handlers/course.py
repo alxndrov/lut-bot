@@ -476,6 +476,8 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
                 "processing": bool(show and video and not bunny.ready(video)),
                 "duration": bunny.duration_text(video["length"]) if video and bunny.ready(video) else "",
                 "landscape": not video or video["width"] >= video["height"],
+                "chapters": [{"start": c["start"], "time": bunny.time_text(c["start"]), "title": c["title"]}
+                             for c in video.get("chapters", [])] if show and bunny.ready(video) else [],
                 "files": [{"key": k, "title": files[k]["title"],
                            "ext": files[k]["file_name"].rsplit(".", 1)[-1].upper()[:4]}
                           for k in lesson_files],

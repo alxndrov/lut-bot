@@ -10,6 +10,7 @@ authentication): sha256(ключ + id ролика + срок). Без подп�
 сайта (Allowed domains) ролик не играет. Список роликов кэшируем на пару
 минут, чтобы не дёргать API на каждое открытие приложения.
 """
+import asyncio
 import hashlib
 import logging
 import re
@@ -71,6 +72,26 @@ async def fetch_all() -> list[dict]:
             page += 1
 
 
+def chapters_of(v: dict) -> list[dict]:
+    """Главы ролика (их ставят в Bunny: Chapters) — [{"start": сек, "title"}] по порядку."""
+    out = []
+    for c in v.get("chapters") or []:
+        title = str(c.get("title") or "").strip()
+        try:
+            start = max(0, int(c.get("start") or 0))
+        except (TypeError, ValueError):
+            continue
+        if title:
+            out.append({"start": start, "title": title})
+    return sorted(out, key=lambda c: c["start"])
+
+
+def time_text(seconds: int) -> str:
+    h, rest = divmod(int(seconds), 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 def _pick(items: list[dict]) -> dict:
     """{раздел: {"N": ролик}} — по уроку лучший ролик: готовый и самый свежий."""
     out: dict[str, dict[str, dict]] = {}
@@ -82,7 +103,7 @@ def _pick(items: list[dict]) -> dict:
         video = {"id": v["guid"], "title": v.get("title") or "", "status": int(v.get("status") or 0),
                  "progress": int(v.get("encodeProgress") or 0), "length": int(v.get("length") or 0),
                  "width": int(v.get("width") or 0), "height": int(v.get("height") or 0),
-                 "created": v.get("dateUploaded") or ""}
+                 "created": v.get("dateUploaded") or "", "chapters": chapters_of(v)}
         cur = out.setdefault(section, {}).get(str(n))
         better = (cur is None
                   or (video["status"] == FINISHED) > (cur["status"] == FINISHED)
@@ -97,6 +118,25 @@ def _pick(items: list[dict]) -> dict:
     return out
 
 
+async def _load_chapters(picked: dict) -> None:
+    """Главы есть только в карточке ролика (в общем списке Bunny отдаёт пусто) —
+    дочитываем по уроку. Не вышло — урок просто без содержания."""
+    targets = [v for lessons in picked.values() for v in lessons.values() if v["status"] == FINISHED]
+    if not targets:
+        return
+    async with aiohttp.ClientSession(timeout=TIMEOUT) as session:
+        async def one(video):
+            url = f"{API}/library/{config.BUNNY_LIBRARY_ID}/videos/{video['id']}"
+            try:
+                async with session.get(url, headers={"AccessKey": config.BUNNY_API_KEY,
+                                                     "accept": "application/json"}) as r:
+                    if r.status == 200:
+                        video["chapters"] = chapters_of(await r.json())
+            except (aiohttp.ClientError, TimeoutError, ValueError) as e:
+                logger.warning(f"bunny: главы {video['title']} не получены: {e}")
+        await asyncio.gather(*(one(v) for v in targets))
+
+
 async def videos(force: bool = False) -> dict:
     """Ролики уроков; при сбое API — последний удачный список (или пусто)."""
     if not configured():
@@ -104,7 +144,9 @@ async def videos(force: bool = False) -> dict:
     if not force and _cache["videos"] is not None and time.time() - _cache["at"] < CACHE_TTL:
         return _cache["videos"]
     try:
-        _cache["videos"] = _pick(await fetch_all())
+        picked = _pick(await fetch_all())
+        await _load_chapters(picked)
+        _cache["videos"] = picked
         _cache["at"] = time.time()
     except (BunnyError, aiohttp.ClientError, TimeoutError) as e:
         logger.warning(f"bunny: список роликов не получен: {e}")
