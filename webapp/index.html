@@ -151,6 +151,7 @@
                      margin: 0; width: 100vw; height: 100vh; }
   /* размеры повёрнутого блока ставит fsLayout() в пикселях: 100vh в WebView айфона врёт */
   .video.player.fs.rot { inset: auto; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(90deg); }
+  .video.player.fs.rot.ccw { transform: translate(-50%, -50%) rotate(-90deg); }
   .video.player.fs:not(.rot) .fs-btn { top: calc(10px + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)); }
   body.fs-on { overflow: hidden; }
   body.fs-on .tabs, body.fs-on .next-card { display: none; }
@@ -631,6 +632,7 @@
     if (!box) return;
     var rot = fsOn && mobile() && !box.classList.contains('tall') && innerHeight > innerWidth * 1.1;
     box.classList.toggle('rot', rot);
+    box.classList.toggle('ccw', rot && rotCcw);
     // повёрнутый блок: ширина = высоте окна, высота = ширине (inset в CSS не задаёт размер после поворота)
     box.style.width = rot ? innerHeight + 'px' : '';
     box.style.height = rot ? innerWidth + 'px' : '';
@@ -648,11 +650,33 @@
       pr && pr.catch && pr.catch(function () { if (fsVia === 'el') fsVia = null; });
     } catch (e) { fsVia = null; }
   }
+  // На телефоне в полном экране не даём Telegram перейти в альбомный режим (там он
+  // рисует свои поля по краям) — держим портрет и сами поворачиваем видео. Куда
+  // повернуть — по датчику: телефон наклонён правым краем вниз → видео на −90°
+  var rotCcw = false;
+  function tg8() { return !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')); }
+  function orientStart() {
+    if (!mobile() || !tg8()) return;
+    try { if (innerHeight > innerWidth) tg.lockOrientation(); } catch (e) {}
+    try { tg.DeviceOrientation && tg.DeviceOrientation.start({ refresh_rate: 200 }); } catch (e) {}
+  }
+  function orientStop() {
+    if (!tg8()) return;
+    try { tg.unlockOrientation(); } catch (e) {}
+    try { tg.DeviceOrientation && tg.DeviceOrientation.isStarted && tg.DeviceOrientation.stop(); } catch (e) {}
+  }
+  if (tg && tg.onEvent) tg.onEvent('deviceOrientationChanged', function () {
+    var g = tg.DeviceOrientation && tg.DeviceOrientation.gamma;   // радианы, наклон влево-вправо
+    if (typeof g !== 'number' || !fsOn) return;
+    var ccw = g > 0.7 ? true : g < -0.7 ? false : rotCcw;
+    if (ccw !== rotCcw) { rotCcw = ccw; fsLayout(); }
+  });
   function fsEnter() {
     var box = document.getElementById('player');
     if (!box) return;
     fsOn = true; fsVia = null;
     box.classList.add('fs'); document.body.classList.add('fs-on');
+    orientStart();
     if (tgFsOk()) { try { tg.requestFullscreen(); } catch (e) { fsElement(); } }
     else fsElement();
     fsLayout(); fsIcon();
@@ -660,7 +684,8 @@
   function fsExit() {
     var box = document.getElementById('player');
     fsOn = false;
-    if (box) { box.classList.remove('fs', 'rot'); box.style.width = ''; box.style.height = ''; }
+    if (box) { box.classList.remove('fs', 'rot', 'ccw'); box.style.width = ''; box.style.height = ''; }
+    orientStop();
     document.body.classList.remove('fs-on');
     try { if (tg && tg.isFullscreen) tg.exitFullscreen(); } catch (e) {}
     try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
