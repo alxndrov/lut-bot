@@ -149,8 +149,8 @@
      в портрете поворачиваем горизонтальный ролик на 90° */
   .video.player.fs { position: fixed; inset: 0; z-index: 100; aspect-ratio: auto; border-radius: 0; border: 0;
                      margin: 0; width: 100vw; height: 100vh; }
-  .video.player.fs.rot { width: 100vh; height: 100vw; top: 50%; left: 50%; inset: auto;
-                         transform: translate(-50%, -50%) rotate(90deg); }
+  /* размеры повёрнутого блока ставит fsLayout() в пикселях: 100vh в WebView айфона врёт */
+  .video.player.fs.rot { inset: auto; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(90deg); }
   .video.player.fs:not(.rot) .fs-btn { top: calc(10px + var(--tg-safe-area-inset-top, 0px) + var(--tg-content-safe-area-inset-top, 0px)); }
   body.fs-on { overflow: hidden; }
   body.fs-on .tabs, body.fs-on .next-card { display: none; }
@@ -629,7 +629,11 @@
   function fsLayout() {
     var box = document.getElementById('player');
     if (!box) return;
-    box.classList.toggle('rot', fsOn && mobile() && !box.classList.contains('tall') && innerHeight > innerWidth * 1.1);
+    var rot = fsOn && mobile() && !box.classList.contains('tall') && innerHeight > innerWidth * 1.1;
+    box.classList.toggle('rot', rot);
+    // повёрнутый блок: ширина = высоте окна, высота = ширине (inset в CSS не задаёт размер после поворота)
+    box.style.width = rot ? innerHeight + 'px' : '';
+    box.style.height = rot ? innerWidth + 'px' : '';
   }
   function fsIcon() {
     var b = document.querySelector('[data-fs]');
@@ -656,7 +660,7 @@
   function fsExit() {
     var box = document.getElementById('player');
     fsOn = false;
-    if (box) box.classList.remove('fs', 'rot');
+    if (box) { box.classList.remove('fs', 'rot'); box.style.width = ''; box.style.height = ''; }
     document.body.classList.remove('fs-on');
     try { if (tg && tg.isFullscreen) tg.exitFullscreen(); } catch (e) {}
     try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
@@ -670,6 +674,7 @@
       else if (fsOn && fsVia === 'tg') fsExit();   // свернули жестом/кнопкой Telegram
       fsLayout();
     });
+    tg.onEvent('viewportChanged', fsLayout);
     // Telegram не умеет на этой платформе (или уже) — пробуем браузерный полный экран
     tg.onEvent('fullscreenFailed', function () { fsElement(); });
   }
