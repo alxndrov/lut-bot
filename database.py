@@ -481,6 +481,17 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (user_id, section, lesson)
             )
         """)
+        # Сообщения покупателям об открытии уроков (handlers/course_open.py):
+        # по строке на человека и волну, чтобы при перезапуске не прислать дважды
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_open_notices (
+                user_id INTEGER NOT NULL,
+                wave    TEXT NOT NULL,
+                ok      INTEGER NOT NULL DEFAULT 1,
+                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, wave)
+            )
+        """)
         # Взаиморасчёт как в Splitwise (services/settle.py): деньги проекта
         # лежат и у Дани (Альфа: Prodamus, ЮKassa), и у Миши (PayAnyWay,
         # lava.top, переводы ему). source у выплаты — чьими деньгами
@@ -5502,6 +5513,32 @@ async def get_lesson_views(user_id: int) -> dict[str, list[int]]:
             for section, lesson in await cur.fetchall():
                 out.setdefault(section, []).append(lesson)
     return out
+
+
+# ── Сообщения об открытии уроков ───────────────────────────────────────────────
+
+async def get_course_open_recipients(wave: str, only_not_started: bool = False) -> list[tuple[int, set[str]]]:
+    """Покупатели (без тестовых доступов) с их разделами, кому эту волну ещё не слали.
+    only_not_started — только те, кто ещё не запускал ни одного урока."""
+    sql = """SELECT a.user_id, a.section FROM course_access a
+             WHERE a.test = 0 AND a.revoked_at IS NULL
+               AND NOT EXISTS (SELECT 1 FROM course_open_notices n
+                               WHERE n.user_id = a.user_id AND n.wave = ?)"""
+    if only_not_started:
+        sql += " AND NOT EXISTS (SELECT 1 FROM course_lesson_views v WHERE v.user_id = a.user_id)"
+    out: dict[int, set[str]] = {}
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(sql + " ORDER BY a.user_id", (wave,)) as cur:
+            for user_id, section in await cur.fetchall():
+                out.setdefault(user_id, set()).add(section)
+    return list(out.items())
+
+
+async def mark_course_open_notice(user_id: int, wave: str, ok: bool):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR IGNORE INTO course_open_notices (user_id, wave, ok) VALUES (?, ?, ?)",
+                         (user_id, wave, int(ok)))
+        await db.commit()
 
 
 # ── Продажи вне бота (/sale) ───────────────────────────────────────────────────

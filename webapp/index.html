@@ -588,27 +588,37 @@
       });
     } catch (e) { __appLog('playerjs', e && (e.stack || e.message)); }
   }
-  function tgFs() { return !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0') && /^(ios|android)/.test(tg.platform || '')); }
+  // Полный экран: сначала просим у Telegram (Bot API 8.0 — телефоны и новые десктопы),
+  // не вышло — браузерный полный экран блока, а нет и его — блок на всё окно приложения.
+  // Поворот на 90° — только на телефоне: на компьютере узкое окно не повод крутить видео
+  var fsVia = null;   // 'tg' | 'el' | null — чем развернули
+  function mobile() { return /^(ios|android)/.test((tg && tg.platform) || '') || (!tg && 'ontouchstart' in window); }
+  function tgFsOk() { return !!(tg && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0') && tg.requestFullscreen); }
   function fsLayout() {
     var box = document.getElementById('player');
     if (!box) return;
-    // телефон в портрете, ролик горизонтальный — поворачиваем, чтобы видео было на весь экран
-    box.classList.toggle('rot', fsOn && !box.classList.contains('tall') && innerHeight > innerWidth * 1.1);
+    box.classList.toggle('rot', fsOn && mobile() && !box.classList.contains('tall') && innerHeight > innerWidth * 1.1);
   }
   function fsIcon() {
     var b = document.querySelector('[data-fs]');
     if (b) b.innerHTML = fsOn ? ICON.fsOff : ICON.fs;
   }
+  function fsElement() {
+    var box = document.getElementById('player');
+    if (!fsOn || !box || !box.requestFullscreen || document.fullscreenElement) return;
+    try {
+      var pr = box.requestFullscreen();
+      fsVia = 'el';
+      pr && pr.catch && pr.catch(function () { if (fsVia === 'el') fsVia = null; });
+    } catch (e) { fsVia = null; }
+  }
   function fsEnter() {
     var box = document.getElementById('player');
     if (!box) return;
-    fsOn = true; fsNative = false;
+    fsOn = true; fsVia = null;
     box.classList.add('fs'); document.body.classList.add('fs-on');
-    if (tgFs()) { try { tg.requestFullscreen(); } catch (e) {} }
-    else if (box.requestFullscreen) {
-      fsNative = true;
-      try { var pr = box.requestFullscreen(); pr && pr.catch && pr.catch(function () { fsNative = false; }); } catch (e) { fsNative = false; }
-    }
+    if (tgFsOk()) { try { tg.requestFullscreen(); } catch (e) { fsElement(); } }
+    else fsElement();
     fsLayout(); fsIcon();
   }
   function fsExit() {
@@ -616,13 +626,21 @@
     fsOn = false;
     if (box) box.classList.remove('fs', 'rot');
     document.body.classList.remove('fs-on');
-    try { if (tgFs() && tg.isFullscreen) tg.exitFullscreen(); } catch (e) {}
-    try { if (fsNative && document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
-    fsNative = false; fsIcon();
+    try { if (tg && tg.isFullscreen) tg.exitFullscreen(); } catch (e) {}
+    try { if (document.fullscreenElement) document.exitFullscreen(); } catch (e) {}
+    fsVia = null; fsIcon();
   }
   window.addEventListener('resize', fsLayout);
-  document.addEventListener('fullscreenchange', function () { if (fsOn && fsNative && !document.fullscreenElement) fsExit(); });
-  if (tg && tg.onEvent) tg.onEvent('fullscreenChanged', function () { if (fsOn && tgFs() && !tg.isFullscreen) fsExit(); else fsLayout(); });
+  document.addEventListener('fullscreenchange', function () { if (fsOn && fsVia === 'el' && !document.fullscreenElement) fsExit(); });
+  if (tg && tg.onEvent) {
+    tg.onEvent('fullscreenChanged', function () {
+      if (tg.isFullscreen) { if (fsOn) fsVia = 'tg'; }
+      else if (fsOn && fsVia === 'tg') fsExit();   // свернули жестом/кнопкой Telegram
+      fsLayout();
+    });
+    // Telegram не умеет на этой платформе (или уже) — пробуем браузерный полный экран
+    tg.onEvent('fullscreenFailed', function () { fsElement(); });
+  }
 
   function sendFiles(extra, one) {
     if (demo) return toast('Демо: бот прислал бы файл в чат');

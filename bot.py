@@ -88,6 +88,8 @@ async def main():
     asyncio.create_task(cdek_tracking_worker(bot))
     asyncio.create_task(cdek_retry_worker(bot))
     asyncio.create_task(course_orders.reminder_loop())
+    from handlers import course_open
+    asyncio.create_task(course_open.open_notice_loop(bot))   # «Уроки открыты» 00:00 и 10:00 МСК
     from services import npd_receipts
     asyncio.create_task(npd_receipts.retry_loop(bot))
 
