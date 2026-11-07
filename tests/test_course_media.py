@@ -1,4 +1,5 @@
 """Видео уроков (Bunny) и файлы курса (через бота)."""
+import asyncio
 import hashlib
 import os
 import tempfile
@@ -155,6 +156,12 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((status, body["sent"]), (200, 2))
         status, _ = await self.post("/api/course/file", 6, key="nope")
         self.assertEqual(status, 404)
+
+    async def test_parallel_saves_keep_everything(self):
+        infos = [(cf.recognize(n), n) for n in NAMES]
+        await asyncio.gather(*(cf.save(i, "fid-" + n, n, 1) for i, n in infos))
+        data = await cf.all_files()
+        self.assertTrue(all(i["key"] in data for i, _ in infos))
 
     async def test_view_recorded_only_for_owner(self):
         await db.grant_course_access(5, ["editing"], None)

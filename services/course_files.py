@@ -11,6 +11,7 @@
 у материалов с версиями (Library, Playhead) — постоянный ключ слота, чтобы
 новая версия заменяла старую.
 """
+import asyncio
 import json
 import re
 import unicodedata
@@ -18,6 +19,9 @@ import unicodedata
 import database as db
 
 S_FILES = "course_files"
+# Файлы пачкой приходят почти одновременно — без блокировки параллельные
+# «прочитал → дописал → сохранил» затирали друг друга (07.11 из 26 осталось 10)
+_lock = asyncio.Lock()
 
 # Шпаргалки и шаблоны уроков: имя файла (без расширения) → (раздел, урок, название)
 LESSON_FILES = {
@@ -107,19 +111,21 @@ async def all_files() -> dict:
 
 async def save(info: dict, file_id: str, file_name: str, size: int) -> bool:
     """Запомнить файл. True — заменили уже загруженный."""
-    data = await all_files()
-    replaced = info["key"] in data
-    data[info["key"]] = info | {"file_id": file_id, "file_name": file_name, "size": size}
-    await db.set_setting(S_FILES, json.dumps(data, ensure_ascii=False))
+    async with _lock:
+        data = await all_files()
+        replaced = info["key"] in data
+        data[info["key"]] = info | {"file_id": file_id, "file_name": file_name, "size": size}
+        await db.set_setting(S_FILES, json.dumps(data, ensure_ascii=False))
     return replaced
 
 
 async def remove(key: str) -> bool:
-    data = await all_files()
-    if key not in data:
-        return False
-    del data[key]
-    await db.set_setting(S_FILES, json.dumps(data, ensure_ascii=False))
+    async with _lock:
+        data = await all_files()
+        if key not in data:
+            return False
+        del data[key]
+        await db.set_setting(S_FILES, json.dumps(data, ensure_ascii=False))
     return True
 
 
