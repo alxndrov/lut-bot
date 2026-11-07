@@ -20,6 +20,11 @@ class FakeBot:
 
 class CourseOpenTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
+        self.missing = ["Мои приёмы и движение камеры"]
+        self._missing_fn = course_open.missing_shooting_lessons
+        async def fake_missing():
+            return self.missing
+        course_open.missing_shooting_lessons = fake_missing
         self.tmp = tempfile.TemporaryDirectory()
         self.old = db.DB_PATH
         db.DB_PATH = os.path.join(self.tmp.name, "t.db")
@@ -29,6 +34,7 @@ class CourseOpenTest(unittest.IsolatedAsyncioTestCase):
         await db.grant_course_access(3, ["shooting"], None, test=True)   # тест — не шлём
 
     async def asyncTearDown(self):
+        course_open.missing_shooting_lessons = self._missing_fn
         db.DB_PATH = self.old
         self.tmp.cleanup()
 
@@ -48,13 +54,18 @@ class CourseOpenTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(u for u, _ in bot.sent), [1, 2])
         self.assertEqual(await course_open.send_wave(bot, "open"), (0, 0))     # без дублей
         self.assertIn("Оба раздела", dict(bot.sent)[1])
-        self.assertNotIn("Пятый урок", dict(bot.sent)[2])                      # у монтажа нет
+        self.assertIn("«Мои приёмы и движение камеры» появится чуть позже", dict(bot.sent)[1])
+        self.assertNotIn("появится чуть позже", dict(bot.sent)[2])              # у монтажа нет
 
         await db.record_lesson_view(1, "shooting", 1)                          # 1-й уже смотрит
         bot.sent.clear()
         self.assertEqual(await course_open.send_wave(bot, "morning"), (1, 0))
         self.assertEqual([u for u, _ in bot.sent], [2])
         self.assertIn("знакомимся с Premiere", bot.sent[0][1])
+
+    def test_no_late_lesson_line_when_all_ready(self):
+        text = course_open.message_text("open", {"shooting"}, [])
+        self.assertNotIn("чуть позже", text)
 
 
 if __name__ == "__main__":

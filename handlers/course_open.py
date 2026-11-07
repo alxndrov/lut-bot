@@ -36,7 +36,7 @@ def _sections_text(sections: set[str]) -> str:
     return f"Раздел «{name}» уже ждёт тебя в приложении."
 
 
-def message_text(wave: str, sections: set[str]) -> str:
+def message_text(wave: str, sections: set[str], missing_shooting: list[str] | None = None) -> str:
     if wave == "open":
         lines = ["🎬 <b>Уроки открыты!</b>", "",
                  "Курс Shot on iPhone + Cut by MALIMABI стартовал. " + _sections_text(sections), "",
@@ -46,8 +46,11 @@ def message_text(wave: str, sections: set[str]) -> str:
         lines = ["☀️ Доброе утро! Уроки курса уже открыты.", "",
                  _sections_text(sections) + " Начни с первого урока — "
                  + ("настроим Blackmagic Camera." if "shooting" in sections else "знакомимся с Premiere.")]
-    if "shooting" in sections:
-        lines += ["", "Пятый урок съёмки — «Приёмы и движение камеры» — появится чуть позже."]
+    # Урок съёмки без готового ролика на момент отправки (Миша доснимал пятый) — честно предупреждаем
+    if "shooting" in sections and missing_shooting:
+        lines += ["", ("Урок «" + "», «".join(missing_shooting) + "» появится чуть позже."
+                       if len(missing_shooting) == 1 else
+                       "Уроки «" + "», «".join(missing_shooting) + "» появятся чуть позже.")]
     lines += ["", "Доступ без ограничения срока — смотри в своём темпе."]
     return "\n".join(lines)
 
@@ -56,6 +59,17 @@ def _keyboard() -> InlineKeyboardMarkup | None:
     from handlers.course import app_button
     button = app_button("📱 Открыть уроки")
     return InlineKeyboardMarkup(inline_keyboard=[[button]]) if button else None
+
+
+async def missing_shooting_lessons() -> list[str]:
+    """Уроки съёмки, у которых ещё нет готового ролика в Bunny."""
+    from services import bunny
+    try:
+        videos = (await bunny.videos(force=True)).get("shooting", {})
+    except Exception:
+        videos = (await bunny.videos()).get("shooting", {})
+    return [t for i, t in enumerate(svc.PROGRAM["shooting"]["lessons"], 1)
+            if not bunny.ready(videos.get(str(i)))]
 
 
 def due_wave(now: datetime) -> str | None:
@@ -70,11 +84,12 @@ async def send_wave(bot: Bot, wave: str) -> tuple[int, int]:
     only_not_started = WAVES[wave][2]
     sent = failed = 0
     kb = _keyboard()
+    missing = await missing_shooting_lessons()
     for user_id, sections in await db.get_course_open_recipients(wave, only_not_started):
         ok = True
         for _ in range(3):
             try:
-                await bot.send_message(user_id, message_text(wave, sections), parse_mode="HTML",
+                await bot.send_message(user_id, message_text(wave, sections, missing), parse_mode="HTML",
                                        reply_markup=kb)
                 break
             except TelegramRetryAfter as e:
