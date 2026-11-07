@@ -58,7 +58,7 @@ MATERIAL_SLOTS = {
     "playhead_mac_intel": (["editing"], "playhead", "Mac на Intel", ".dmg"),
     "playhead_windows": (["editing"], "playhead", "Windows", ".exe"),
     "playhead_guide": (["editing"], "playhead", "Как установить", "Инструкция PDF"),
-    "library": (["editing"], "library", "MALIMABI Library", "Архив .zip"),
+    "library": (["editing"], "library", "MALIMABI Library", "Панель для Premiere · Mac и Windows · .zip"),
     "quest": (["editing"], "quest", "Квест «Собери свой ролик»", "Задание PDF"),
 }
 
