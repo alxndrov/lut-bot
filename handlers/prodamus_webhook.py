@@ -889,15 +889,19 @@ async def _send_notify(bot: Bot, text: str, sale: str | None = None):
     сообщения, чтобы дописать в них строку о чеке «Мой налог» (ЮKassa)."""
     try:
         notify_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
-        if sale and sale.startswith("yk-"):
+        receipt = bool(sale and sale.startswith("yk-"))
+        if receipt:
             from services.npd_receipts import LINE_PENDING
             full = f"{text}\n\n{LINE_PENDING}"
         else:
-            full, sale = text, None   # по Prodamus чек делает Prodamus — дописывать нечего
+            full = text   # по Prodamus чек делает Prodamus — дописывать нечего
         for admin_id in config.ADMIN_IDS:
             try:
                 sent = await notify_bot.send_message(admin_id, full, parse_mode="HTML")
                 if sale:
+                    # На это сообщение ответом придут заказы курса (созвон, разбор)
+                    await db.add_sale_notice(sale, admin_id, sent.message_id)
+                if receipt:
                     await db.add_sale_message(sale, admin_id, sent.message_id, text)
             except Exception as e:
                 logger.error(f"Notify admin {admin_id} failed: {e}")

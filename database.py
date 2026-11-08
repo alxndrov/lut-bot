@@ -1072,6 +1072,19 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (payment_id, chat_id)
             )
         """)
+        # Все уведомления о продаже (любой способ оплаты): на них ответом
+        # приходят карточки заказов курса — созвон VIP, разбор (course_orders)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sale_notices (
+                payment_id TEXT NOT NULL,
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (payment_id, chat_id)
+            )
+        """)
+        # Продажи до появления sale_notices: номера сообщений были только у ЮKassa
+        await db.execute("""INSERT OR IGNORE INTO sale_notices (payment_id, chat_id, message_id)
+                            SELECT payment_id, chat_id, message_id FROM sale_messages""")
         # Заказ для друга (оформляет админ, см. handlers/friend_order.py):
         # friend_by — кто оформил, pickup — самовывоз без накладной СДЭК
         for table in ("pending_deliveries", "orders"):
@@ -5140,6 +5153,32 @@ async def add_sale_message(payment_id: str, chat_id: int, message_id: int, text:
             "INSERT OR REPLACE INTO sale_messages(payment_id, chat_id, message_id, text) "
             "VALUES (?, ?, ?, ?)", (payment_id, chat_id, message_id, text))
         await db.commit()
+
+
+async def add_sale_notice(payment_id: str, chat_id: int, message_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO sale_notices(payment_id, chat_id, message_id) VALUES (?, ?, ?)",
+            (payment_id, chat_id, message_id))
+        await db.commit()
+
+
+async def get_purchase_notices(purchase_id: int) -> dict[int, int]:
+    """{chat_id: message_id} уведомлений «Курс оплачен» по покупке."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT n.chat_id, n.message_id FROM sale_notices n
+               JOIN purchases p ON p.telegram_payment_id = n.payment_id
+               WHERE p.id = ? AND p.telegram_payment_id != ''""", (purchase_id,)) as cur:
+            return {r[0]: r[1] for r in await cur.fetchall()}
+
+
+async def get_bundle_review_purchase(user_id: int) -> Optional[int]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT purchase_id FROM bundle_review_queue WHERE user_id = ?",
+                              (user_id,)) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None
 
 
 async def get_sale_messages(payment_id: str) -> list[dict]:

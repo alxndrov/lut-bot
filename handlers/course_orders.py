@@ -137,16 +137,31 @@ def _admin_bot() -> Bot:
     return Bot(token=config.WAITLIST_BOT_TOKEN)
 
 
+async def _purchase_notices(order: dict) -> dict[int, int]:
+    """Сообщения «Курс оплачен» той покупки, из которой заказ: созвон — VIP,
+    разбор — пакет с местом в очереди. Нет (тест, старая покупка) — {}."""
+    if order["kind"] == "call":
+        call = await db.get_user_course_call(order["user_id"])
+        purchase_id = call and call.get("purchase_id")
+    else:
+        purchase_id = await db.get_bundle_review_purchase(order["user_id"])
+    return await db.get_purchase_notices(purchase_id) if purchase_id else {}
+
+
 async def send_cards(order_id: int, note: str = ""):
-    """Новая карточка всем админам (из основного бота — через админский)."""
+    """Новая карточка всем админам (из основного бота — через админский) —
+    ответом на уведомление о покупке, к которой относится заказ."""
     order = await db.get_course_order(order_id)
+    replies = await _purchase_notices(order)
     bot = _admin_bot()
     try:
         for admin_id in config.ADMIN_IDS:
             try:
                 msg = await bot.send_message(admin_id, (note + "\n\n" if note else "") + card_text(order),
                                              parse_mode="HTML", reply_markup=card_keyboard(order),
-                                             disable_web_page_preview=True)
+                                             disable_web_page_preview=True,
+                                             reply_to_message_id=replies.get(admin_id),
+                                             allow_sending_without_reply=True)
                 await db.add_course_order_message(order_id, admin_id, msg.message_id)
             except Exception as e:
                 logger.error(f"course order {order_id}: карточка админу {admin_id}: {e}")

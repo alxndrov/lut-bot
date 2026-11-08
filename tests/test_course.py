@@ -294,6 +294,35 @@ class CourseOrdersTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("завтра", self.sent[0][2])
         self.assertIn("Через час", self.sent[2][2])
 
+    async def test_order_card_replies_to_purchase_notice(self):
+        from unittest import mock
+        from handlers import prodamus_webhook as pw
+        admin_a, admin_b = config.ADMIN_IDS[:2]
+        pid = await db.add_course_purchase(9, "kami", 1, 4, "paw-1", 12490)
+        notify_bot = mock.MagicMock()
+        notify_bot.send_message = mock.AsyncMock(side_effect=[mock.Mock(message_id=50),
+                                                              mock.Mock(message_id=60)])
+        notify_bot.session.close = mock.AsyncMock()
+        with mock.patch.object(pw, "Bot", return_value=notify_bot):
+            await pw._send_notify(None, "🎓 Курс оплачен", sale="paw-1")
+        self.assertEqual(await db.get_sale_messages("paw-1"), [])   # строки о чеке — только ЮKassa
+        await db.add_course_call(9, pid, "2026-12-25", False)
+        oid = await db.create_course_order("call", 9, "2026-12-25", False)
+        card_bot = mock.MagicMock()
+        card_bot.send_message = mock.AsyncMock(return_value=mock.Mock(message_id=99))
+        card_bot.session.close = mock.AsyncMock()
+        with mock.patch.object(self.co, "_admin_bot", return_value=card_bot):
+            await self.patches["send_cards"](oid, "🆕")
+        replies = {c.args[0]: c.kwargs["reply_to_message_id"] for c in card_bot.send_message.call_args_list}
+        self.assertEqual(replies, {admin_a: 50, admin_b: 60})
+        # Тестовый VIP без покупки — карточка просто новым сообщением
+        await db.add_course_call(10, None, "2026-12-25", True)
+        oid = await db.create_course_order("call", 10, "2026-12-25", True)
+        card_bot.send_message.reset_mock()
+        with mock.patch.object(self.co, "_admin_bot", return_value=card_bot):
+            await self.patches["send_cards"](oid, "🆕")
+        self.assertEqual({c.kwargs["reply_to_message_id"] for c in card_bot.send_message.call_args_list}, {None})
+
     def test_parse_call_time(self):
         now = datetime(2026, 11, 10, 12, 0, tzinfo=svc.MSK)
         self.assertEqual(self.co.parse_call_time("14.11 19:00", now),
