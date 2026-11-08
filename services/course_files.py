@@ -10,10 +10,15 @@
 настройка course_files: {ключ: {...}}, ключ — имя файла в нижнем регистре,
 у материалов с версиями (Library, Playhead) — постоянный ключ слота, чтобы
 новая версия заменяла старую.
+
+Что не узнали по имени, админ раскладывает сам кнопками (handlers/course_files.py):
+урок или группа материалов, название, порядок. Ручные правки (название, место,
+порядок) остаются, когда тот же файл присылают заново новой версией.
 """
 import asyncio
 import json
 import re
+import time
 import unicodedata
 
 import database as db
@@ -109,14 +114,170 @@ async def all_files() -> dict:
     return data if isinstance(data, dict) else {}
 
 
+def place_of(f: dict) -> str:
+    """Где лежит файл: «editing:3» — урок, «mat:playhead» — группа материалов."""
+    if f.get("place") == "lesson":
+        return f"{f['section']}:{f['lesson']}"
+    return f"mat:{f.get('group') or ''}"
+
+
+def _rank(data: dict, key: str) -> tuple:
+    f = data[key]
+    default = lesson_order(key) if f.get("place") == "lesson" else material_order(key)
+    return (f.get("order", default), f.get("added", 0), key)
+
+
+def keys_in(data: dict, place: str) -> list[str]:
+    """Файлы одного урока или одной группы материалов — в порядке показа."""
+    return sorted((k for k, f in data.items() if place_of(f) == place), key=lambda k: _rank(data, k))
+
+
+def _put_last(data: dict, key: str) -> None:
+    others = [k for k in keys_in(data, place_of(data[key])) if k != key]
+    data[key]["order"] = (_rank(data, others[-1])[0] + 1) if others else 0
+
+
+def groups(data: dict) -> dict[str, tuple[str, str]]:
+    """Группы материалов по порядку: известные, потом созданные админом. {ключ: (значок, название)}"""
+    out = dict(MATERIAL_GROUPS)
+    for f in sorted(data.values(), key=lambda f: f.get("added", 0)):
+        g = f.get("group")
+        if f.get("place") == "material" and g and g not in out:
+            out[g] = (f.get("group_badge") or "•", f.get("group_title") or g)
+    return out
+
+
+def group_sections(data: dict, group: str) -> list[str]:
+    """Кому положены материалы группы: как у файлов в ней, иначе как у известных слотов."""
+    secs = {s for f in data.values() if f.get("place") == "material" and f.get("group") == group
+            for s in f.get("sections") or []}
+    secs = secs or {s for secs_, g, _, _ in MATERIAL_SLOTS.values() if g == group for s in secs_}
+    return [s for s in ("shooting", "editing") if s in secs] or ["shooting", "editing"]
+
+
+def badge_for(title: str) -> str:
+    words = re.findall(r"\w+", title)
+    if len(words) > 1:
+        return "".join(w[0] for w in words[:3]).upper()
+    return (words[0][:3] if words else "•").upper()
+
+
+def new_key(data: dict, file_name: str) -> str:
+    stem = re.sub(r"\s+", "_", _norm(file_name).rsplit(".", 1)[0])[:60] or "file"
+    key, n = stem, 2
+    while key in data:
+        key, n = f"{stem}_{n}", n + 1
+    return key
+
+
+def lesson_place(section: str, lesson: int) -> dict:
+    return {"place": "lesson", "section": section, "lesson": lesson}
+
+
+def material_place(data: dict, group: str, title: str = "", sections: list[str] | None = None) -> dict:
+    """Место в группе материалов; title и sections — для новой группы."""
+    place = {"place": "material", "group": group, "sections": sections or group_sections(data, group)}
+    if not title:
+        # в существующую созданную админом группу: подпись группы — как у соседей
+        same = next((f for f in data.values() if f.get("group") == group and f.get("group_title")), None)
+        title = same["group_title"] if same else ""
+    if title and group not in MATERIAL_GROUPS:
+        place |= {"group_title": title, "group_badge": badge_for(title)}
+    return place
+
+
+async def _write(data: dict) -> None:
+    await db.set_setting(S_FILES, json.dumps(data, ensure_ascii=False))
+
+
 async def save(info: dict, file_id: str, file_name: str, size: int) -> bool:
-    """Запомнить файл. True — заменили уже загруженный."""
+    """Запомнить файл. True — заменили уже загруженный: название, место и порядок
+    после ручных правок остаются как были, меняется только сам файл."""
+    file = {"file_id": file_id, "file_name": file_name, "size": size}
     async with _lock:
         data = await all_files()
         replaced = info["key"] in data
-        data[info["key"]] = info | {"file_id": file_id, "file_name": file_name, "size": size}
-        await db.set_setting(S_FILES, json.dumps(data, ensure_ascii=False))
+        if replaced:
+            data[info["key"]] |= file
+        else:
+            data[info["key"]] = info | file | {"added": time.time()}
+            # известные файлы стоят в порядке списка выше, пока порядок не меняли руками
+            if any("order" in data[k] for k in keys_in(data, place_of(data[info["key"]]))):
+                _put_last(data, info["key"])
+        await _write(data)
     return replaced
+
+
+async def add(place: dict, title: str, file_id: str, file_name: str, size: int) -> str:
+    """Новый файл, разложенный админом вручную. Возвращает ключ."""
+    async with _lock:
+        data = await all_files()
+        key = new_key(data, file_name)
+        data[key] = place | {"key": key, "title": title, "file_id": file_id, "file_name": file_name,
+                             "size": size, "added": time.time()}
+        _put_last(data, key)
+        await _write(data)
+    return key
+
+
+async def replace_file(key: str, file_id: str, file_name: str, size: int) -> bool:
+    async with _lock:
+        data = await all_files()
+        if key not in data:
+            return False
+        data[key] |= {"file_id": file_id, "file_name": file_name, "size": size}
+        await _write(data)
+    return True
+
+
+async def update(key: str, **fields) -> bool:
+    """Название, пояснение. None — убрать поле."""
+    async with _lock:
+        data = await all_files()
+        if key not in data:
+            return False
+        for k, v in fields.items():
+            if v is None:
+                data[key].pop(k, None)
+            else:
+                data[key][k] = v
+        await _write(data)
+    return True
+
+
+_PLACE_FIELDS = ("place", "section", "lesson", "group", "sections", "group_title", "group_badge", "order")
+
+
+async def move(key: str, place: dict) -> bool:
+    """Перенести файл в другой урок или группу — встаёт последним."""
+    async with _lock:
+        data = await all_files()
+        if key not in data:
+            return False
+        f = {k: v for k, v in data[key].items() if k not in _PLACE_FIELDS}
+        if place.get("place") == "lesson":
+            f.pop("note", None)
+        data[key] = f | place
+        _put_last(data, key)
+        await _write(data)
+    return True
+
+
+async def move_up(key: str) -> bool:
+    """На одну позицию выше внутри урока или группы. False — уже первый."""
+    async with _lock:
+        data = await all_files()
+        if key not in data:
+            return False
+        keys = keys_in(data, place_of(data[key]))
+        i = keys.index(key)
+        if i == 0:
+            return False
+        keys[i - 1], keys[i] = keys[i], keys[i - 1]
+        for n, k in enumerate(keys):
+            data[k]["order"] = n
+        await _write(data)
+    return True
 
 
 async def remove(key: str) -> bool:
@@ -125,7 +286,7 @@ async def remove(key: str) -> bool:
         if key not in data:
             return False
         del data[key]
-        await db.set_setting(S_FILES, json.dumps(data, ensure_ascii=False))
+        await _write(data)
     return True
 
 

@@ -153,8 +153,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         groups = {g["group"]: g for g in state["materials"]}
         self.assertEqual(set(groups), {"lut", "playhead"})           # Library и квест не загружены
         keys = [it["key"] for it in groups["playhead"]["items"]]
-        self.assertIn("playhead_windows", keys)
-        self.assertIn("", keys)                                       # Mac ещё нет — «скоро»
+        self.assertEqual(keys, ["playhead_windows"])                  # показываем только загруженное
         self.assertEqual(state["wm"], "ID 5")
 
     async def test_review_tab_only_for_review_or_vip_and_faq_for_all(self):
@@ -183,6 +182,44 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*(cf.save(i, "fid-" + n, n, 1) for i, n in infos))
         data = await cf.all_files()
         self.assertTrue(all(i["key"] in data for i, _ in infos))
+
+    async def test_manual_files_order_rename_and_groups(self):
+        await db.grant_course_access(5, ["editing"], None)
+        # незнакомый файл — в урок вручную, встаёт последним
+        key = await cf.add(cf.lesson_place("editing", 7), "Чек-лист экспорта", "fid-x", "Check List.pdf", 10)
+        self.assertEqual(key, "check_list")
+        data = await cf.all_files()
+        self.assertEqual(cf.keys_in(data, "editing:7"), ["cut_07_eksport", "seyfzona_tiktok_1080x1920", key])
+        self.assertTrue(await cf.move_up(key))
+        self.assertFalse(await cf.move_up("cut_07_eksport"))
+        data = await cf.all_files()
+        self.assertEqual(cf.keys_in(data, "editing:7"), ["cut_07_eksport", key, "seyfzona_tiktok_1080x1920"])
+        # переименовали знакомый файл — новая версия с тем же именем название не сбрасывает
+        await cf.update("cut_07_eksport", title="Экспорт")
+        await cf.save(cf.recognize("cut_07_eksport.pdf"), "fid-new", "cut_07_eksport.pdf", 5)
+        data = await cf.all_files()
+        self.assertEqual((data["cut_07_eksport"]["title"], data["cut_07_eksport"]["file_id"]), ("Экспорт", "fid-new"))
+        # новая группа материалов — только монтажу; перенос урока в неё
+        await cf.move(key, cf.material_place(data, "g1", "Пресеты цвета", ["editing"]))
+        await cf.update(key, note="для Premiere")
+        state = await course_handler._app_state({"id": 5}, "bot")
+        l7 = next(s for s in state["sections"] if s["slug"] == "editing")["lessons"][6]
+        self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт", "Сейф-зона · TikTok"])
+        g = state["materials"][-1]
+        self.assertEqual((g["group"], g["badge"], g["title"]), ("g1", "ПЦ", "Пресеты цвета"))
+        self.assertEqual(g["items"], [{"key": key, "title": "Чек-лист экспорта", "note": "для Premiere"}])
+        await db.grant_course_access(6, ["shooting"], None)
+        state = await course_handler._app_state({"id": 6}, "bot")
+        self.assertNotIn("g1", [g["group"] for g in state["materials"]])
+        status, _ = await self.post("/api/course/file", 6, key=key)
+        self.assertEqual(status, 403)
+        # перенос в существующую группу берёт её подпись; удаление
+        data = await cf.all_files()
+        place = cf.material_place(data, "g1")
+        self.assertEqual((place["group_title"], place["sections"]), ("Пресеты цвета", ["editing"]))
+        self.assertEqual(cf.material_place(data, "lut")["sections"], ["shooting", "editing"])
+        self.assertTrue(await cf.remove(key))
+        self.assertNotIn("g1", cf.groups(await cf.all_files()))
 
     async def test_view_recorded_only_for_owner(self):
         await db.grant_course_access(5, ["editing"], None)

@@ -466,9 +466,7 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
             n = i + 1
             video = videos.get(slug, {}).get(str(n))
             show = has and is_open
-            lesson_files = sorted((k for k, f in files.items() if f.get("place") == "lesson"
-                                   and f["section"] == slug and f["lesson"] == n),
-                                  key=cf.lesson_order) if show else []
+            lesson_files = cf.keys_in(files, f"{slug}:{n}") if show else []
             lessons.append({
                 "n": n, "title": t, "open": show,
                 "watched": n in watched.get(slug, []),
@@ -494,19 +492,16 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
         })
     vip = next((o for o in options if svc.is_call_option(o)), None)
     call = await db.get_user_course_call(user_id)
-    # «Материалы»: группы (лут, Playhead, Library, квест) из загруженных в бот файлов;
-    # до старта — только список того, что придёт, без файлов
+    # «Материалы»: группы (лут, Playhead, Library, квест и созданные админом) из
+    # загруженных в бот файлов; до старта — только список того, что придёт, без файлов
     materials = []
-    for group, (badge, gtitle) in cf.MATERIAL_GROUPS.items():
-        slots = [k for k, (secs, g, _, _) in cf.MATERIAL_SLOTS.items()
-                 if g == group and set(secs) & owned]
-        if not slots:
-            continue
-        items = [{"key": k if k in files else "", "title": cf.MATERIAL_SLOTS[k][2],
-                  "note": cf.MATERIAL_SLOTS[k][3]} for k in slots]
-        if not any(k in uploaded for k in slots):
-            continue   # ещё не загружен (квест в работе) — не показываем пустую группу
-        materials.append({"group": group, "badge": badge, "title": gtitle, "items": items})
+    for group, (badge, gtitle) in cf.groups(uploaded).items():
+        keys = [k for k in cf.keys_in(uploaded, f"mat:{group}")
+                if set(uploaded[k].get("sections") or []) & owned]
+        if keys:
+            materials.append({"group": group, "badge": badge, "title": gtitle,
+                              "items": [{"key": k if k in files else "", "title": uploaded[k]["title"],
+                                         "note": uploaded[k].get("note") or ""} for k in keys]})
 
     position = await db.get_bundle_review_position(user_id)
     taken = await db.count_bundle_reviews()
@@ -662,8 +657,7 @@ async def api_file(request: web.Request) -> web.Response:
     lesson = str(body.get("lesson") or "")
     if lesson:
         slug, _, n = lesson.partition(":")
-        keys = sorted((k for k, f in files.items() if f.get("place") == "lesson"
-                       and f["section"] == slug and str(f["lesson"]) == n), key=cf.lesson_order)
+        keys = cf.keys_in(files, f"{slug}:{n}")
     else:
         keys = [str(body.get("key") or "")]
     keys = [k for k in keys if k in files]
