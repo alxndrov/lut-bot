@@ -379,9 +379,20 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
 
 # ── Тестовая оплата (только админы) ────────────────────────────────────────────
 
-def _test_keyboard(options: list[dict]) -> InlineKeyboardMarkup:
+TEST_PANEL_OFF = "course_test_panel_off"   # админы, у которых тест-панель в приложении скрыта
+
+
+async def test_panel_hidden(user_id: int) -> bool:
+    return str(user_id) in (await db.get_setting(TEST_PANEL_OFF) or "").split(",")
+
+
+def _test_keyboard(options: list[dict], panel_hidden: bool = False) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"🧪 Как будто оплатил: {o['title']}",
                                   callback_data=f"course:testpay:{o['id']}")] for o in options]
+    rows.append([InlineKeyboardButton(
+        text="📱 Тест-панель в приложении: скрыта — показать" if panel_hidden
+             else "📱 Тест-панель в приложении: видна — скрыть",
+        callback_data="course:testpanel")])
     rows.append([InlineKeyboardButton(text="♻️ Сбросить тестовый доступ",
                                       callback_data="course:testreset")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="course:show")])
@@ -401,8 +412,32 @@ async def cb_test_menu(callback: CallbackQuery):
         "Выдаёт доступ к разделам и присылает те же сообщения, что и после настоящей "
         "оплаты. Денег, записи о покупке, строки в финансах и места на разбор нет; "
         "партнёрам уведомление не уходит.\n\n"
-        "«Сбросить» убирает только тестовый доступ — настоящие покупки остаются.",
-        reply_markup=_test_keyboard(options), parse_mode="HTML")
+        "«Сбросить» убирает только тестовый доступ — настоящие покупки остаются.\n\n"
+        "📱 Тест-панель в приложении можно скрыть — тогда экран как у покупателя.",
+        reply_markup=_test_keyboard(options, await test_panel_hidden(callback.from_user.id)),
+        parse_mode="HTML")
+
+
+@router.callback_query(F.data == "course:testpanel")
+async def cb_test_panel(callback: CallbackQuery):
+    """Скрыть/показать тест-панель в мини-приложении — каждому админу своё."""
+    user_id = callback.from_user.id
+    if user_id not in config.ADMIN_IDS:
+        await callback.answer()
+        return
+    off = {x for x in (await db.get_setting(TEST_PANEL_OFF) or "").split(",") if x}
+    off ^= {str(user_id)}
+    await db.set_setting(TEST_PANEL_OFF, ",".join(sorted(off)))
+    hidden = str(user_id) in off
+    await callback.answer("Тест-панель скрыта — в приложении экран как у покупателя. "
+                          "Обнови приложение." if hidden else
+                          "Тест-панель снова видна в приложении.", show_alert=True)
+    product = await db.get_course_product()
+    options = await db.get_course_options(product["id"]) if product else []
+    try:
+        await callback.message.edit_reply_markup(reply_markup=_test_keyboard(options, hidden))
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data.startswith("course:testpay:"))
@@ -510,7 +545,8 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
     call_order = await db.get_user_course_order(user_id, "call")
     return {
         "first_name": user.get("first_name") or "",
-        "admin": admin,
+        # Тест-панель в приложении; админ может скрыть её себе (бот → Тестовая оплата)
+        "admin": admin and not await test_panel_hidden(user_id),
         "open": is_open,
         "preview": is_open and not svc.is_open(),
         "open_date": svc.open_date_text(),
