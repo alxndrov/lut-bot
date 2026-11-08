@@ -147,7 +147,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(l3["video"], "")
         self.assertEqual(l3["chapters"], [])
         self.assertTrue(l3["processing"])
-        self.assertEqual([f["title"] for f in l7["files"]], ["Рендер и Topaz", "Сейфзона · TikTok"])
+        self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт и Topaz", "Сейф-зона · TikTok"])
         shooting = next(s for s in state["sections"] if s["slug"] == "shooting")
         self.assertEqual(shooting["lessons"][0]["files"], [])      # раздел не куплен
         groups = {g["group"]: g for g in state["materials"]}
@@ -204,7 +204,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         await cf.update(key, note="для Premiere")
         state = await course_handler._app_state({"id": 5}, "bot")
         l7 = next(s for s in state["sections"] if s["slug"] == "editing")["lessons"][6]
-        self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт", "Сейфзона · TikTok"])
+        self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт", "Сейф-зона · TikTok"])
         g = state["materials"][-1]
         self.assertEqual((g["group"], g["badge"], g["title"]), ("g1", "ПЦ", "Пресеты цвета"))
         self.assertEqual(g["items"], [{"key": key, "title": "Чек-лист экспорта", "note": "для Premiere"}])
