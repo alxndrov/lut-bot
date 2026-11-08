@@ -28,32 +28,35 @@ S_FILES = "course_files"
 # «прочитал → дописал → сохранил» затирали друг друга (07.11 из 26 осталось 10)
 _lock = asyncio.Lock()
 
-# Шпаргалки и шаблоны уроков: имя файла (без расширения) → (раздел, урок, название)
+# Шпаргалки и шаблоны уроков: имя файла (без расширения) → (раздел, урок, название).
+# Названия — по заголовкам самих PDF (08.11.2026).
 LESSON_FILES = {
     "00_nastroyki_blackmagic": ("shooting", 1, "Настройки Blackmagic Camera"),
     "01_balans_belogo": ("shooting", 1, "Баланс белого"),
-    "02_vyderzhka": ("shooting", 1, "Выдержка"),
+    "02_vyderzhka": ("shooting", 1, "Выдержка и движение"),
     "03_iso": ("shooting", 1, "ISO без шума"),
     "04_false_color": ("shooting", 1, "False color"),
-    "shot_02_oborudovanie": ("shooting", 2, "Оборудование"),
-    "shot_03_linzy": ("shooting", 3, "Линзы"),
+    "shot_02_oborudovanie": ("shooting", 2, "Оборудование для съёмки себя"),
+    "shot_03_linzy": ("shooting", 3, "Линзы и ND-фильтр"),
     "shot_04_pod_lut": ("shooting", 4, "Съёмка под лут"),
-    "shot_05_dvizhenie": ("shooting", 5, "Приёмы и движение камеры"),
-    "cut_01_english": ("editing", 1, "Premiere по-английски"),
+    "shot_05_priemy": ("shooting", 5, "Мои приёмы"),
+    "shot_05_zum_stabilizaciya": ("shooting", 5, "Зум и стабилизация"),
+    "shot_05_cheklist": ("shooting", 5, "Чек-лист съёмки"),
+    "cut_01_english": ("editing", 1, "Premiere на английском"),
     "cut_01_hotkeys": ("editing", 1, "Горячие клавиши"),
-    "cut_02_otbor": ("editing", 2, "Отбор"),
+    "cut_02_otbor": ("editing", 2, "Отбор материала"),
     "cut_03_razbor": ("editing", 3, "Разбор монтажа"),
     "cut_04_zvuk": ("editing", 4, "Музыка и саунд-дизайн"),
-    "cut_05_cvet": ("editing", 5, "Цвет"),
-    "cut_06_neyronka": ("editing", 6, "Нейросети"),
-    "cut_07_eksport": ("editing", 7, "Экспорт и Topaz"),
-    "cut_07_seyfzony": ("editing", 7, "Безопасные зоны"),
-    "seyfzona_all_1080x1920": ("editing", 7, "Сейф-зона · все платформы"),
-    "seyfzona_instagram_reels_1080x1920": ("editing", 7, "Сейф-зона · Instagram Reels"),
-    "seyfzona_telegram_stories_1080x1920": ("editing", 7, "Сейф-зона · Telegram Stories"),
-    "seyfzona_tiktok_1080x1920": ("editing", 7, "Сейф-зона · TikTok"),
-    "seyfzona_vk_klipy_1080x1920": ("editing", 7, "Сейф-зона · VK Клипы"),
-    "seyfzona_youtube_shorts_1080x1920": ("editing", 7, "Сейф-зона · YouTube Shorts"),
+    "cut_05_cvet": ("editing", 5, "Цвет и чёткость"),
+    "cut_06_neyronka": ("editing", 6, "Шоты с нейронкой"),
+    "cut_07_eksport": ("editing", 7, "Рендер и Topaz"),
+    "cut_07_seyfzony": ("editing", 7, "Сейфзоны соцсетей"),
+    "seyfzona_all_1080x1920": ("editing", 7, "Сейфзона · все платформы"),
+    "seyfzona_instagram_reels_1080x1920": ("editing", 7, "Сейфзона · Instagram Reels"),
+    "seyfzona_telegram_stories_1080x1920": ("editing", 7, "Сейфзона · Telegram Stories"),
+    "seyfzona_tiktok_1080x1920": ("editing", 7, "Сейфзона · TikTok"),
+    "seyfzona_vk_klipy_1080x1920": ("editing", 7, "Сейфзона · VK Клипы"),
+    "seyfzona_youtube_shorts_1080x1920": ("editing", 7, "Сейфзона · YouTube Shorts"),
 }
 
 # Материалы: слот → (разделы, кому положено; группа во вкладке; название; пояснение)

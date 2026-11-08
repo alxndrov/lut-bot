@@ -24,7 +24,7 @@ seyfzona_tiktok_1080x1920.png seyfzona_vk_klipy_1080x1920.png seyfzona_youtube_s
 quest_01_otbor_sborka.pdf MALIMABI_Library_1.1.0.zip playhead_ustanovka.pdf
 Playhead-2.3.7-macOS-Apple-Silicon-arm64.dmg Playhead-2.3.7-macOS-Intel.dmg Playhead-2.3.7-Windows-Setup.exe
 00_nastroyki_blackmagic.pdf 01_balans_belogo.pdf 02_vyderzhka.pdf 03_iso.pdf 04_false_color.pdf
-shot_02_oborudovanie.pdf shot_03_linzy.pdf shot_04_pod_lut.pdf shot_05_dvizhenie.pdf""".split()
+shot_02_oborudovanie.pdf shot_03_linzy.pdf shot_04_pod_lut.pdf shot_05_priemy.pdf shot_05_cheklist.pdf shot_05_zum_stabilizaciya.pdf""".split()
 
 
 class RecognizeTest(unittest.TestCase):
@@ -147,7 +147,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(l3["video"], "")
         self.assertEqual(l3["chapters"], [])
         self.assertTrue(l3["processing"])
-        self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт и Topaz", "Сейф-зона · TikTok"])
+        self.assertEqual([f["title"] for f in l7["files"]], ["Рендер и Topaz", "Сейфзона · TikTok"])
         shooting = next(s for s in state["sections"] if s["slug"] == "shooting")
         self.assertEqual(shooting["lessons"][0]["files"], [])      # раздел не куплен
         groups = {g["group"]: g for g in state["materials"]}
@@ -204,7 +204,7 @@ class AppTest(unittest.IsolatedAsyncioTestCase):
         await cf.update(key, note="для Premiere")
         state = await course_handler._app_state({"id": 5}, "bot")
         l7 = next(s for s in state["sections"] if s["slug"] == "editing")["lessons"][6]
-        self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт", "Сейф-зона · TikTok"])
+        self.assertEqual([f["title"] for f in l7["files"]], ["Экспорт", "Сейфзона · TikTok"])
         g = state["materials"][-1]
         self.assertEqual((g["group"], g["badge"], g["title"]), ("g1", "ПЦ", "Пресеты цвета"))
         self.assertEqual(g["items"], [{"key": key, "title": "Чек-лист экспорта", "note": "для Premiere"}])
