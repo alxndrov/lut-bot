@@ -5513,6 +5513,23 @@ async def get_course_gift(token: str) -> Optional[dict]:
             return dict(row) if row else None
 
 
+async def get_free_gifts() -> list[dict]:
+    """Подарки от нас (/gift без покупки): purchase_id = 0, buyer_id — админ."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM course_gifts WHERE purchase_id = 0 "
+                              "ORDER BY created_at") as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def delete_unclaimed_gift(token: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("DELETE FROM course_gifts WHERE token = ? AND claimed_by IS NULL",
+                               (token,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
 async def get_open_gift_for_purchase(purchase_id: int) -> Optional[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row

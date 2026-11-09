@@ -73,6 +73,52 @@ class CourseGiftTest(unittest.IsolatedAsyncioTestCase):
         await course_gift.claim(mock.AsyncMock(), 2, token)              # @friend — открывает
         self.assertEqual(await db.get_user_course_sections(2), {"shooting", "editing"})
 
+    async def test_free_gift_from_admin(self):
+        admin = config.ADMIN_IDS[0]
+        await db.upsert_user(user_id=admin, username="misha", first_name="Миша", ref=None)
+        self.assertEqual(course_gift.parse_username(" https://t.me/Friend "), "friend")
+        self.assertIsNone(course_gift.parse_username("привет"))
+        state = mock.AsyncMock()
+        state.get_data.return_value = {"kind": "editing"}
+        msg = mock.AsyncMock()
+        with mock.patch.object(course_gift, "gift_link",
+                               mock.AsyncMock(side_effect=lambda t: f"https://t.me/b?start=gift_{t}")):
+            await course_gift._make_free_gift(msg, admin, state, "friend")
+        card, gift_msg = [c.args[0] for c in msg.answer.await_args_list]
+        self.assertIn("только для @friend", card)
+        self.assertIn("монтаж", gift_msg)
+        token = gift_msg.split("start=gift_")[1].split()[0]
+        stranger = mock.AsyncMock()
+        await course_gift.claim(stranger, 5, token)                      # чужой ник — нет
+        self.assertEqual(await db.get_user_course_sections(5), set())
+        friend = mock.AsyncMock()
+        await course_gift.claim(friend, 2, token)
+        self.assertEqual(await db.get_user_course_sections(2), {"editing"})
+        friend.bot.send_message.assert_not_awaited()                     # «дарителю» не пишем
+        self.assertTrue(any("Подарок от @misha получен" in n for n in self.notes))
+        self.assertIn("подарили", friend.answer.await_args_list[0].args[0])
+        gifts = await db.get_free_gifts()
+        self.assertEqual([(g["claimed_by"], g["buyer_id"]) for g in gifts], [(2, admin)])
+        # покупок и денег не появилось; получен — не отменить
+        self.assertEqual((await db.last_course_purchase(2)), None)
+        self.assertFalse(await db.delete_unclaimed_gift(token))
+
+    async def test_free_gift_open_and_cancel(self):
+        state = mock.AsyncMock()
+        state.get_data.return_value = {"kind": "bundle"}
+        msg = mock.AsyncMock()
+        with mock.patch.object(course_gift, "gift_link",
+                               mock.AsyncMock(side_effect=lambda t: f"https://t.me/b?start=gift_{t}")):
+            await course_gift._make_free_gift(msg, config.ADMIN_IDS[0], state, None)
+        card, gift_msg = [c.args[0] for c in msg.answer.await_args_list]
+        self.assertIn("свободный", card)
+        token = gift_msg.split("start=gift_")[1].split()[0]
+        self.assertTrue(await db.delete_unclaimed_gift(token))
+        late = mock.AsyncMock()
+        await course_gift.claim(late, 2, token)
+        self.assertIn("не работает", late.answer.await_args.args[0])
+        self.assertEqual(await db.get_user_course_sections(2), set())
+
 
 if __name__ == "__main__":
     unittest.main()

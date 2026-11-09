@@ -32,6 +32,13 @@ def _who(b: dict) -> str:
     return f"@{b['username']}" if b.get("username") else (b.get("first_name") or str(b["user_id"]))
 
 
+def _free_gifts_line(gifts: list[dict]) -> str:
+    """Подарки от нас (/gift) — без денег, в покупки не входят."""
+    got = sum(1 for g in gifts if g["claimed_by"])
+    return (f"🎁 Подарки от нас: {len(gifts)} выдано, {got} получено (/gift)" if gifts
+            else "🎁 Подарки от нас: пока нет (/gift)")
+
+
 @router.message(Command("course"))
 async def cmd_course(message: Message):
     buyers = await db.get_course_buyers()
@@ -52,6 +59,7 @@ async def cmd_course(message: Message):
     taken = sum(1 for b in buyers if b["review_position"])
     lines += [f"Всего: {len(buyers)} покупок, {svc.rub(sum(b['amount'] for b in buyers))}",
               f"🎁 Разборы: {taken} из {config.BUNDLE_REVIEW_LIMIT}",
+              _free_gifts_line(await db.get_free_gifts()),
               f"👀 Смотрели курс, но не купили: "
               f"{len(await db.get_course_lookers(exclude=config.ADMIN_IDS))}", ""]
     words = await db.get_setting(KEYWORDS_SETTING) or ""
