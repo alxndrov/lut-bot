@@ -9,7 +9,7 @@ from aiogram.types import BotCommand
 import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
-from handlers import funnel_handler, bonus_handler, order_actions, order_widget, expenses, cdek_account, finance, debug_cmd, consumables
+from handlers import funnel_handler, bonus_handler, order_actions, order_widget, catalog_widget, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget, course_gift, course_files, manual_sale
 from handlers import course, course_admin, course_orders, course_invoice, npd_admin, friend_order
 from handlers import pay_router, payments_admin
@@ -41,6 +41,8 @@ async def main():
     # Каждое входящее сообщение — в лог, до и после хендлеров
     dp.update.outer_middleware(MessageLogMiddleware("клиент"))
     dp.callback_query.middleware(start.PolicyGate())   # новое согласие после смены оператора
+    # Нажатия в каталоге-виджете (Bot API 10.4) — aiogram их не знает
+    dp.update.outer_middleware(catalog_widget.WidgetQueryMiddleware())
 
     # Регистрируем роутеры
     dp.include_router(course_files.router)  # /coursefiles — файлы курса от админа (раньше всех)
@@ -51,6 +53,7 @@ async def main():
     dp.include_router(friend_order.router)  # заказ для друга — только админам
     dp.include_router(course_invoice.router)  # счёт за курс — только админам
     dp.include_router(catalog.router)
+    dp.include_router(catalog_widget.router)   # /catalogwidget — кому каталог виджетом
     dp.include_router(shop_reviews.router)  # «Отзывы покупателей» в каталоге
     dp.include_router(sellers_info.router)  # «ℹ️ Продавцы и условия», /info
     dp.include_router(brief_handler.router)
@@ -172,7 +175,7 @@ async def main():
     logging.info("Бот запущен.")
     await dp.start_polling(bot, allowed_updates=["message", "callback_query",
                                                   "chat_join_request", "pre_checkout_query",
-                                                  "shipping_query"])
+                                                  "shipping_query", "widget_query"])
 
 
 if __name__ == "__main__":
