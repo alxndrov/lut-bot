@@ -88,6 +88,23 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer["widget_query_id"], "q1")
         self.assertIn("Отмечено", json.loads(answer["data"])["t"])
 
+    async def test_barcode_is_sent_as_reply_to_widget(self):
+        admin = config.ADMIN_IDS[0]
+        await db.set_order_barcode_file(self.oid, "FILE1")
+        async with aiosqlite.connect(db.DB_PATH) as c:
+            await c.execute("UPDATE orders SET cdek_uuid = 'u1' WHERE id = ?", (self.oid,))
+            await c.commit()
+        self.assertEqual(order_widget._static(await db.get_order(self.oid))["b"], 1)
+        bot = mock.AsyncMock()
+        await order_widget.handle_query(bot, {
+            "id": "q3", "from": {"id": admin, "is_bot": False, "first_name": "Даня"},
+            "chat": {"id": admin, "type": "private"}, "message_id": 500,
+            "data": f"b:{self.oid}"})
+        args, kw = bot.send_document.await_args
+        self.assertEqual(args[:2], (admin, "FILE1"))
+        self.assertEqual(kw["reply_to_message_id"], 500)
+        self.assertEqual(self.calls[-1][0], "answerWidgetQuery")
+
     async def test_stranger_is_refused(self):
         await order_widget.handle_query(mock.AsyncMock(), {
             "id": "q2", "from": {"id": 999, "is_bot": False, "first_name": "X"},

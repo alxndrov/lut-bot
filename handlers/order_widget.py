@@ -112,6 +112,7 @@ def _static(order: dict) -> dict:
         "q": _answers(order.get("summary") or ""),
         "d": where, "r": who,
         "k": order.get("cdek_number") or "",
+        "b": 1 if order.get("cdek_uuid") else 0,   # есть накладная — есть и штрихкод
         # Слова этапов: печать или сборка, отправка или выдача
         "w": [w["icon"], w["do"], w["done"].capitalize(), sw["icon"], sw["btn"],
               sw["did"], sw["do"]],
@@ -142,6 +143,9 @@ async def _state(order_ids: list[int]) -> str:
 _CSS = """*{box-sizing:border-box;margin:0}
 body{font:15px/1.35 system-ui,sans-serif;color:var(--tg-theme-text-color);padding:10px 10px 6px}
 h3{font-size:16px;margin:0 2px 8px}
+.tb{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
+.tab{padding:6px 10px;border-radius:10px;font-size:14px;background:var(--tg-theme-secondary-bg-color)}
+.tab.on{background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color)}
 .o{background:var(--tg-theme-secondary-bg-color);border-radius:14px;padding:10px 12px;margin-bottom:8px}
 .hd{display:flex;justify-content:space-between;align-items:center;gap:8px}
 .n{font-weight:600}.s{font-size:13px;color:var(--tg-theme-hint-color)}
@@ -156,31 +160,35 @@ h3{font-size:16px;margin:0 2px 8px}
 .b.g{background:var(--tg-theme-bg-color);color:var(--tg-theme-link-color);font-weight:400}
 #t{font-size:13px;text-align:center;color:var(--tg-theme-hint-color);min-height:17px}"""
 
+# Пузырь виджета не выше 600 px и сам не прокручивается — поэтому заказы
+# вкладками по номерам сверху, а ниже — один выбранный заказ целиком.
 # Кнопки — div, а не <button>: формы в профиле виджета вырезаются,
 # а onclick на любом элементе работает
-_JS = r"""var W=window.TelegramWidget,O={},busy=0;
-if(D.length==1)O[D[0].i]=1;
+_JS = r"""var W=window.TelegramWidget,sel=D[0].i,busy=0;
 function e(x){return String(x).replace(/[&<>"]/g,function(c){return"&#"+c.charCodeAt(0)+";"})}
 function st(){var m={};String((W&&W.chatData)||"").split(";").forEach(function(x){var p=x.split(":");if(p[0])m[p[0]]={m:p[1]||"",s:p[2]=="1"}});return m}
 function B(t,d,g){return'<div class="b'+(g?' g':'')+'" onclick="A(\''+d+'\')">'+e(t)+'</div>'}
-function R(){var S=st(),h="";D.forEach(function(o){var x=S[o.i]||{m:"",s:false},w=o.w,
-dn=x.m&&x.m.indexOf("0")<0,k=x.s?2:dn?1:0,
-ch=x.s?"✅ "+w[5]:dn?w[3]+" "+w[6]:w[0]+" "+w[1];
-h+='<div class="o"><div class="hd" onclick="T('+o.i+')"><div><div class="n">№'+e(o.n)+' · '+e(o.m)+'</div><div class="s">'+e(o.t)+'</div></div><div class="ch">'+e(ch)+'</div></div>';
-h+='<div class="bar"><i class="on"></i><i class="'+(k>0?"on":"")+'"></i><i class="'+(k>1?"on":"")+'"></i></div><div class="lb"><span>Оплачен</span><span>'+e(w[2])+'</span><span>'+e(w[5])+'</span></div>';
-if(O[o.i]){h+='<div class="dt">';o.q.forEach(function(a){h+='<div><span>'+e(a[0])+':</span> '+e(a[1])+'</div>'});
+function R(){var S=st(),h="",o;
+function X(o){var x=S[o.i]||{m:"",s:false};x.d=x.m&&x.m.indexOf("0")<0;x.k=x.s?2:x.d?1:0;x.c=x.s?"✅":x.d?o.w[3]:o.w[0];return x}
+if(D.length>1){h+='<div class="tb">';D.forEach(function(o){h+='<div class="tab'+(o.i==sel?' on':'')+'" onclick="T('+o.i+')">'+X(o).c+' №'+e(o.n)+'</div>'});h+='</div>'}
+D.forEach(function(q){if(q.i==sel)o=q});var x=X(o),w=o.w,
+ch=x.s?"✅ "+w[5]:x.d?w[3]+" "+w[6]:w[0]+" "+w[1];
+h+='<div class="o"><div class="hd"><div><div class="n">№'+e(o.n)+' · '+e(o.m)+'</div><div class="s">'+e(o.t)+'</div></div><div class="ch">'+e(ch)+'</div></div>';
+h+='<div class="bar"><i class="on"></i><i class="'+(x.k>0?"on":"")+'"></i><i class="'+(x.k>1?"on":"")+'"></i></div><div class="lb"><span>Оплачен</span><span>'+e(w[2])+'</span><span>'+e(w[5])+'</span></div>';
+h+='<div class="dt">';o.q.forEach(function(a){h+='<div><span>'+e(a[0])+':</span> '+e(a[1])+'</div>'});
 h+='<div><span>Клиент:</span> '+e(o.c)+'</div>';if(o.d)h+='<div><span>Куда:</span> '+e(o.d)+'</div>';if(o.r)h+='<div><span>Кому:</span> '+e(o.r)+'</div>';
 if(o.k)h+='<div onclick="C(\''+o.k+'\')"><span>СДЭК:</span> '+e(o.k)+' ⧉</div>';h+='</div>';
 if(x.s)h+=B("↩️ Отменить «"+w[5].toLowerCase()+"»","x:"+o.i,1);else{var n=o.p.length;
 o.p.forEach(function(p,j){var nm=n>1?" поз."+(j+1)+(p[2]?" ("+p[2]+")":""):"";
 h+=x.m.charAt(j)=="1"?B("↩️ Снять «"+p[1].toLowerCase()+"»"+nm,"u:"+o.i+":"+(j+1),1):B(p[0]+" "+p[1]+nm,"p:"+o.i+":"+(j+1))});
-if(dn)h+=B(w[4],"s:"+o.i)}}h+='</div>'});
+if(x.d&&o.b)h+=B("🏷 Штрихкод СДЭК","b:"+o.i,1);if(x.d)h+=B(w[4],"s:"+o.i)}h+='</div>';
 document.getElementById("L").innerHTML=h}
-function T(i){O[i]=!O[i];R()}
+function H(f,a){try{W.HapticFeedback[f](a)}catch(_){}}
+function T(i){sel=i;M("");H("selectionChanged");R()}
 function M(t){document.getElementById("t").textContent=t}
 function C(k){W&&W.copyText(k);M("Трек скопирован")}
 function A(d){if(!W||busy)return;busy=1;M("…");W.request(d).then(function(a){busy=0;var r={};try{r=JSON.parse(a.result)}catch(_){}
-M(r.t||"");W.HapticFeedback&&W.HapticFeedback.notificationOccurred(r.a?"warning":"success")},function(er){busy=0;M("Не вышло: "+er.code)})}
+M(r.t||"");H("notificationOccurred",r.a?"warning":"success")},function(er){busy=0;M("Не вышло: "+er.code)})}
 if(W){W.onEvent("chatDataChanged",R);W.ready&&W.ready()}R();"""
 
 
@@ -248,17 +256,33 @@ class _Tap:
     """Заглушка CallbackQuery для обработчиков order_actions:
     им нужны data, from_user, bot и answer — ответ мы забираем себе."""
 
-    def __init__(self, bot, user: User, data: str):
+    def __init__(self, bot, user: User, data: str, message=None):
         self.bot, self.from_user, self.data = bot, user, data
-        self.message = None
+        self.message = message
         self.note, self.alert = "", False
 
     async def answer(self, text: str | None = None, show_alert: bool = False, **_):
         self.note, self.alert = text or "", show_alert
 
 
+class _WidgetChat:
+    """Вместо callback.message: штрихкод СДЭК обработчик присылает
+    «ответом на сообщение» — у нас это ответ на сам виджет."""
+
+    def __init__(self, bot, chat_id: int, message_id: int | None):
+        self.bot, self.chat_id, self.message_id = bot, chat_id, message_id
+
+    async def reply_document(self, document, caption: str | None = None, **_):
+        return await self.bot.send_document(
+            self.chat_id, document, caption=caption, reply_to_message_id=self.message_id,
+            allow_sending_without_reply=True)
+
+    async def answer(self, text: str, **kw):
+        return await self.bot.send_message(self.chat_id, text, **kw)
+
+
 _ACTIONS = {"p": "order_printed", "u": "order_unprint",
-            "s": "order_shipped", "x": "order_unship"}
+            "s": "order_shipped", "x": "order_unship", "b": "order_barcode"}
 
 
 async def handle_query(bot, q: dict):
@@ -273,14 +297,16 @@ async def handle_query(bot, q: dict):
         else:
             from handlers import order_actions as oa
             handler = {"p": oa.cb_order_printed, "u": oa.cb_order_unprint,
-                       "s": oa.cb_order_shipped, "x": oa.cb_order_unship}[kind]
-            tap = _Tap(bot, user, f"{_ACTIONS[kind]}:{rest}")
+                       "s": oa.cb_order_shipped, "x": oa.cb_order_unship,
+                       "b": oa.cb_order_barcode}[kind]
+            chat, msg_id = (q.get("chat") or {}).get("id"), q.get("message_id")
+            tap = _Tap(bot, user, f"{_ACTIONS[kind]}:{rest}",
+                       _WidgetChat(bot, chat, msg_id) if chat else None)
             await handler(tap)
             note, alert = tap.note, tap.alert
             # Обработчик мог ответить отказом, ничего не меняя, — тогда
             # синхронизации не было, а виджет мог отстать: подтягиваем
-            chat, msg_id = (q.get("chat") or {}).get("id"), q.get("message_id")
-            if chat and msg_id:
+            if chat and msg_id and kind != "b":
                 await _redraw(bot, chat, msg_id)
     except Exception as e:
         logger.exception(f"widget_query {q.get('data')}: {e}")
