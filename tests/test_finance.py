@@ -256,7 +256,8 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_finance_open_does_not_fetch_data(self):
         message = SimpleNamespace(from_user=SimpleNamespace(id=123), answer=AsyncMock())
-        with patch.object(config, 'ADMIN_IDS', [123]), patch.object(finance, '_settle_split', side_effect=AssertionError()), patch.object(finance, '_finance_pulse_text', side_effect=AssertionError()):
+        with patch.object(config, 'ADMIN_IDS', [123]), patch.object(finance, '_settle_split', side_effect=AssertionError()), patch.object(finance, '_finance_pulse_text', side_effect=AssertionError()), \
+                patch('handlers.finance_widget.send', AsyncMock(return_value=False)):
             await finance.cmd_finance(message, SimpleNamespace(clear=AsyncMock()))
         self.assertEqual(message.answer.await_count, 1)
         self.assertNotIn('₽', message.answer.call_args.args[0])

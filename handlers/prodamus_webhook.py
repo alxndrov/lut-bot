@@ -670,7 +670,15 @@ async def _send_order_notify(order_id: int, summary: str, main_bot: Bot = None,
     except Exception as e:
         logger.error(f"order notify: не создать бота: {e}")
         return
+    from handlers import order_widget
     for admin_id in config.ADMIN_IDS:
+        # С 11.11.2026 — интерактивным сообщением (виджет), как в /orders;
+        # Telegram не принял — прежней карточкой с кнопками
+        try:
+            if await order_widget.send_new_order(notify_bot, admin_id, order_id):
+                continue
+        except Exception as e:
+            logger.error(f"order widget to {admin_id} failed: {e}")
         try:
             # Кнопки печати свои у каждого: показываем его позиции
             msg = await notify_bot.send_message(

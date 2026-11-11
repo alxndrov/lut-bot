@@ -413,7 +413,10 @@ async def cmd_finance(message: Message, state: FSMContext):
     if message.from_user.id not in config.ADMIN_IDS:
         return
     await state.clear()
-    await message.answer("💳 <b>Финансы</b>\n\nВыберите раздел:",
+    # Сводка виджетом сверху (handlers/finance_widget.py), под ней — меню
+    from handlers import finance_widget
+    shown = await finance_widget.send(message)
+    await message.answer("Разделы и действия:" if shown else "💳 <b>Финансы</b>\n\nВыберите раздел:",
                          parse_mode="HTML", reply_markup=_finance_keyboard())
 
 

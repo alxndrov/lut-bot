@@ -3044,6 +3044,15 @@ async def order_card_in_chat(order_id: int, chat_id: int) -> Optional[int]:
             "ORDER BY rowid DESC LIMIT 1", (order_id, chat_id),
         ) as cur:
             row = await cur.fetchone()
+            if row:
+                return row[0]
+        # С 11.11.2026 новый заказ приходит виджетом (handlers/order_widget.py) —
+        # карточкой тогда считается он
+        async with db.execute(
+            "SELECT message_id FROM order_widgets WHERE order_ids = ? AND chat_id = ? "
+            "ORDER BY created_at DESC, message_id DESC LIMIT 1", (f",{order_id},", chat_id),
+        ) as cur:
+            row = await cur.fetchone()
             return row[0] if row else None
 
 

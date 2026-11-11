@@ -59,7 +59,7 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(s["n"], "007")
         self.assertEqual(s["m"], "1380 ₽")
         self.assertEqual(s["q"], [["Модель вашего микрофона", "2 (DJI Mic Mini)"],
-                                  ["Цвет для микрофона", "1 (черный)"]])
+                                  ["Цвет для микрофона", "1 (черный)", "#1f1f1f", 1]])
         self.assertEqual(s["d"], "СДЭК, ПВЗ Волгоград, ул. Елецкая, 21")
         self.assertEqual(s["r"], "Иван, +79990000000")
 
@@ -72,7 +72,7 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         method, params = self.calls[0]
         self.assertEqual(method, "sendWidget")
         self.assertTrue(params["allow_queries"])
-        self.assertEqual(params["chat_data"], f"{self.oid}:0:0")
+        self.assertEqual(json.loads(params["chat_data"])["s"], f"{self.oid}:0:0:0")
         self.calls.clear()
 
         bot = mock.AsyncMock()
@@ -85,7 +85,7 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         order = await db.get_order(self.oid)
         self.assertTrue(order["printed_at"])
         edits = [p for m, p in self.calls if m == "editMessageWidgetData"]
-        self.assertEqual(edits[-1]["chat_data"], f"{self.oid}:1:0")
+        self.assertEqual(json.loads(edits[-1]["chat_data"])["s"], f"{self.oid}:1:0:0")
         answer = [p for m, p in self.calls if m == "answerWidgetQuery"][0]
         self.assertEqual(answer["widget_query_id"], "q1")
         self.assertIn("Отмечено", json.loads(answer["data"])["t"])
@@ -135,6 +135,23 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
             "chat": {"id": 1, "type": "private"}, "message_id": 5, "data": f"c:{self.oid}"})
         self.assertIn("malimabi-store-007", bot.send_message.await_args.args[1])
         self.assertEqual((await db.get_order_messages(self.oid))[-1]["message_id"], 77)
+
+    async def test_new_order_widget_is_reply_target_and_has_refund_button(self):
+        admin = config.ADMIN_IDS[0]
+        mid = await order_widget.send_new_order(mock.Mock(), admin, self.oid)
+        self.assertEqual(mid, 500)
+        method, params = self.calls[-1]
+        self.assertEqual(method, "sendWidget")
+        self.assertIn("Новый заказ", params["html"])
+        self.assertLessEqual(len(params["chat_data"].encode()), 1024)
+        # Расходники, поддержка и напоминания отвечают «на карточку» — это виджет
+        self.assertEqual(await db.order_card_in_chat(self.oid, admin), 500)
+        bot = mock.AsyncMock()
+        await order_widget.handle_query(bot, {
+            "id": "q6", "from": {"id": admin, "is_bot": False, "first_name": "Д"},
+            "chat": {"id": admin, "type": "private"}, "message_id": 500, "data": f"m:{self.oid}"})
+        kb = bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard
+        self.assertEqual(kb[0][0].callback_data, f"rf:start:{self.oid}")
 
     async def test_stranger_is_refused(self):
         await order_widget.handle_query(mock.AsyncMock(), {
