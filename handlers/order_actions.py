@@ -468,6 +468,12 @@ async def _sync_order_messages(bot_or_callback, order: dict):
         except Exception as e:
             _log_edit_fail("order card", f"{m['chat_id']}/{m['message_id']}", e)
     await _sync_list_items(bot, order, prints)
+    # И виджеты «Заказы в работе» (/worders), где есть этот заказ
+    from handlers import order_widget
+    try:
+        await order_widget.refresh(bot, order["id"])
+    except Exception as e:
+        logger.warning(f"order widget refresh {order['id']}: {e}")
 
 
 async def refresh_open_orders(bot):

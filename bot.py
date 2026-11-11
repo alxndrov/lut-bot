@@ -9,7 +9,7 @@ from aiogram.types import BotCommand
 import config
 import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
-from handlers import funnel_handler, bonus_handler, order_actions, expenses, cdek_account, finance, debug_cmd, consumables
+from handlers import funnel_handler, bonus_handler, order_actions, order_widget, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget, course_gift, course_files, manual_sale
 from handlers import course, course_admin, course_orders, course_invoice, npd_admin, friend_order
 from handlers import pay_router, payments_admin
@@ -116,11 +116,14 @@ async def main():
         admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
         admin_dp = Dispatcher(storage=MemoryStorage())
         admin_dp.update.outer_middleware(MessageLogMiddleware("админ"))
+        # Нажатия в виджете /worders (Bot API 10.4) — aiogram их не знает
+        admin_dp.update.outer_middleware(order_widget.WidgetQueryMiddleware())
         # Первым: ловит ответы на карточки заказов по курсу и ввод времени созвона
         admin_dp.include_router(course_orders.router)
         admin_dp.include_router(npd_admin.router)   # /nalog — чеки «Мой налог»
         admin_dp.include_router(operations_menu.router)
         admin_dp.include_router(order_actions.router)
+        admin_dp.include_router(order_widget.router)   # /worders — заказы виджетом
         admin_dp.include_router(refunds.router)
         admin_dp.include_router(course_admin.router)
         admin_dp.include_router(course_gift.router)   # /gift — курс в подарок
@@ -137,7 +140,7 @@ async def main():
         admin_dp.include_router(logo.router)
         asyncio.create_task(
             admin_dp.start_polling(admin_bot,
-                                   allowed_updates=["callback_query", "message"])
+                                   allowed_updates=["callback_query", "message", "widget_query"])
         )
         asyncio.create_task(report_loop(admin_bot))
         asyncio.create_task(pending_report_loop(admin_bot))

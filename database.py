@@ -807,6 +807,18 @@ async def init_db(existing_cdek_contract: str | None = None):
                 PRIMARY KEY (chat_id, message_id)
             )
         """)
+        # Виджеты «Заказы в работе» (Bot API 10.4, handlers/order_widget.py):
+        # какие заказы в каком сообщении — чтобы перерисовать состояние,
+        # когда заказ меняется кнопкой в виджете или в обычной карточке
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS order_widgets (
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                order_ids  TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (chat_id, message_id)
+            )
+        """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS admin_command_messages (
                 command    TEXT NOT NULL,
@@ -1729,6 +1741,48 @@ async def add_admin_command_message(command: str, chat_id: int, user_id: int,
             "VALUES (?, ?, ?, ?)",
             (command, chat_id, user_id, int(message_id)),
         )
+        await db.commit()
+
+
+async def add_order_widget(chat_id: int, message_id: int, order_ids: list[int]) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR REPLACE INTO order_widgets(chat_id, message_id, order_ids) VALUES (?, ?, ?)",
+            (chat_id, message_id, "," + ",".join(map(str, order_ids)) + ","),
+        )
+        await db.commit()
+
+
+def _widget_row(r) -> dict:
+    return {"chat_id": r[0], "message_id": r[1],
+            "order_ids": [int(x) for x in r[2].strip(",").split(",") if x]}
+
+
+async def get_order_widget(chat_id: int, message_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT chat_id, message_id, order_ids FROM order_widgets "
+            "WHERE chat_id = ? AND message_id = ?", (chat_id, message_id),
+        ) as cur:
+            r = await cur.fetchone()
+    return _widget_row(r) if r else None
+
+
+async def get_order_widgets_with(order_id: int) -> list[dict]:
+    """Виджеты за последние две недели, где есть этот заказ."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT chat_id, message_id, order_ids FROM order_widgets "
+            "WHERE order_ids LIKE ? AND created_at >= datetime('now', '-14 days')",
+            (f"%,{order_id},%",),
+        ) as cur:
+            return [_widget_row(r) for r in await cur.fetchall()]
+
+
+async def delete_order_widget(chat_id: int, message_id: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM order_widgets WHERE chat_id = ? AND message_id = ?",
+                         (chat_id, message_id))
         await db.commit()
 
 
