@@ -79,6 +79,18 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(paid[0]['month'], '2026-09')
         self.assertEqual(paid[0]['total'], 300)
 
+    async def test_legal_entity_sale_taxed_6_percent_for_danya(self):
+        await self.purchase(10000, '2026-10-05 10:00:00')
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("INSERT INTO purchases(id, user_id, product_id, amount, created_at, "
+                               "telegram_payment_id) VALUES (50, 0, 1, 5000, '2026-10-27 09:00:00', 'b2b-1')")
+            await conn.execute("INSERT INTO manual_sales(id, purchase_id, amount, buyer_kind, wallet, receipt) "
+                               "VALUES (1, 50, 5000, 'legal', 'danya', 'self')")
+            await conn.commit()
+        self.assertEqual((await tax.assessment('2026-10'))['accrued'], 400 + 300)
+        self.assertAlmostEqual(await tax.accrued_for_period('2026-10-01', '2026-10-31'), 700)
+        self.assertAlmostEqual(await tax.accrued_for_period('2026-10-20', '2026-10-31'), 300)
+
     async def test_tax_allocation_split_and_zero(self):
         await self.purchase(1000, '2026-09-05 10:00:00')
         await self.purchase(3000, '2026-09-20 10:00:00')

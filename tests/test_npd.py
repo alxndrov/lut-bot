@@ -101,6 +101,24 @@ class NpdReceiptsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls, [])   # второй чек не создавали
         self.assertEqual((await db.get_npd_receipt("yk-5"))["receipt_uuid"], "real1")
 
+    async def test_retry_after_connection_drop_adopts_existing_receipt(self):
+        bot = FakeBot()
+        self.fail = npd.NpdError("нет связи с «Мой налог»: туннель с домашнего компа не на связи")
+        await npd_receipts.issue_for_payment(bot, "yk-6", 7, "Курс", 2990.0, "2026-10-15T07:48:01Z")
+        self.fail = None
+
+        async def incomes(since, until, account="danya"):
+            return [{"approvedReceiptUuid": "real2", "totalAmount": 2990, "name": "Курс",
+                     "operationTime": "2026-10-15T10:48:01+03:00", "cancellationInfo": None}]
+        orig = npd.list_incomes
+        npd.list_incomes = incomes
+        try:
+            self.assertEqual(await npd_receipts.retry_failed(bot), (1, 0))
+        finally:
+            npd.list_incomes = orig
+        self.assertEqual(self.calls, [])
+        self.assertEqual((await db.get_npd_receipt("yk-6"))["receipt_uuid"], "real2")
+
     async def test_lava_receipt_goes_to_misha(self):
         await npd_receipts.issue_for_payment(FakeBot(), "lava-1", 7, "Курс", 5100.0, None, account="misha")
         self.assertEqual(self.calls, [("create", "Курс", 5100.0, "misha")])

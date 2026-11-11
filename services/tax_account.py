@@ -9,7 +9,9 @@ import database as db
 
 
 def receipts() -> str:
-    return RECEIPTS.replace("{HOLDER}", db.holder_sql("pu"))
+    return (RECEIPTS.replace("{HOLDER}", db.holder_sql("pu"))
+            .replace("{RATE}", db.misha_tax_rate_sql("pu"))
+            .replace("{BASE_RATE}", str(float(config.NPD_PERCENT) / 100)))
 
 
 def parse_amount(text: str) -> float:
@@ -32,12 +34,15 @@ def validate_month(month: str):
 # Помесячный налог Дани — по его чекам. Деньги и чеки Миши (PayAnyWay,
 # lava.top, переводы ему) в «Мой налог» Миши: его налог считается отдельно,
 # своей ставкой с каждой покупки (db.misha_tax_rate_sql) — без помесячных
-# поправок из кабинета
+# поправок из кабинета. tax — налог со строки: 6%, если платило юрлицо или
+# ИП (/sale), иначе 4% (NPD_PERCENT); возврат уменьшает налог по 4%
 RECEIPTS = """
-    SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, amount
+    SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, amount,
+           amount * {RATE} tax
     FROM purchases pu WHERE {HOLDER} = 'danya'
     UNION ALL
-    SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, -amount
+    SELECT strftime('%Y-%m', datetime(created_at, '+3 hours')) month, -amount,
+           -amount * {BASE_RATE}
     FROM refunds"""
 
 
@@ -45,7 +50,7 @@ async def _months(conn):
     conn.row_factory = aiosqlite.Row
     async with conn.execute(f"""
         WITH revenue AS (
-            SELECT month, SUM(amount) gross FROM ({receipts()}) GROUP BY month
+            SELECT month, SUM(amount) gross, SUM(tax) tax FROM ({receipts()}) GROUP BY month
         ), paid AS (
             SELECT COALESCE(tax_month, strftime('%Y-%m', datetime(paid_at, '+3 hours'))) month,
                    SUM(amount) paid FROM npd_payments WHERE payer = 'danya' GROUP BY month
@@ -54,12 +59,12 @@ async def _months(conn):
             UNION SELECT month FROM npd_assessments
         )
         SELECT months.month, COALESCE(gross, 0) gross,
-               COALESCE(a.amount, ROUND(COALESCE(gross, 0) * ?, 2)) accrued,
+               COALESCE(a.amount, ROUND(COALESCE(tax, 0), 2)) accrued,
                COALESCE(paid.paid, 0) paid, a.amount IS NOT NULL manual
         FROM months LEFT JOIN revenue USING(month) LEFT JOIN paid USING(month)
         LEFT JOIN npd_assessments a USING(month)
         WHERE months.month IS NOT NULL ORDER BY months.month DESC
-    """, (config.NPD_PERCENT / 100,)) as cur:
+    """) as cur:
         return [dict(row) for row in await cur.fetchall()]
 
 
@@ -137,12 +142,12 @@ async def accrued_for_period(dt_from: str, dt_to: str, component: str = "total")
                        pr.category, {db.holder_sql("pu")} holder, {db.misha_tax_rate_sql("pu")} mrate
                 FROM purchases pu LEFT JOIN products pr ON pr.id=pu.product_id
                 UNION ALL
-                SELECT created_at, -amount, 0, 0, 'physical', 'danya', 0 FROM refunds
+                SELECT created_at, -amount, 0, 0, 'physical', 'danya', ? FROM refunds
             )
             SELECT COALESCE(SUM(({base}) * CASE
                 WHEN p.holder = 'misha' THEN p.mrate
                 WHEN a.amount IS NOT NULL AND m.gross > 0 THEN a.amount / m.gross
-                ELSE ? END), 0)
+                ELSE p.mrate END), 0)
             FROM p
             LEFT JOIN monthly m ON m.month = strftime('%Y-%m', datetime(p.created_at, '+3 hours'))
             LEFT JOIN npd_assessments a ON a.month = m.month

@@ -123,9 +123,11 @@ async def _try_issue(bot: Bot, row: dict) -> bool:
             paid = datetime.fromisoformat(row["paid_at"].replace("Z", "+00:00"))
         except ValueError:
             paid = None
-    # Только после таймаута: тогда чек мог создаться без ответа нам
-    timed_out = npd.TIMEOUT_MSG in (row.get("error") or "")
-    uuid = await _already_issued(row, paid) if timed_out else None
+    # После таймаута и обрыва связи посреди запроса чек мог создаться без ответа
+    # нам (15.10 туннель оборвался, а чек создался — повтор пробил второй)
+    err = row.get("error") or ""
+    unsure = npd.TIMEOUT_MSG in err or "нет связи" in err
+    uuid = await _already_issued(row, paid) if unsure else None
     if not uuid:
         uuid = await npd.create_receipt(row["name"], row["amount"], paid, account=_account(row))
     await db.set_npd_receipt(row["payment_id"], "issued", receipt_uuid=uuid)
