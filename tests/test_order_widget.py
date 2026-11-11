@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 import os
 import tempfile
 import unittest
@@ -53,7 +55,7 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         order = {"id": 1, "order_code": "malimabi-store-007", "summary": SUMMARY,
                  "product_name": "🎤 Microphone Kit", "username": "buyer", "product_id": 1,
                  "rounds_json": "[[]]", "cdek_number": "123"}
-        s = order_widget._static(order)
+        s = dict(order_widget._static(order), **order_widget._details(order))
         self.assertEqual(s["n"], "007")
         self.assertEqual(s["m"], "1380 ₽")
         self.assertEqual(s["q"], [["Модель вашего микрофона", "2 (DJI Mic Mini)"],
@@ -66,7 +68,7 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         msg = mock.AsyncMock()
         msg.from_user.id = admin
         msg.chat.id = admin
-        await order_widget.cmd_worders(msg)
+        await order_widget.cmd_orders(msg)
         method, params = self.calls[0]
         self.assertEqual(method, "sendWidget")
         self.assertTrue(params["allow_queries"])
@@ -96,6 +98,7 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
             await c.commit()
         self.assertEqual(order_widget._static(await db.get_order(self.oid))["b"], 1)
         bot = mock.AsyncMock()
+        bot.send_document.return_value = mock.Mock(chat=mock.Mock(id=admin), message_id=9)
         await order_widget.handle_query(bot, {
             "id": "q3", "from": {"id": admin, "is_bot": False, "first_name": "Даня"},
             "chat": {"id": admin, "type": "private"}, "message_id": 500,
@@ -104,6 +107,34 @@ class OrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[:2], (admin, "FILE1"))
         self.assertEqual(kw["reply_to_message_id"], 500)
         self.assertEqual(self.calls[-1][0], "answerWidgetQuery")
+
+    async def test_twenty_orders_fit_and_rest_load_details(self):
+        base = await db.get_order(self.oid)
+        orders = [dict(base, id=100 + j, order_code=f"malimabi-store-{100 + j}",
+                       summary=base["summary"].replace("Иван", hashlib.sha256(bytes([j])).hexdigest())
+                                              .replace("DJI Mic Mini", hashlib.md5(bytes([j])).hexdigest()))
+                  for j in range(20)]
+        page, fit = order_widget.build_html(orders)
+        self.assertEqual(fit, 20)
+        data = json.loads(re.search(r"var D=(\[.*?\]);var W", page).group(1))
+        self.assertIn("x", data[0])            # первые — с деталями
+        self.assertNotIn("x", data[-1])        # последние — подгрузятся
+        # подгрузка: ответ — сами детали, не длиннее 1024 байт
+        await order_widget.handle_query(mock.AsyncMock(), {
+            "id": "q4", "from": {"id": config.ADMIN_IDS[0], "is_bot": False, "first_name": "Д"},
+            "chat": {"id": 1, "type": "private"}, "message_id": 5, "data": f"d:{self.oid}"})
+        raw = self.calls[-1][1]["data"]
+        self.assertLessEqual(len(raw.encode()), 1024)
+        self.assertEqual(json.loads(raw)["c"], "@buyer")
+
+    async def test_card_button_resends_card_when_none_in_chat(self):
+        bot = mock.AsyncMock()
+        bot.send_message.return_value = mock.Mock(message_id=77)
+        await order_widget.handle_query(bot, {
+            "id": "q5", "from": {"id": config.ADMIN_IDS[0], "is_bot": False, "first_name": "Д"},
+            "chat": {"id": 1, "type": "private"}, "message_id": 5, "data": f"c:{self.oid}"})
+        self.assertIn("malimabi-store-007", bot.send_message.await_args.args[1])
+        self.assertEqual((await db.get_order_messages(self.oid))[-1]["message_id"], 77)
 
     async def test_stranger_is_refused(self):
         await order_widget.handle_query(mock.AsyncMock(), {

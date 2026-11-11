@@ -703,8 +703,10 @@ async def cmd_refresh(message: Message):
 SENT_LIST_LIMIT = 15
 
 
-@router.message(Command("sentorders"))
-async def cmd_sent_orders(message: Message):
+# /sentorders теперь виджетом (handlers/order_widget.py); текстовый
+# список — /sentlist и запасной, если Telegram виджет не принял
+@router.message(Command("sentlist"))
+async def cmd_sent_orders_list(message: Message):
     """Архив отправленных — свежие сверху, ответами на карточки заказов."""
     if message.from_user.id not in config.ADMIN_IDS:
         return
@@ -727,11 +729,11 @@ async def cmd_sent_orders(message: Message):
     await _send_list(message, shown, 1, cards, mode="sent")
 
 
-# /myorders и /allorders — прежние имена той же команды. Печатает теперь
-# один человек, делить список «мои/все» стало не на что, но старые имена
-# оставлены рабочими: они разосланы в переписке и висят в привычке.
-@router.message(Command("orders", "myorders", "allorders"))
-async def cmd_orders(message: Message):
+# /orders (и прежние /myorders, /allorders) теперь виджетом
+# (handlers/order_widget.py); текстовый список — /orderslist и запасной,
+# если Telegram виджет не принял
+@router.message(Command("orderslist"))
+async def cmd_orders_list(message: Message):
     """Заказы в работе — ответами на исходные карточки.
 
     Сам заказ повторно не пересказываем: Telegram покажет процитированную
