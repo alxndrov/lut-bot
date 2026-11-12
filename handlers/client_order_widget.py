@@ -100,32 +100,47 @@ def _wrap(text: str, max_em: float) -> list[str]:
     return lines or [""]
 
 
-@lru_cache(maxsize=32)
-def headline_svg(text: str, size: int = 26, max_em: float = 10.0, color: str = "#f2f2f2") -> str:
-    """Заголовок капсом как SVG-контуры. Координаты — в сотых кегля: на 26 px
-    это четверть пикселя, а цифр в пути вдвое меньше, чем в тысячных."""
+@lru_cache(maxsize=256)
+def _glyph_path(ch: str, em: int = 100) -> str:
+    """Контур буквы в em-долях кегля (по умолчанию сотых), от начала строки
+    и базовой линии прописных."""
     from fontTools.pens.svgPathPen import SVGPathPen
     from fontTools.pens.transformPen import TransformPen
-    cap, lead, em = 75, 95, 100              # высота прописных Unbounded, межстрочный
+    font, name = _glyph(ch)
+    if not font:
+        return ""
+    k = em / font["head"].unitsPerEm
+    gs = font.getGlyphSet()
+    pen = SVGPathPen(gs, ntos=lambda v: str(round(v)))
+    gs[name].draw(TransformPen(pen, (k, 0, 0, -k, 0, 0)))
+    return pen.getCommands()
+
+
+@lru_cache(maxsize=64)
+def headline_svg(text: str, size: int = 26, max_em: float = 10.0,
+                 color: str = "currentColor", em: int = 100) -> str:
+    """Текст капсом фирменным шрифтом — SVG-контурами (шрифты в виджете запрещены).
+
+    Каждая буква — свой <path> со сдвигом: одинаковые буквы дают одинаковые
+    строки, и zlib сжимает повторы почти даром. Координаты — в сотых кегля
+    (на 26 px это четверть пикселя; мелкому тексту хватит и em=40).
+    currentColor — цвет задаётся CSS `color`."""
+    cap, lead = 75 * em // 100, 95 * em // 100   # высота прописных Unbounded, межстрочный
     lines = _wrap(text.upper(), max_em)
-    parts, width = [], 0
+    parts, width = [], 0.0
     for i, line in enumerate(lines):
         x, base = 0.0, cap + i * lead
         for ch in line:
-            font, name = _glyph(ch)
-            if font:
-                k = em / font["head"].unitsPerEm
-                gs = font.getGlyphSet()
-                pen = SVGPathPen(gs, ntos=lambda v: str(round(v)))
-                gs[name].draw(TransformPen(pen, (k, 0, 0, -k, x, base)))
-                parts.append(pen.getCommands())
+            d = _glyph_path(ch, em)
+            if d:
+                parts.append(f'<path transform="translate({round(x)} {base})" d="{d}"/>')
             x += _advance(ch) * em
         width = max(width, x)
     height = cap + (len(lines) - 1) * lead
     w, h = round(width), round(height)
     return (f'<svg viewBox="0 0 {w} {h}" width="{w * size // em}" height="{h * size // em}" '
-            f'style="display:block;overflow:visible;max-width:100%;height:auto" role="img" '
-            f'aria-label="{html.escape(text)}"><path fill="{color}" d="{"".join(parts)}"/></svg>')
+            f'fill="{color}" style="display:block;overflow:visible;max-width:100%;height:auto" '
+            f'role="img" aria-label="{html.escape(text)}">{"".join(parts)}</svg>')
 
 
 # ── что показываем ──────────────────────────────────────────────────
@@ -275,6 +290,7 @@ async def order_data(order: dict) -> dict:
 _CSS = """*{box-sizing:border-box;margin:0}
 body{background:#0a0a0a;color:#f2f2f2;font:14px/1.35 -apple-system,system-ui,'Segoe UI',Roboto,sans-serif;padding:12px 14px 6px}
 .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+svg{color:#f2f2f2}
 .eb{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#7a7a7a}.eb.r{color:#e10600}
 .pill{border:1px solid #262626;border-radius:99px;padding:3px 11px;font-size:13px;font-weight:600}
 .ld{color:#a3a3a3;margin-top:7px;font-size:13px}

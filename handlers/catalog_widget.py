@@ -75,75 +75,102 @@ async def _item(p: dict) -> dict:
         icon, name = m.group(1), name[m.end():]
     tag, extra, btn, off = "", "", "", 0
     if await db.get_course_options(p["id"]):
-        tag, btn = "Курс", "🎬 Подробнее о курсе"
+        tag, btn = "Курс", "Подробнее о курсе"
         icon = icon or "🎬"
     elif cat == "waitlist":
-        tag, btn = "Скоро", "📋 Записаться в список"
+        tag, btn = "Скоро", "Записаться в список"
     elif cat == "physical":
         if db.is_stock_product(p):
             left = [v for v in await db.get_product_variants(p["id"]) if v["stock"] > 0]
             n = sum(v["stock"] for v in left)
             tag = f"В наличии: {n} шт" if n else "Всё разобрали"
             extra = ", ".join(v["name"] for v in left[:6])
-            btn, off = ("🛒 Выбрать", 0) if n else ("😔 Нет в наличии", 1)
+            btn, off = ("Выбрать", 0) if n else ("Нет в наличии", 1)
         else:
-            tag, btn = "3D-печать на заказ", "🛒 Оформить заказ"
+            tag, btn = "3D-печать на заказ", "Оформить заказ"
         icon = icon or "📦"
     else:
-        tag, btn = ("Курс" if cat == "infobiz" else "Цифровой товар"), f"💳 Купить · {price} ₽"
+        tag, btn = ("Курс" if cat == "infobiz" else "Цифровой товар"), f"Купить · {price} ₽"
         icon = icon or "✨"
     return {"i": p["id"], "e": icon, "n": _cut(name, 48), "s": _first_sentence(desc),
             "d": _cut(desc, 260), "x": _cut(extra, 120), "p": price_text, "g": tag,
             "b": btn, "o": off, "h": 0 if p.get("active", 1) else 1}
 
 
+# Стиль — как у мини-приложения (webapp/index.html, макет Миши) и у «Моего
+# заказа»: чёрный фон, карточки #141414, красный #e10600, заголовок и номера
+# товаров фирменным шрифтом — контурами в SVG (шрифты в виджете запрещены).
+# Список — как уроки в приложении: номер, название капсом, метка, цена.
 _CSS = """*{box-sizing:border-box;margin:0}
-body{font:15px/1.35 system-ui,sans-serif;color:var(--tg-theme-text-color);padding:10px 10px 4px}
-h3{font-size:17px;margin:0 2px 8px}
-.c{background:var(--tg-theme-secondary-bg-color);border-radius:14px;padding:10px 12px;margin-bottom:7px}
-.r{display:flex;align-items:center;gap:10px}
-.e{font-size:24px;width:30px;text-align:center}
-.m{flex:1;min-width:0}.n{font-weight:600}
-.s{font-size:13px;color:var(--tg-theme-hint-color)}
-.p{font-weight:600;white-space:nowrap;color:var(--tg-theme-accent-text-color,var(--tg-theme-link-color))}
-.g{display:inline-block;margin-top:3px;font-size:11px;padding:1px 7px;border-radius:8px;background:var(--tg-theme-bg-color);color:var(--tg-theme-hint-color)}
-.d{margin-top:8px;font-size:14px}.x{margin-top:6px;font-size:13px;color:var(--tg-theme-hint-color)}
-.b{margin-top:10px;padding:10px;border-radius:10px;text-align:center;font-weight:600;background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color)}
-.b.o{opacity:.45}
-#t{font-size:13px;text-align:center;color:var(--tg-theme-hint-color);min-height:17px}"""
+body{background:#0a0a0a;color:#f2f2f2;font:14px/1.35 -apple-system,system-ui,'Segoe UI',Roboto,sans-serif;padding:12px 14px 6px}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.eb{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:#7a7a7a}.eb.r{color:#e10600}
+.pill{border:1px solid #262626;border-radius:99px;padding:3px 11px;font-size:13px;font-weight:600}
+.h1{color:#f2f2f2}
+.ls{margin-top:12px;border-top:1px solid #1f1f1f}
+.it{border-bottom:1px solid #1f1f1f;cursor:pointer}
+.rw{display:flex;align-items:center;gap:12px;padding:11px 0}
+.nm{width:34px;flex:none;color:#3a3a3a}.nt{font-weight:900;font-size:19px;letter-spacing:-.02em}.on .nm{color:#e10600}
+.m{flex:1;min-width:0}.m b{display:block;font-weight:600;font-size:15px;line-height:1.25}
+.m small{display:block;color:#7a7a7a;font-size:13px;margin-top:3px}.m small i{font-style:normal;color:#e10600}
+.m em{font-style:normal;font-weight:700;color:#f2f2f2}
+.cd{padding:0 0 12px 46px;margin-top:-3px}
+.d{color:#a3a3a3;font-size:13px;display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+.tg .rw{padding:8px 0}.tg .d{-webkit-line-clamp:4}.x{color:#7a7a7a;font-size:12px;margin-top:6px}
+.d+.bt,.x+.bt{margin-top:10px}.bt{border-radius:99px;padding:10px 16px;font-weight:600;font-size:14px;text-align:center;background:#e10600;color:#fff}
+.bt.o{background:#262626;color:#7a7a7a}
+#t{font-size:12px;text-align:center;color:#7a7a7a;min-height:16px;margin-top:8px}"""
 
-# Раскрыт товар — подзаголовки остальных прячем: пузырь не выше 600 px
+# Раскрыт товар — подписи остальных прячем: пузырь не выше 600 px
 _JS = r"""var W=window.TelegramWidget,sel=0,busy=0,skip=0;
 function e(x){return String(x).replace(/[&<>"]/g,function(c){return"&#"+c.charCodeAt(0)+";"})}
 function H(f,a){try{W.HapticFeedback[f](a)}catch(_){}}
-function R(){var h="";D.forEach(function(p){var on=p.i==sel;
-h+='<div class="c" onclick="T('+p.i+')"><div class="r"><div class="e">'+e(p.e)+'</div><div class="m"><div class="n">'+(p.h?"🙈 ":"")+e(p.n)+'</div>';
-if(!sel&&p.s)h+='<div class="s">'+e(p.s)+'</div>';h+='<span class="g">'+e(p.g)+'</span></div><div class="p">'+e(p.p)+'</div></div>';
-if(on){if(p.d)h+='<div class="d">'+e(p.d)+'</div>';if(p.x)h+='<div class="x">'+e(p.x)+'</div>';
-h+='<div class="b'+(p.o?' o':'')+'" onclick="A('+p.i+','+p.o+')">'+e(p.b)+'</div>'}h+='</div>'});
-document.getElementById("L").innerHTML=h}
+function R(){var h="";D.forEach(function(p,j){var on=p.i==sel;
+h+='<div class="it'+(on?' on':'')+'" onclick="T('+p.i+')"><div class="rw"><div class="nm">'+N[j]+'</div><div class="m"><b>'+e(p.n)+'</b>';
+if(!sel||on)h+='<small><em>'+e(p.p)+'</em> · '+(p.h?'<i>скрыт</i> · ':'')+e(p.g)+'</small>';h+='</div></div>';
+if(on){h+='<div class="cd">';if(p.d)h+='<div class="d">'+e(p.d)+'</div>';if(p.x)h+='<div class="x">'+e(p.x)+'</div>';
+h+='<div class="bt'+(p.o?' o':'')+'" onclick="A('+p.i+','+p.o+')">'+e(p.b)+'</div></div>'}h+='</div>'});
+var L=document.getElementById("L");L.className="ls"+(D.length>5?" tg":"");L.innerHTML=h}
 function T(i){if(skip){skip=0;return}sel=sel==i?0:i;M("");H("selectionChanged");R()}
 function M(t){document.getElementById("t").textContent=t}
-// Кнопка внутри карточки: нажатие всплывёт до карточки — её не сворачиваем
+// Кнопка внутри карточки: нажатие всплывёт до товара — его не сворачиваем
 function A(i,o){skip=1;setTimeout(function(){skip=0},0);if(o||!W||busy)return;busy=1;M("Открываю…");H("impactOccurred","light");
 W.request("pr:"+i).then(function(a){busy=0;var r={};try{r=JSON.parse(a.result)}catch(_){}M(r.t||"")},function(er){busy=0;M("Не вышло: "+er.code+". Попробуйте ещё раз")})}
 if(W&&W.ready)W.ready();R();"""
 
 
+def _count(n: int) -> str:
+    word = "товар" if n % 10 == 1 and n % 100 != 11 else (
+        "товара" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "товаров")
+    return f"{n} {word}"
+
+
 def build_html(items: list[dict], admin: bool) -> str:
-    def page(data):
+    from handlers.client_order_widget import headline_svg
+    svg_nums = [headline_svg(f"{j:02d}", size=20) for j in range(1, len(items) + 1)]
+    txt_nums = [f'<span class="nt">{j:02d}</span>' for j in range(1, len(items) + 1)]
+    head = headline_svg("Каталог", size=34, max_em=12)
+
+    def page(data, nums):
         payload = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-        head = "📦 Каталог" + (" · 🔐 видны скрытые" if admin else "")
-        return (f"<style>{_CSS}</style><h3>{head}</h3><div id=\"L\"></div><div id=\"t\"></div>"
-                f"<script>var D={payload};{_JS}</script>")
+        n = json.dumps(nums, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+        note = _count(len(data)) + (" · со скрытыми" if admin else "")
+        return (f"<style>{_CSS}</style><div class=\"top\"><span class=\"eb r\">MALIMABI</span>"
+                f"<span class=\"pill\">{note}</span></div><div class=\"h1\">{head}</div>"
+                f"<div class=\"ls\" id=\"L\"></div><div id=\"t\">Нажмите на товар — откроются подробности</div>"
+                f"<script>var D={payload},N={n};{_JS}</script>")
+    # Номера фирменным шрифтом — если влезают; описания важнее, поэтому
+    # сначала номера системным жирным, и только потом режем описания
+    out = page(items, svg_nums)
+    if _fits(out):
+        return out
     data = list(items)
-    out = page(data)
-    # Не влезло — сокращаем описания, а не товары: товар терять нельзя
-    for n in (180, 120, 60, 0):
+    for n in (None, 180, 120, 60, 0):
+        if n is not None:
+            data = [dict(it, d=_cut(it["d"], n) if n else "", x=_cut(it["x"], n)) for it in data]
+        out = page(data, txt_nums)
         if _fits(out):
             break
-        data = [dict(it, d=_cut(it["d"], n) if n else "", x=_cut(it["x"], n)) for it in data]
-        out = page(data)
     return out
 
 

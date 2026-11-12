@@ -40,9 +40,9 @@ class CatalogWidgetTest(unittest.IsolatedAsyncioTestCase):
         it = await cw._item(await db.get_product(5))
         self.assertEqual((it["e"], it["n"]), ("🎤", "Микрофон"))
         self.assertEqual(it["d"], "Строка без точки. Вторая.")
-        self.assertEqual(it["b"], "🛒 Оформить заказ")
+        self.assertEqual(it["b"], "Оформить заказ")
         lut = await cw._item(await db.get_product(6))
-        self.assertEqual(lut["b"], "💳 Купить · 399 ₽")
+        self.assertEqual(lut["b"], "Купить · 399 ₽")
 
         admin, buyer = config.ADMIN_IDS[0], 555
         self.assertTrue(await cw.send(mock.Mock(), admin, admin))     # по умолчанию — админам
