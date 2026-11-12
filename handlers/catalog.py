@@ -71,10 +71,14 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
         if db.is_stock_product(product):
             file_status = "🛒 Для оформления заказа выберите вариант ниже 👇"
         elif await db.get_product_questions(product_id):
-            file_status = (
-                "🛒 Для оформления заказа ответьте на несколько вопросов ниже — "
-                "это займёт минуту.\nОтвет можно писать текстом или прикреплять фото."
-            )
+            from handlers import product_widget
+            if await product_widget.enabled_for(callback.from_user.id):
+                file_status = "🛒 Соберите свой вариант ниже 👇"
+            else:
+                file_status = (
+                    "🛒 Для оформления заказа ответьте на несколько вопросов ниже — "
+                    "это займёт минуту.\nОтвет можно писать текстом или прикреплять фото."
+                )
         else:
             file_status = "🛒 Для оформления заказа опишите свой запрос в сообщении ниже 👇"
     elif category == "infobiz":

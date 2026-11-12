@@ -289,5 +289,10 @@ class WidgetQueryMiddleware(BaseMiddleware):
         q = (getattr(event, "model_extra", None) or {}).get("widget_query")
         if q is None:
             return await handler(event, data)
-        await handle_query(data["bot"], q, data["fsm_storage"])
+        if str(q.get("data") or "").startswith(("sv:", "ph:")):
+            # Конструктор физтовара (handlers/product_widget.py)
+            from handlers import product_widget
+            await product_widget.handle_query(data["bot"], q, data["fsm_storage"])
+        else:
+            await handle_query(data["bot"], q, data["fsm_storage"])
         return True

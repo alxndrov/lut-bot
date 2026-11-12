@@ -85,6 +85,7 @@ class SurveyForm(StatesGroup):
     picking_product = State()
     picking_variant = State()
     delivery = State()
+    widget = State()        # ждём выбор в конструкторе (handlers/product_widget.py)
 
 
 # Подпись ответа «какой экземпляр из наличия выбран» в опросе и в заказе
@@ -170,9 +171,63 @@ async def _start_round(target: Message, state: FSMContext, product_id: int) -> b
         return True
     questions = await db.get_product_questions(product_id)
     if questions:
+        # Варианты кнопками в виджете — кому включён конструктор
+        from handlers import product_widget
+        if await product_widget.send(target, await db.get_product(product_id)):
+            await state.set_state(SurveyForm.widget)
+            await state.update_data(q_index=0, prefill={})
+            return True
         await state.set_state(SurveyForm.answering)
         await _ask_question(target, questions[0], 1, len(questions))
     return True
+
+
+async def _advance(target: Message, state: FSMContext, bot: Bot, user):
+    """Следующий вопрос раунда. Ответы, уже выбранные в конструкторе
+    (prefill), записываем сами и не спрашиваем; кончились вопросы — раунд готов."""
+    data = await state.get_data()
+    product_id = data.get("cur_product_id", data["product_id"])
+    questions = await db.get_product_questions(product_id)
+    idx = data.get("q_index", 0)
+    rounds = data.get("rounds") or [[]]
+    prefill = data.get("prefill") or {}
+    while idx < len(questions) and str(idx) in prefill:
+        rounds[-1].append({"q": questions[idx]["text"], "text": prefill[str(idx)],
+                           "photo": None, "doc": None})
+        idx += 1
+    if idx < len(questions):
+        await state.set_state(SurveyForm.answering)
+        await state.update_data(q_index=idx, rounds=rounds)
+        await _ask_question(target, questions[idx], idx + 1, len(questions))
+        return
+    await state.update_data(q_index=idx, rounds=rounds, prefill={})
+    await _round_done(target, state, bot, user)
+
+
+async def submit_widget_answers(target: Message, state: FSMContext, bot: Bot, user,
+                                product_id: int, answers: dict[int, str]) -> bool:
+    """«Оформить заказ» в конструкторе. False — опрос уже не ждёт этот виджет
+    (заказ оформлен, начат другой товар, бот перезапускался без состояния)."""
+    data = await state.get_data()
+    if (await state.get_state() != SurveyForm.widget.state
+            or data.get("cur_product_id", data.get("product_id")) != product_id):
+        return False
+    await state.update_data(q_index=0, prefill={str(k): v for k, v in answers.items()})
+    await _advance(target, state, bot, user)
+    return True
+
+
+@router.message(SurveyForm.widget)
+async def fsm_widget_text(message: Message, state: FSMContext):
+    """Написали в чат, а не выбрали в конструкторе — ведём опрос по-старому."""
+    data = await state.get_data()
+    questions = await db.get_product_questions(data.get("cur_product_id", data["product_id"]))
+    if not questions:
+        return
+    await state.set_state(SurveyForm.answering)
+    await state.update_data(q_index=0, prefill={})
+    await message.answer("Можно и в чате — ответьте на вопросы по очереди 👇")
+    await _ask_question(message, questions[0], 1, len(questions))
 
 
 def _product_picker_keyboard(products: list[dict]) -> InlineKeyboardMarkup:
@@ -275,14 +330,9 @@ async def fsm_survey_answer(message: Message, state: FSMContext, bot: Bot):
     })
     idx += 1
 
-    # Ещё есть вопросы в текущем круге
-    if idx < len(questions):
-        await state.update_data(q_index=idx, rounds=rounds)
-        await _ask_question(message, questions[idx], idx + 1, len(questions))
-        return
-
-    await state.update_data(rounds=rounds)
-    await _round_done(message, state, bot, message.from_user)
+    # Следующий вопрос круга (выбранные в конструкторе пропускаются) или конец
+    await state.update_data(q_index=idx, rounds=rounds)
+    await _advance(message, state, bot, message.from_user)
 
 
 async def _round_done(target: Message, state: FSMContext, bot: Bot, user):
@@ -461,8 +511,7 @@ async def cb_survey_pick_product(callback: CallbackQuery, state: FSMContext):
         parse_mode="HTML",
     )
     if questions:
-        await state.set_state(SurveyForm.answering)
-        await _ask_question(callback.message, questions[0], 1, len(questions))
+        await _start_round(callback.message, state, new_id)
         return
 
     # У добавленного товара нет своего опроса — сразу возвращаемся к выбору
