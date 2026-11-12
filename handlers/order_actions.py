@@ -1105,6 +1105,56 @@ async def cb_order_repeat_confirm(callback: CallbackQuery):
     await _sync_order_messages(callback, source)
 
 
+SHIP_MSG_KEY = "ship_msg:{}"     # id сообщения клиенту «Заказ отправлен»
+
+
+def shipped_client_text(order: dict) -> str:
+    """Что получает клиент, когда заказ отмечают отправленным."""
+    num = order.get("order_code") or order.get("prodamus_order_id") or ""
+    text = f"📦 <b>Заказ {num} отправлен!</b>\n"
+    track = order.get("cdek_number")
+    if track:
+        text += (f"\nТрек-номер СДЭК: <code>{track}</code>\n"
+                 f'<a href="https://www.cdek.ru/ru/tracking?order_id={track}">'
+                 "Отследить посылку</a>\n")
+    if order.get("cdek_uuid") and config.CDEK_AUTO_ORDER:
+        text += "\nКогда посылка приедет в пункт выдачи, пришлю сообщение."
+    return text.rstrip()
+
+
+async def _notify_client_shipped(order: dict):
+    # Самовывоз и заказ для друга (оформлял админ) — клиенту писать не о чем
+    if order.get("pickup") or order.get("friend_by"):
+        return
+    bot = Bot(token=config.BOT_TOKEN)
+    try:
+        msg = await bot.send_message(order["user_id"], shipped_client_text(order),
+                                     parse_mode="HTML", disable_web_page_preview=True)
+        await db.set_setting(SHIP_MSG_KEY.format(order["id"]), str(msg.message_id))
+    except Exception as e:
+        logger.warning(f"Не сообщить клиенту {order['user_id']} об отправке "
+                       f"заказа {order['id']}: {e}")
+    finally:
+        await bot.session.close()
+
+
+async def _retract_client_shipped(order: dict):
+    """Отметку сняли — убираем у клиента «Заказ отправлен» (если ещё можно)."""
+    key = SHIP_MSG_KEY.format(order["id"])
+    mid = await db.get_setting(key)
+    if not mid:
+        return
+    await db.set_setting(key, "")
+    bot = Bot(token=config.BOT_TOKEN)
+    try:
+        await bot.delete_message(order["user_id"], int(mid))
+    except Exception as e:
+        logger.warning(f"Не удалить у клиента {order['user_id']} сообщение "
+                       f"об отправке заказа {order['id']}: {e}")
+    finally:
+        await bot.session.close()
+
+
 @router.callback_query(F.data.startswith("order_shipped:"))
 async def cb_order_shipped(callback: CallbackQuery):
     order = await _load(callback)
@@ -1170,6 +1220,7 @@ async def cb_order_shipped(callback: CallbackQuery):
 
     order = await db.get_order(order["id"])
     await _sync_order_messages(callback, order)
+    await _notify_client_shipped(order)
 
 
 @router.callback_query(F.data.startswith("order_unship:"))
@@ -1201,6 +1252,7 @@ async def cb_order_unship(callback: CallbackQuery):
 
     await db.clear_order_shipped(order["id"])
     request_sync()
+    await _retract_client_shipped(order)
     await callback.answer("Отметка о выдаче снята ↩️" if order.get("pickup")
                           else "Отметка об отправке снята ↩️")
     order = await db.get_order(order["id"])

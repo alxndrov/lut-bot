@@ -608,8 +608,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
         f"{delivery_line}\n"
         f"Адрес: {full_address}\n"
         f"{recipient_line}\n"
-        f"<b>Итого: {total} ₽</b>\n\n"
-        "После оплаты я свяжусь с тобой для уточнения деталей доставки."
+        f"<b>Итого: {total} ₽</b>"
     )
 
     # Адрес и ответы опроса — в БД до оплаты; вебхук заберёт их после
@@ -638,8 +637,7 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
         from handlers.friend_order import send_friend_confirm
         await state.clear()
         await send_friend_confirm(
-            message, text.replace("📋 <b>Подтверждение заказа</b>", "📋 <b>Заказ для друга</b>")
-                         .replace("\n\nПосле оплаты я свяжусь с тобой для уточнения деталей доставки.", ""),
+            message, text.replace("📋 <b>Подтверждение заказа</b>", "📋 <b>Заказ для друга</b>"),
             product["id"], user_id, total, _goods_payment_name(goods_items))
         return
 
