@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 import aiosqlite
 
@@ -39,15 +40,48 @@ class ClientOrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         d = await cw.order_data(await db.get_order(1))
         self.assertEqual((d["n"], d["k"], d["h"]), ("77", 2, "В пути"))
         self.assertEqual(d["s"][2][1], "12.11")            # 21:30 UTC — уже 12-е по Москве
-        self.assertEqual(d["p"], "Microphone Handled Kit")
-        self.assertEqual(d["q"][0][0], "Модель")
-        self.assertEqual(d["q"][1][3], 1)                  # чёрный — кружком, текст белым
+        self.assertEqual(len(d["o"]), 1)
+        pos = d["o"][0]
+        self.assertEqual(pos["p"], "Microphone Handled Kit")
+        self.assertEqual(pos["q"][0][0], "Модель")
+        self.assertEqual(pos["q"][1][3], 1)                # чёрный — кружком, текст белым
         self.assertTrue(d["d"].startswith("Волгоград, ул. Елецкая"))
         page = cw.build_html(d)
-        self.assertIn("@font-face", page)
+        self.assertNotIn("@font-face", page)               # Telegram его вырезает
+        self.assertIn("<svg", page)
+        self.assertIn("order_id=10345883523", page)
         self.assertTrue(_fits(page))
-        self.assertNotIn("@font-face", cw.build_html(d, with_font=False))
 
+    async def test_positions_as_tabs(self):
+        two = SUMMARY.replace("💵 1380 ₽\n\n", "💵 2242 ₽\n\n— <b>Позиция 1</b> —\n").replace(
+            "1 (черный)\n\n", "1 (черный)\n\n— <b>Позиция 2</b> —\n"
+            "<b>1. Модель вашего микрофона?</b>\n2 (DJI Mic Mini)\n"
+            "<b>2. Выберите цвет для микрофона и напишите его номер</b>\n3 (красный)\n\n")
+        async with aiosqlite.connect(db.DB_PATH) as c:
+            await c.execute("UPDATE orders SET summary = ? WHERE id = 1", (two,))
+            await c.commit()
+        d = await cw.order_data(await db.get_order(1))
+        self.assertEqual([p["l"] for p in d["o"]], ["Черный", "Красный"])
+
+    async def test_delivered_by_cdek(self):
+        from services import cdek_tracker
+        client = mock.Mock()
+        client.get_order_info = mock.AsyncMock(return_value={
+            "status_codes": ["DELIVERED", "ACCEPTED_AT_PICK_UP_POINT", "CREATED"],
+            "status_dates": {"DELIVERED": "2026-11-13T14:05:00+0300"}})
+        async with aiosqlite.connect(db.DB_PATH) as c:
+            await c.execute("UPDATE orders SET cdek_uuid = 'u' WHERE id = 1")
+            await c.commit()
+        bot = mock.Mock(send_message=mock.AsyncMock())
+        with mock.patch("services.cdek_accounts.client_for_order", return_value=client), \
+                mock.patch("database.get_orders_tracking",
+                           mock.AsyncMock(return_value=[await db.get_order(1)])):
+            await cdek_tracker._check_once(bot)
+        bot.send_message.assert_not_awaited()              # уже забрали — о прибытии поздно
+        o = await db.get_order(1)
+        self.assertEqual((o["cdek_final"], o["delivered_at"]), ("DELIVERED", "2026-11-13 11:05:00"))
+        d = await cw.order_data(o)
+        self.assertEqual((d["k"], d["h"], d["s"][4][1]), (4, "Получен", "13.11"))
 
 if __name__ == "__main__":
     unittest.main()

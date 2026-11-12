@@ -991,6 +991,13 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE orders ADD COLUMN arrived_notified_at TIMESTAMP DEFAULT NULL")
         except Exception:
             pass
+        # Migration: чем закончилась доставка по данным СДЭК — вручена
+        # (DELIVERED) или нет (NOT_DELIVERED, посылка уходит обратно)
+        for col in ("delivered_at TIMESTAMP DEFAULT NULL", "cdek_final TEXT DEFAULT NULL"):
+            try:
+                await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
+            except Exception:
+                pass
         # Migration: кто печатает заказ. В заказе с разными позициями печатать
         # могут оба — тогда он должен быть виден у обоих, а не только
         # у одного исполнителя. Формат: ",id,id,"
@@ -2562,7 +2569,9 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
 
 
 async def get_orders_tracking() -> list[dict]:
-    """Заказы, по которым ещё ждём прибытия посылки в пункт выдачи.
+    """Заказы, по которым СДЭК ещё не сказал последнего слова: посылка
+    не вручена и не ушла обратно. Приехавшие в пункт выдачи тоже опрашиваем —
+    ждём, когда их заберут (этап «Получен» в виджете «Мой заказ»).
 
     Берём только свежие: через два месяца посылка либо получена, либо
     уехала обратно — дальше опрашивать СДЭК бессмысленно.
@@ -2572,11 +2581,25 @@ async def get_orders_tracking() -> list[dict]:
         async with db.execute(
             """SELECT * FROM orders
                WHERE cdek_uuid IS NOT NULL
-                 AND arrived_notified_at IS NULL
+                 AND cdek_final IS NULL
                  AND created_at >= datetime('now', '-60 days')
                ORDER BY created_at"""
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_order_final(order_id: int, code: str, when: str | None = None):
+    """Доставка закончилась: code — DELIVERED или NOT_DELIVERED, when — время
+    из статуса СДЭК (UTC, «YYYY-MM-DD HH:MM:SS»), иначе — сейчас."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE orders SET cdek_final = ?,
+                      delivered_at = COALESCE(?, CURRENT_TIMESTAMP),
+                      arrived_notified_at = COALESCE(arrived_notified_at, CURRENT_TIMESTAMP)
+               WHERE id = ?""",
+            (code, when, order_id),
+        )
+        await db.commit()
 
 
 async def set_order_arrived(order_id: int):

@@ -25,6 +25,18 @@ ARRIVED_CODES = {
 FINAL_CODES = {"DELIVERED", "NOT_DELIVERED"}
 
 
+def _utc(stamp: str | None) -> str | None:
+    """«2026-11-12T14:05:00+0300» от СДЭК → «2026-11-12 11:05:00» UTC, как в базе."""
+    if not stamp:
+        return None
+    from datetime import datetime, timezone
+    try:
+        d = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S%z")
+    except ValueError:
+        return None
+    return d.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def pvz_from_delivery(delivery_str: str | None) -> str:
     """Адрес пункта выдачи из строки доставки, без служебных пометок."""
     for line in (delivery_str or "").splitlines():
@@ -64,8 +76,18 @@ async def _check_once(bot: Bot):
         if not info:
             continue
         codes = set(info.get("status_codes") or [])
+        final = next((c for c in sorted(FINAL_CODES) if c in codes), None)
 
-        if codes & ARRIVED_CODES:
+        if final:
+            # Посылку забрали (или она уходит обратно) — сообщать о прибытии
+            # уже поздно; запоминаем итог для этапа «Получен» и снимаем с опроса
+            await db.set_order_final(order["id"], final,
+                                     _utc((info.get("status_dates") or {}).get(final)))
+
+        elif order.get("arrived_notified_at"):
+            pass    # о прибытии уже сообщили — ждём, когда заберут
+
+        elif codes & ARRIVED_CODES:
             try:
                 await bot.send_message(order["user_id"], _arrived_text(order),
                                        parse_mode="HTML")
@@ -77,10 +99,6 @@ async def _check_once(bot: Bot):
                 logger.error(f"CDEK: не сообщить о прибытии клиенту "
                              f"{order['user_id']}: {e}")
             # Отмечаем в любом случае, иначе будем слать каждые полчаса
-            await db.set_order_arrived(order["id"])
-
-        elif codes & FINAL_CODES:
-            # Посылку уже забрали — снимаем с отслеживания молча
             await db.set_order_arrived(order["id"])
 
         await asyncio.sleep(0.5)   # не частим с запросами к СДЭК

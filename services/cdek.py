@@ -334,6 +334,8 @@ class CDEKClient:
                     "status_code": statuses[0].get("code") if statuses else None,
                     "status_name": statuses[0].get("name") if statuses else None,
                     "status_codes": [s.get("code") for s in statuses],
+                    # Время каждого статуса как его прислал СДЭК (с часовым поясом)
+                    "status_dates": {s.get("code"): s.get("date_time") for s in reversed(statuses)},
                 }
         except Exception as e:
             logger.error(f"CDEK get_order_info error: {type(e).__name__}: {e}")
