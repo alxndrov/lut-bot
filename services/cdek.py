@@ -336,6 +336,8 @@ class CDEKClient:
                     "status_codes": [s.get("code") for s in statuses],
                     # Время каждого статуса как его прислал СДЭК (с часовым поясом)
                     "status_dates": {s.get("code"): s.get("date_time") for s in reversed(statuses)},
+                    # До какого момента посылка бесплатно хранится в пункте выдачи (UTC)
+                    "keep_free_until": entity.get("keep_free_until"),
                 }
         except Exception as e:
             logger.error(f"CDEK get_order_info error: {type(e).__name__}: {e}")

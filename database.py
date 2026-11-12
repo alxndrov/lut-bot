@@ -810,6 +810,17 @@ async def init_db(existing_cdek_contract: str | None = None):
         # Виджеты «Заказы в работе» (Bot API 10.4, handlers/order_widget.py):
         # какие заказы в каком сообщении — чтобы перерисовать состояние,
         # когда заказ меняется кнопкой в виджете или в обычной карточке
+        # «Мой заказ» у клиента (handlers/client_order_widget.py): одно живое
+        # сообщение на заказ и этап, который в нём показан
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS client_order_widgets (
+                order_id   INTEGER PRIMARY KEY,
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                stage      INTEGER NOT NULL,
+                sent_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS order_widgets (
                 chat_id    INTEGER NOT NULL,
@@ -993,7 +1004,9 @@ async def init_db(existing_cdek_contract: str | None = None):
             pass
         # Migration: чем закончилась доставка по данным СДЭК — вручена
         # (DELIVERED) или нет (NOT_DELIVERED, посылка уходит обратно)
-        for col in ("delivered_at TIMESTAMP DEFAULT NULL", "cdek_final TEXT DEFAULT NULL"):
+        # keep_until — до какого времени посылка бесплатно ждёт в пункте выдачи
+        for col in ("delivered_at TIMESTAMP DEFAULT NULL", "cdek_final TEXT DEFAULT NULL",
+                    "keep_until TIMESTAMP DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except Exception:
@@ -2038,6 +2051,46 @@ async def drop_review_push(push_id: int) -> None:
         await db.commit()
 
 
+async def review_push_after_delivery(order: dict, product_ids: list[int],
+                                     delivered_at: str | None, days: int = 2,
+                                     cancel: bool = False):
+    """Просьба об отзыве — через days дней после получения посылки.
+
+    Пуш, поставленный при отправке как страховка, переносим; уже ушедший
+    не трогаем; если пуша не было — ставим. cancel — посылку не вручили:
+    неотправленные пуши заказа снимаем."""
+    from datetime import datetime, timezone, timedelta
+    async with aiosqlite.connect(DB_PATH) as db:
+        if cancel:
+            await db.execute("DELETE FROM review_push_queue WHERE order_id = ? AND sent = 0",
+                             (order["id"],))
+            await db.commit()
+            return
+        try:
+            base = datetime.strptime(delivered_at or "", "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone.utc)
+        except ValueError:
+            base = datetime.now(timezone.utc)
+        send_at = max(base + timedelta(days=days), datetime.now(timezone.utc))
+        stamp = send_at.strftime("%Y-%m-%d %H:%M:%S")
+        for pid in dict.fromkeys(product_ids):
+            async with db.execute(
+                "SELECT id, sent FROM review_push_queue WHERE order_id = ? AND product_id = ?",
+                (order["id"], pid),
+            ) as cur:
+                row = await cur.fetchone()
+            if row and row[1]:
+                continue
+            if row:
+                await db.execute("UPDATE review_push_queue SET send_at = ? WHERE id = ?",
+                                 (stamp, row[0]))
+            else:
+                await db.execute(
+                    "INSERT INTO review_push_queue (user_id, product_id, send_at, order_id) "
+                    "VALUES (?, ?, ?, ?)", (order["user_id"], pid, stamp, order["id"]))
+        await db.commit()
+
+
 async def mark_review_push_sent(push_id: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE review_push_queue SET sent = 1 WHERE id = ?", (push_id,))
@@ -2599,6 +2652,33 @@ async def set_order_final(order_id: int, code: str, when: str | None = None):
                WHERE id = ?""",
             (code, when, order_id),
         )
+        await db.commit()
+
+
+async def set_order_keep_until(order_id: int, stamp: str | None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET keep_until = ? WHERE id = ?", (stamp, order_id))
+        await db.commit()
+
+
+async def get_client_widget(order_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM client_order_widgets WHERE order_id = ?",
+                              (order_id,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def set_client_widget(order_id: int, chat_id: int, message_id: int, stage: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO client_order_widgets (order_id, chat_id, message_id, stage)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(order_id) DO UPDATE SET chat_id = excluded.chat_id,
+                   message_id = excluded.message_id, stage = excluded.stage,
+                   sent_at = CURRENT_TIMESTAMP""",
+            (order_id, chat_id, message_id, stage))
         await db.commit()
 
 

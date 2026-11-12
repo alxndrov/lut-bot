@@ -474,6 +474,12 @@ async def _sync_order_messages(bot_or_callback, order: dict):
         await order_widget.refresh(bot, order["id"])
     except Exception as e:
         logger.warning(f"order widget refresh {order['id']}: {e}")
+    # И «Мой заказ» у клиента — если этап сменился (готов, отправлен, откат)
+    from handlers import client_order_widget
+    try:
+        await client_order_widget.sync(order["id"])
+    except Exception as e:
+        logger.warning(f"client order widget sync {order['id']}: {e}")
 
 
 async def refresh_open_orders(bot):
@@ -1126,6 +1132,10 @@ async def _notify_client_shipped(order: dict):
     # Самовывоз и заказ для друга (оформлял админ) — клиенту писать не о чем
     if order.get("pickup") or order.get("friend_by"):
         return
+    # Клиенту уже пришёл «Мой заказ» на этапе «В пути» — там и трек, и кнопка
+    widget = await db.get_client_widget(order["id"])
+    if widget and widget["stage"] >= 2:
+        return
     bot = Bot(token=config.BOT_TOKEN)
     try:
         msg = await bot.send_message(order["user_id"], shipped_client_text(order),
@@ -1211,11 +1221,16 @@ async def cb_order_shipped(callback: CallbackQuery):
     if not round_products:
         round_products = [order["product_id"]]
     # Заказ для друга оформлял админ — просьба об отзыве ушла бы ему
+    # Посылку СДЭК бот ведёт до вручения и просит отзыв через 2 дня после
+    # него (services/cdek_tracker.py) — здесь только страховка на случай,
+    # если статус «вручено» так и не придёт: на 3 недели позже отправки
+    tracked = bool(order.get("cdek_uuid")) and config.CDEK_AUTO_ORDER
     for pid in dict.fromkeys(round_products if not order.get("friend_by") else []):
         product = await db.get_product(pid)
         if product and product.get("review_push_delay"):
+            delay = product["review_push_delay"]
             await db.enqueue_review_push(order["user_id"], pid,
-                                         product["review_push_delay"],
+                                         max(delay, 21 * 86400) if tracked else delay,
                                          order_id=order["id"])
 
     order = await db.get_order(order["id"])

@@ -81,27 +81,65 @@ async def _check_once(bot: Bot):
         if final:
             # Посылку забрали (или она уходит обратно) — сообщать о прибытии
             # уже поздно; запоминаем итог для этапа «Получен» и снимаем с опроса
-            await db.set_order_final(order["id"], final,
-                                     _utc((info.get("status_dates") or {}).get(final)))
+            when = _utc((info.get("status_dates") or {}).get(final))
+            await db.set_order_final(order["id"], final, when)
+            await _after_final(bot, order, final, when)
 
         elif order.get("arrived_notified_at"):
-            pass    # о прибытии уже сообщили — ждём, когда заберут
+            # О прибытии уже сообщили — ждём, когда заберут. Срок хранения
+            # СДЭК может продлить — держим свежим
+            keep = _utc(info.get("keep_free_until"))
+            if keep and keep != order.get("keep_until"):
+                await db.set_order_keep_until(order["id"], keep)
 
         elif codes & ARRIVED_CODES:
-            try:
-                await bot.send_message(order["user_id"], _arrived_text(order),
-                                       parse_mode="HTML")
-                logger.info(
-                    f"CDEK: заказ {order.get('order_code')} приехал в ПВЗ, "
-                    f"клиент {order['user_id']} уведомлён"
-                )
-            except Exception as e:
-                logger.error(f"CDEK: не сообщить о прибытии клиенту "
-                             f"{order['user_id']}: {e}")
-            # Отмечаем в любом случае, иначе будем слать каждые полчаса
+            # Отмечаем сразу и в любом случае, иначе будем слать каждые полчаса
+            await db.set_order_keep_until(order["id"], _utc(info.get("keep_free_until")))
             await db.set_order_arrived(order["id"])
+            # «Мой заказ» приходит заново — непрочитанным, со сроком хранения;
+            # кому виджет не включён (или не принял) — прежний текст
+            from handlers import client_order_widget
+            try:
+                widget = await client_order_widget.sync(order["id"], bot)
+            except Exception as e:
+                logger.warning(f"CDEK: виджет заказа {order['id']}: {e}")
+                widget = False
+            if not widget:
+                try:
+                    await bot.send_message(order["user_id"], _arrived_text(order),
+                                           parse_mode="HTML")
+                except Exception as e:
+                    logger.error(f"CDEK: не сообщить о прибытии клиенту "
+                                 f"{order['user_id']}: {e}")
+            logger.info(f"CDEK: заказ {order.get('order_code')} приехал в ПВЗ, "
+                        f"клиент {order['user_id']} уведомлён {'виджетом' if widget else 'текстом'}")
 
         await asyncio.sleep(0.5)   # не частим с запросами к СДЭК
+
+
+async def _after_final(bot: Bot, order: dict, final: str, when: str | None):
+    """Вручена — просьба об отзыве через 2 дня; не вручена — пуш снимаем.
+    «Мой заказ» переходит в «Получен» / «Не получен» без звука."""
+    import json
+    if not order.get("friend_by"):
+        try:
+            rounds = json.loads(order.get("rounds_json") or "[]")
+        except Exception:
+            rounds = []
+        pids = db.unpack_round_products(order.get("round_products_json"), rounds,
+                                        order["product_id"]) or [order["product_id"]]
+        wanted = []
+        for pid in dict.fromkeys(pids):
+            product = await db.get_product(pid)
+            if product and product.get("review_push_delay"):   # товар просит отзывы
+                wanted.append(pid)
+        await db.review_push_after_delivery(order, wanted, when,
+                                            cancel=final != "DELIVERED")
+    from handlers import client_order_widget
+    try:
+        await client_order_widget.sync(order["id"], bot)
+    except Exception as e:
+        logger.warning(f"CDEK: виджет заказа {order['id']}: {e}")
 
 
 async def cdek_tracking_worker(bot: Bot):

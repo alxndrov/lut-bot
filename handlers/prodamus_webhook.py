@@ -414,6 +414,12 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
             paid_text = (product.get("post_payment_text") or DEFAULT_POST_PAYMENT)
             paid_text = paid_text.replace("{order}", order_code)
             await bot.send_message(user_id, paid_text)
+            # «Мой заказ» — живая карточка заказа у клиента (кому включено)
+            from handlers import client_order_widget
+            try:
+                await client_order_widget.sync(order_row_id, bot)
+            except Exception as e:
+                logger.warning(f"client order widget {order_row_id}: {e}")
 
         # Пуш отзыва ставится не здесь: для физтовара отсчёт должен идти
         # от отправки, а не от оплаты — заказ может ждать печати неделями.

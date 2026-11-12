@@ -61,7 +61,7 @@ class ClientOrderWidgetTest(unittest.IsolatedAsyncioTestCase):
             await c.execute("UPDATE orders SET summary = ? WHERE id = 1", (two,))
             await c.commit()
         d = await cw.order_data(await db.get_order(1))
-        self.assertEqual([p["l"] for p in d["o"]], ["Черный", "Красный"])
+        self.assertEqual([p["l"] for p in d["o"]], ["🎤 Черный", "🎤 Красный"])
 
     async def test_delivered_by_cdek(self):
         from services import cdek_tracker
@@ -81,7 +81,61 @@ class ClientOrderWidgetTest(unittest.IsolatedAsyncioTestCase):
         o = await db.get_order(1)
         self.assertEqual((o["cdek_final"], o["delivered_at"]), ("DELIVERED", "2026-11-13 11:05:00"))
         d = await cw.order_data(o)
-        self.assertEqual((d["k"], d["h"], d["s"][4][1]), (4, "Получен", "13.11"))
+        self.assertEqual((d["k"], d["h"], d["s"][4][1], d["z"]), (4, "Получен", "13.11", 1))
+
+    async def test_lifecycle_resend_and_review(self):
+        """Прибытие: виджет приходит заново со звуком и сроком хранения, старый
+        удаляется (или сворачивается); получение — отзыв через 2 дня."""
+        from services import cdek_tracker
+        calls = []
+
+        async def api(bot, method, **params):
+            calls.append((method, params))
+            if method == "deleteMessage":
+                raise RuntimeError("message can't be deleted")
+            return {"message_id": 100 + len(calls)}
+        await db.set_setting(cw.SETTING, "all")
+        async with aiosqlite.connect(db.DB_PATH) as c:
+            await c.execute("UPDATE orders SET cdek_uuid = 'u', shipped_at = NULL WHERE id = 1")
+            await c.execute("UPDATE products SET review_push_delay = 432000 WHERE id = 10")
+            await c.commit()
+        bot = mock.Mock(send_message=mock.AsyncMock())
+        with mock.patch("handlers.client_order_widget.api", api):
+            self.assertTrue(await cw.sync(1, bot))                    # после оплаты/печати
+            self.assertFalse(await cw.sync(1, bot))                   # этап тот же — молчим
+            self.assertTrue(calls[0][1]["disable_notification"])      # «Готов» — без звука
+            first = (await db.get_client_widget(1))["message_id"]
+
+            client = mock.Mock(get_order_info=mock.AsyncMock(return_value={
+                "status_codes": ["ACCEPTED_AT_PICK_UP_POINT"],
+                "keep_free_until": "2026-11-19T20:59:59Z"}))
+            with mock.patch("services.cdek_accounts.client_for_order", return_value=client), \
+                    mock.patch("database.get_orders_tracking",
+                               mock.AsyncMock(return_value=[await db.get_order(1)])):
+                await cdek_tracker._check_once(bot)
+            bot.send_message.assert_not_awaited()                     # текст не нужен — виджет
+            send = [p for m, p in calls if m == "sendWidget"][-1]
+            self.assertIsNone(send.get("disable_notification"))       # прибытие — со звуком
+            self.assertIn("19.11", send["html"])
+            edit = [p for m, p in calls if m == "editMessageWidgetData"][-1]
+            self.assertEqual((edit["message_id"], edit["chat_data"]), (first, '{"x":1}'))
+
+            client.get_order_info.return_value = {
+                "status_codes": ["DELIVERED", "ACCEPTED_AT_PICK_UP_POINT"],
+                "status_dates": {"DELIVERED": "2026-11-13T10:00:00+0000"}}
+            with mock.patch("services.cdek_accounts.client_for_order", return_value=client), \
+                    mock.patch("database.get_orders_tracking",
+                               mock.AsyncMock(return_value=[await db.get_order(1)])):
+                await cdek_tracker._check_once(bot)
+        self.assertEqual((await db.get_client_widget(1))["stage"], 4)
+        async with aiosqlite.connect(db.DB_PATH) as c:
+            rows = await (await c.execute(
+                "SELECT product_id, send_at FROM review_push_queue WHERE order_id = 1")).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertGreaterEqual(rows[0][1], "2026-11-15 10:00:00")
+
+    async def test_off_for_strangers_by_default(self):
+        self.assertFalse(await cw.sync(1, mock.Mock()))              # по умолчанию — только админам
 
 if __name__ == "__main__":
     unittest.main()

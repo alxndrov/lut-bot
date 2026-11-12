@@ -224,7 +224,11 @@ async def handle_query(bot, q: dict, storage):
         user = User.model_validate(q["from"])
         kind, _, rest = (q.get("data") or "").partition(":")
         chat = q.get("chat")
-        if kind != "pr" or not rest.isdigit() or not chat:
+        if kind == "cat" and chat:
+            # «Открыть каталог» из «Моего заказа» (handlers/client_order_widget.py)
+            from handlers.start import show_catalog
+            await show_catalog(_widget_message(bot, chat, q["message_id"]), user_id=user.id)
+        elif kind != "pr" or not rest.isdigit() or not chat:
             note = "Обновите каталог: /catalog"
         else:
             msg = _widget_message(bot, chat, q["message_id"])

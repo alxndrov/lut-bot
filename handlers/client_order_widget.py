@@ -15,7 +15,14 @@ weasyprint).
 Этапы: оплачен → готов → в пути → в пункте выдачи → получен. Последние
 два — по статусам СДЭК (services/cdek_tracker.py).
 
-Пока это пробник: шлём только админам командой /mywidget <id заказа>.
+Жизнь виджета (sync): приходит после оплаты; при смене этапа старое
+сообщение удаляется (бот может удалять только моложе 48 часов — иначе оно
+сворачивается в строку «статус обновился — ниже»), а новое приходит вниз.
+Со звуком — «В пути» и «В пункте выдачи» (заменяют прежние тексты об
+отправке и прибытии), остальные этапы — без звука.
+
+Кому слать — настройка /orderwidget admins|all|off (по умолчанию admins).
+/mywidget <id заказа> — посмотреть любой заказ (только админам).
 """
 import html
 import json
@@ -38,6 +45,9 @@ router = Router()
 
 FONTS = Path(__file__).resolve().parent.parent / "webapp" / "static" / "fonts"
 TRACK_URL = "https://www.cdek.ru/ru/tracking?order_id={}"
+SETTING = "client_order_widget"
+MODES = ("admins", "all", "off")
+LOUD = {2, 3}            # «В пути» и «В пункте выдачи» — со звуком
 
 # (поле с датой, подпись на полосе, заголовок, пояснение)
 STAGES = [
@@ -201,30 +211,48 @@ async def _positions(order: dict) -> list[dict]:
         pid = pids[i] if i < len(pids) else order["product_id"]
         product = await db.get_product(pid) or {}
         name = re.sub(r"^[^\wА-Яа-яЁё]+", "", product.get("name") or "").strip()
-        out.append({"p": name, "q": [_answer(a) for a in _answers(chunk)]})
+        out.append({"p": name, "e": _emoji(product), "q": [_answer(a) for a in _answers(chunk)]})
     if len(out) > 1:
-        # Подпись вкладки — то, чем позиции различаются
-        for key in ("p", "Цвет", "Модель"):
-            vals = [p["p"] if key == "p" else _pick(p["q"], key) for p in out]
-            if all(vals) and len(set(vals)) > 1:
-                break
-        else:
-            vals = [""] * len(out)
-        dup = len(set(vals)) < len(vals)
-        for i, (p, v) in enumerate(zip(out, vals), 1):
-            v = v[:1].upper() + v[1:]
-            p["l"] = (f"{i} · {v}" if dup else v) if v else f"Позиция {i}"
+        # Подпись вкладки: значок товара + цвет («🎤 Черный», «💼 Оранжевый»),
+        # без цвета — модель, без неё — номер позиции
+        labels = []
+        for i, p in enumerate(out, 1):
+            v = _pick(p["q"], "Цвет") or _pick(p["q"], "Модель")
+            labels.append(f"{p['e']} {v[:1].upper() + v[1:]}" if v else f"{p['e']} Позиция {i}")
+        if len(set(labels)) < len(labels):
+            labels = [f"{l} · {i}" for i, l in enumerate(labels, 1)]
+        for p, l in zip(out, labels):
+            p["l"] = l
+    for p in out:
+        p.pop("e", None)
     return out
 
 
-async def order_data(order: dict) -> dict:
+def _emoji(product: dict) -> str:
+    """Значок товара: эмодзи из названия, у кейса — 💼, иначе 📦."""
+    m = re.match(r"^([^\wА-Яа-яЁё\s]+)", product.get("name") or "")
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    if product.get("id") == getattr(config, "CASE_PRODUCT_ID", None):
+        return "💼"
+    return "📦"
+
+
+def stage_of(order: dict) -> int:
+    """Этап заказа; 5 — посылку не вручили (на полосе — как «в пункте выдачи»)."""
+    if order.get("cdek_final") == "NOT_DELIVERED":
+        return 5
     stage = 0
     for i, st in enumerate(STAGES):
         if order.get(st[0]):
             stage = i
-    head, lead = STAGES[stage][2], STAGES[stage][3]
-    if order.get("cdek_final") == "NOT_DELIVERED":
-        head, lead = NOT_DELIVERED
+    return stage
+
+
+async def order_data(order: dict) -> dict:
+    key = stage_of(order)
+    stage = min(key, 3) if key == 5 else key
+    head, lead = (NOT_DELIVERED if key == 5 else STAGES[stage][2:4])
     where, who = _delivery(order.get("summary") or "")
     return {
         "n": _short_code(order),
@@ -237,6 +265,10 @@ async def order_data(order: dict) -> dict:
         "d": _address(where),
         "r": who.split(",")[0],
         "c": order.get("cdek_number") or "",
+        # Срок хранения в пункте выдачи — пока посылка там
+        "u": _date(order.get("keep_until")) if key == 3 else "",
+        # Получен — вместо доставки «Заказать ещё» с переходом в каталог
+        "z": int(key == 4),
     }
 
 
@@ -263,6 +295,9 @@ body{background:#0a0a0a;color:#f2f2f2;font:14px/1.35 -apple-system,system-ui,'Se
 .ad{font-size:13px;padding:1px 0 6px}.ad span{color:#7a7a7a}
 .tr{display:flex;align-items:center;justify-content:space-between;gap:10px;padding-top:6px;border-top:1px solid #1f1f1f}
 .tr div{font-weight:600;font-size:15px;letter-spacing:.02em;min-width:0;overflow:hidden;text-overflow:ellipsis}.tr .bt{flex:none}
+.ul{margin-top:6px;font-weight:700;font-size:15px}.ul span{color:#e10600}
+.old{display:flex;justify-content:space-between;gap:10px;color:#a3a3a3;font-size:13px}.old b{color:#f2f2f2}
+.bt.w{background:#f2f2f2;color:#0a0a0a;text-align:center;margin-top:8px}
 .bt{border-radius:99px;padding:8px 16px;font-weight:600;font-size:13px;background:#e10600;color:#fff;cursor:pointer;white-space:nowrap}"""
 
 # Кнопки — div: формы в виджете вырезаются, onclick работает на любом элементе.
@@ -270,7 +305,10 @@ body{background:#0a0a0a;color:#f2f2f2;font:14px/1.35 -apple-system,system-ui,'Se
 _JS = r"""var W=window.TelegramWidget,F=0,P=0;
 function e(x){return String(x).replace(/[&<>"]/g,function(c){return"&#"+c.charCodeAt(0)+";"})}
 function H(f,a){try{W.HapticFeedback[f](a)}catch(_){}}
-function R(){var o=D,h='<div class="top"><span class="eb r">Заказ №'+e(o.n)+'</span><span class="pill">MALIMABI</span></div>'+S;
+function C(){try{return JSON.parse(W.chatData||"{}")}catch(_){return{}}}
+function R(){var o=D,h;if(C().x){document.getElementById("L").innerHTML='<div class="old"><span><b>Заказ №'+e(o.n)+'</b> · статус обновился</span><span>ниже ↓</span></div>';return}
+h='<div class="top"><span class="eb r">Заказ №'+e(o.n)+'</span><span class="pill">MALIMABI</span></div>'+S;
+if(o.u)h+='<div class="ul">Заберите до <span>'+e(o.u)+'</span></div>';
 h+='<p class="ld">'+e(o.l)+'</p><div class="st">';
 o.s.forEach(function(s,i){h+='<div class="'+(i<=o.k?"on":"")+'"><i></i><b>'+e(s[0])+'</b><small>'+(i<=o.k?e(s[1]):"&nbsp;")+'</small></div>'});
 var p=o.o[P],q=p.q,many=q.length>4;if(many&&!F)q=q.slice(0,3);
@@ -280,14 +318,16 @@ h+='<div class="pn">'+e(p.p)+'</div>';
 q.forEach(function(a){h+='<div class="rw"><span>'+e(a[0])+'</span><b'+(a[2]&&!a[3]?' style="color:'+a[2]+'"':'')+'>'+(a[2]?'<i class="sw" style="background:'+a[2]+'"></i>':'')+e(a[1])+'</b></div>'});
 if(many)h+='<div class="rw mo" onclick="F=!F;R()"><span>'+(F?'Свернуть':'Ещё '+(p.q.length-3))+'</span><b>'+(F?'▴':'▾')+'</b></div>';
 h+='</div>';
-if((o.d||o.c)&&!F){h+='<div class="cd"><div class="eb">Пункт выдачи СДЭК</div>';
+if(o.z&&!F)h+='<div class="cd"><div class="eb">Понравилось?</div><div class="pn">Закажите ещё — в каталоге новинки</div><div class="bt w" onclick="K()">Открыть каталог</div></div>';
+else if((o.d||o.c)&&!F){h+='<div class="cd"><div class="eb">Пункт выдачи СДЭК</div>';
 if(o.d)h+='<div class="ad">'+e(o.d)+(o.r?'<br><span>'+e(o.r)+'</span>':'')+'</div>';
 if(o.c)h+='<div class="tr"><div>'+e(o.c)+'</div><div class="bt" onclick="O()">Отследить</div></div>';
 h+='</div>'}
 document.getElementById("L").innerHTML=h}
 function T(i){if(i!=P){P=i;F=0;H("selectionChanged");R()}}
 function O(){H("impactOccurred","light");try{W.openLink(U)}catch(_){}}
-R();if(W&&W.ready)W.ready();"""
+function K(){H("impactOccurred","light");try{W.request("cat").then(function(){},function(){})}catch(_){}}
+R();if(W){W.onEvent&&W.onEvent("chatDataChanged",R);W.ready&&W.ready()}"""
 
 
 def build_html(data: dict) -> str:
@@ -307,22 +347,78 @@ def build_html(data: dict) -> str:
     return out
 
 
-async def send(bot, chat_id: int, order_id: int) -> int | None:
-    order = await db.get_order(order_id)
-    if not order:
-        return None
+async def _send(bot, chat_id: int, order: dict, notify: bool = True) -> int | None:
     page = build_html(await order_data(order))
     try:
-        sent = await api(bot, "sendWidget", chat_id=chat_id, html=page)
+        sent = await api(bot, "sendWidget", chat_id=chat_id, html=page, chat_data="{}",
+                         allow_queries=True, disable_notification=not notify or None)
     except Exception as e:
-        logger.warning(f"sendWidget «Мой заказ» {order_id} → {chat_id}: {e}")
+        logger.warning(f"sendWidget «Мой заказ» {order['id']} → {chat_id}: {e}")
         return None
     return sent["message_id"]
 
 
+async def send(bot, chat_id: int, order_id: int) -> int | None:
+    """Просмотр для админа: без учёта и без удаления прежних."""
+    order = await db.get_order(order_id)
+    return await _send(bot, chat_id, order) if order else None
+
+
+async def _mode() -> str:
+    mode = await db.get_setting(SETTING)
+    return mode if mode in MODES else "admins"
+
+
+async def enabled_for(order: dict) -> bool:
+    # Самовывоз и заказ для друга (его оформлял админ) — без виджета
+    if order.get("pickup") or order.get("friend_by"):
+        return False
+    mode = await _mode()
+    return mode == "all" or mode == "admins" and order["user_id"] in config.ADMIN_IDS
+
+
+async def sync(order_id: int, bot=None) -> bool:
+    """Привести «Мой заказ» у клиента к текущему этапу заказа.
+
+    True — новый виджет отправлен (этап сменился и клиенту он включён).
+    Этап тот же, виджет выключен или Telegram не принял — False: тогда
+    вызывающий шлёт прежний текст, если он есть."""
+    order = await db.get_order(order_id)
+    if not order or not await enabled_for(order):
+        return False
+    stage = stage_of(order)
+    old = await db.get_client_widget(order_id)
+    if old and old["stage"] == stage:
+        return False
+    own = bot is None
+    if own:
+        from aiogram import Bot
+        bot = Bot(token=config.BOT_TOKEN)
+    try:
+        mid = await _send(bot, order["user_id"], order, notify=stage in LOUD)
+        if not mid:
+            return False
+        await db.set_client_widget(order_id, order["user_id"], mid, stage)
+        if old:
+            try:
+                await api(bot, "deleteMessage", chat_id=old["chat_id"],
+                          message_id=old["message_id"])
+            except Exception:
+                # Старше 48 часов — удалить нельзя, сворачиваем в строку
+                try:
+                    await api(bot, "editMessageWidgetData", chat_id=old["chat_id"],
+                              message_id=old["message_id"], chat_data='{"x":1}')
+                except Exception as e:
+                    logger.debug(f"«Мой заказ» {order_id}: старый не свернуть: {e}")
+        return True
+    finally:
+        if own:
+            await bot.session.close()
+
+
 @router.message(Command("mywidget"))
 async def cmd_mywidget(message: Message, command: CommandObject):
-    """Пробник: /mywidget <id заказа> — только админам."""
+    """Посмотреть «Мой заказ» любого заказа: /mywidget <id заказа> — только админам."""
     if message.from_user.id not in config.ADMIN_IDS:
         return
     arg = (command.args or "").strip()
@@ -331,3 +427,19 @@ async def cmd_mywidget(message: Message, command: CommandObject):
         return
     if not await send(message.bot, message.chat.id, int(arg)):
         await message.answer("Telegram не принял виджет — подробности в логе.")
+
+
+@router.message(Command("orderwidget"))
+async def cmd_orderwidget(message: Message, command: CommandObject):
+    """Кому приходит «Мой заказ»: /orderwidget admins|all|off."""
+    if message.from_user.id not in config.ADMIN_IDS:
+        return
+    arg = (command.args or "").strip().lower()
+    if arg in MODES:
+        await db.set_setting(SETTING, arg)
+    mode = await _mode()
+    names = {"admins": "только админам", "all": "всем покупателям", "off": "никому"}
+    await message.answer(
+        f"«Мой заказ» виджетом — {names[mode]}.\n"
+        "Сменить: /orderwidget admins | all | off\n"
+        "Посмотреть любой заказ: /mywidget <id заказа>")
