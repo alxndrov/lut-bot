@@ -642,7 +642,14 @@
     if (demo || !window.playerjs) return;
     try {
       var p = player = new playerjs.Player(document.getElementById('lesson-video'));
+      // Плеер Bunny (зарубежный CDN) не ответил за 20 с — в журнал: видно, у кого видео
+      // не доходит без VPN (кто — id из Telegram, страница/скрипты при этом загрузились)
+      var uid = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user && tg.initDataUnsafe.user.id) || '?';
+      var readyTimer = setTimeout(function () {
+        if (player === p && !playerReady) __appLog('video', 'player not ready 20s ' + key + ' user=' + uid);
+      }, 20000);
       p.on('ready', function () {
+        clearTimeout(readyTimer);
         if (player !== p) return;
         playerReady = true;
         if (pendingSeek !== null) { var at = pendingSeek; pendingSeek = null; seekTo(at); }
