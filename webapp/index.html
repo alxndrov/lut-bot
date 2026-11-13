@@ -463,6 +463,12 @@
       });
       h += '</div>';
     }
+    (l.links || []).forEach(function (k) {
+      h += '<p class="eyebrow section-title">' + esc(k.title) + '</p><div class="files">' +
+           '<button class="pdf" type="button" data-link="' + esc(k.url) + '"><span class="n">↓</span>' +
+           '<span class="t">Скачать с Яндекс Диска</span><span class="act">' + esc(k.size || '') + '</span></button></div>' +
+           (k.note ? '<p class="note">' + esc(k.note) + '</p>' : '');
+    });
     var files = l.files || [];
     if (files.length) {
       h += '<p class="eyebrow section-title">' + (files.length > 1 ? 'Файлы урока' : 'Файл урока') + '</p><div class="files">';
@@ -787,6 +793,10 @@
     else if (el.hasAttribute('data-back')) { back(); }
     else if (el.hasAttribute('data-fs')) { haptic(); fsOn ? fsExit() : fsEnter(); }
     else if (el.hasAttribute('data-seek')) { haptic(); seekTo(+el.getAttribute('data-seek') || 0); }
+    else if (el.hasAttribute('data-link')) {
+      haptic(); var url = el.getAttribute('data-link');
+      try { tg && tg.openLink ? tg.openLink(url) : window.open(url, '_blank'); } catch (e) { window.open(url, '_blank'); }
+    }
     else if (el.hasAttribute('data-file')) { sendFiles({ key: el.getAttribute('data-file') }); }
     else if (el.hasAttribute('data-lesson-files')) { sendFiles({ lesson: el.getAttribute('data-lesson-files') }); }
     else if (el.hasAttribute('data-soon')) { toast(data.open ? 'Скоро добавим' : 'Откроется ' + data.open_date); }

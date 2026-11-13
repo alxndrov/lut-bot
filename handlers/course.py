@@ -514,6 +514,7 @@ async def _app_state(user: dict, bot_username: str, preview_open: bool = False) 
                 "files": [{"key": k, "title": files[k]["title"],
                            "ext": files[k]["file_name"].rsplit(".", 1)[-1].upper()[:4]}
                           for k in lesson_files],
+                "links": svc.LESSON_LINKS.get((slug, n), []) if show else [],
             })
         sections.append({
             "slug": slug, "title": title, "name": program["name"], "lead": program["lead"],
