@@ -38,6 +38,7 @@ TAB = 'База'
 PERIOD = 900
 LAST_ROW = 1000          # до этой строки в таблице заданы формат, списки и формула №
 SKIP_USERNAMES = {'ncomonetasupport'}   # аккаунт поддержки, не покупатель
+SKIP_IDS = {8861222517}                # тестовый аккаунт Дани («Игнат»)
 
 COURSE, PHYSICAL, DIGITAL, OTHER = 'Курс', 'Физтовар', 'Цифровой товар', 'Не определено'
 CATEGORY = {'physical': PHYSICAL, 'digital': DIGITAL, 'infobiz': COURSE}
@@ -157,7 +158,7 @@ def build(data: dict) -> dict[int, dict]:
     leads = {}
     for uid, items in signals.items():
         user = users.get(uid)
-        if (not user or uid in config.ADMIN_IDS
+        if (not user or uid in config.ADMIN_IDS or uid in SKIP_IDS
                 or (user.get('username') or '').lower() in SKIP_USERNAMES):
             continue   # нет в users — человек удалил данные (/forget)
         open_items = [s for s in items if not (
@@ -247,7 +248,7 @@ def plan(sheet: list[list[str]], leads: dict[int, dict], tracked: set[int]):
             if lead['note']:
                 updates.append({'range': f'N{n}', 'values': [[_text(lead['note'])]]})
             remember.append(uid)
-    # /forget: человека больше нет в базе — убираем его строку целиком
+    # /forget или аккаунт в исключениях: человека нет в leads — убираем его строку целиком
     for uid in tracked:
         n = by_id.get(uid)
         if uid not in leads and n:

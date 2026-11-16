@@ -84,6 +84,15 @@ class LeadsSheetTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(forget, [1])
         self.assertEqual(updates, [{'range': 'B2:N2', 'values': [[''] * 13]}])
 
+    async def test_skipped_test_account_row_is_cleared(self):
+        with patch.object(svc, 'SKIP_IDS', {1}):
+            leads = svc.build(await svc.collect())
+        self.assertNotIn(1, leads)
+        row = ['1', '@anna', 'U1', '1', 'Курс', 'x', 'Открыл курс', '04.11.2026', '01.11.2026']
+        updates, _, forget, _ = svc.plan([row], leads, {1, 2})
+        self.assertEqual(forget, [1])
+        self.assertIn({'range': 'B2:N2', 'values': [[''] * 13]}, updates)
+
     async def test_product_view_recorded_and_forgotten(self):
         await db.record_product_view(9, 10)
         await db.record_product_view(9, 10)
