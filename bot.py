@@ -19,6 +19,7 @@ from services.finance_reports import report_loop
 from services.pending_report import pending_report_loop
 from services.finance_sheet import finance_sync_loop
 from services.metrics_sheet import metrics_sync_loop
+from services.leads_sheet import leads_sync_loop
 from services.funnel import funnel_worker
 from services.review_push import review_push_worker
 from services.cdek_tracker import cdek_tracking_worker
@@ -87,6 +88,7 @@ async def main():
 
     asyncio.create_task(finance_sync_loop())
     asyncio.create_task(metrics_sync_loop())
+    asyncio.create_task(leads_sync_loop())   # «Миша Стор база заинтересованных»
     asyncio.create_task(daily_report_loop(bot))
     asyncio.create_task(funnel_worker(bot))
     asyncio.create_task(review_push_worker(bot))

@@ -593,6 +593,18 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE course_options ADD COLUMN call_bonus INTEGER NOT NULL DEFAULT 0")
         except Exception:
             pass
+        # Кто открывал карточку товара (не курса) — для таблицы заинтересованных
+        # (services/leads_sheet.py). Строка на человека и товар.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS product_views (
+                user_id    INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                first_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                views      INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (user_id, product_id)
+            )
+        """)
         # Кто открывал курс (экран в боте или приложение) — для «смотрели, но не купили».
         # Строка на человека: первый и последний раз, сколько раз, откуда.
         await db.execute("""
@@ -5086,6 +5098,18 @@ async def record_course_view(user_id: int, source: str):
         await db.commit()
 
 
+async def record_product_view(user_id: int, product_id: int):
+    """Открыл карточку товара в каталоге (кнопка или виджет)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO product_views (user_id, product_id) VALUES (?, ?)
+               ON CONFLICT(user_id, product_id) DO UPDATE SET last_at = CURRENT_TIMESTAMP,
+                   views = views + 1""",
+            (user_id, product_id),
+        )
+        await db.commit()
+
+
 async def get_course_lookers(since: str | None = None, exclude: list[int] | None = None) -> list[dict]:
     """Смотрели курс, но так ничего и не купили (нет ни одного раздела).
     since — только те, кто впервые открыл курс начиная с этого момента (UTC).
@@ -5609,7 +5633,8 @@ async def orders_in_progress(user_id: int) -> list[int]:
 # видео, неоплаченные корзины и переходы к оплате, email.
 FORGET_DELETE = ("support_messages", "reviews", "funnel_queue", "review_push_queue",
                  "course_nudges", "course_views", "course_review_requests", "course_orders",
-                 "waitlist_entries", "bonus_reviews", "channel_access", "pending_deliveries")
+                 "waitlist_entries", "bonus_reviews", "channel_access", "pending_deliveries",
+                 "product_views")
 
 
 async def forget_user(user_id: int) -> None:

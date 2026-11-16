@@ -43,6 +43,10 @@ async def cb_product(callback: CallbackQuery, state: FSMContext):
         await send_course(callback.message, callback.from_user.id)
         return
 
+    # Для таблицы заинтересованных: кто смотрел товар (курс пишется в course_views)
+    if not admin:
+        await db.record_product_view(callback.from_user.id, product_id)
+
     # Товар «из наличия»: показываем, что осталось; распроданный — не продаём
     stock_line = ""
     variants = await db.get_product_variants(product_id) if db.is_stock_product(product) else []

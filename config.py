@@ -174,6 +174,8 @@ GOOGLE_CREDENTIALS_FILE: str = os.getenv("GOOGLE_CREDENTIALS_FILE", "google-serv
 EARLY_PAYOUTS: float = float(os.getenv("EARLY_PAYOUTS", "0"))
 GOOGLE_SHEET_FINANCE_TAB: str = os.getenv("GOOGLE_SHEET_FINANCE_TAB", "Финансы")
 METRICS_SHEET_ID: str = os.getenv("METRICS_SHEET_ID", "")
+# «Миша Стор база заинтересованных»: кто интересовался и не купил (services/leads_sheet.py)
+LEADS_SHEET_ID: str = os.getenv("LEADS_SHEET_ID", "1pylb-CN-6PsII9bMDnUhGGAtwmGV3vZTw3dAb9H8Op8")
 GSHEETS_ENABLED: bool = bool(GOOGLE_SHEET_ID)
 DAILY_REPORT_HOUR_MSK: int = int(os.getenv("DAILY_REPORT_HOUR_MSK", "9"))
 
