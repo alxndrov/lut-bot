@@ -46,6 +46,58 @@ _last_alert = 0.0
 _lava_polled = [0.0]
 
 
+def payment_method_keyboard(order_num: str, amount: int, name: str,
+                            kind: str) -> InlineKeyboardMarkup:
+    """Способы оплаты, показанные в боте до перехода на платёжную страницу.
+
+    Для цифровых товаров выбор фиксирует российский поток PayAnyWay либо
+    иностранный поток lava.top. Физические товары принадлежат отдельному
+    продавцу и в обоих случаях идут в его Prodamus-магазин.
+    """
+    foreign_via = "lava" if kind in ("c", "d") and config.LAVA_ENABLED else "pd"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="💳 Карта РФ или СБП",
+            url=paylinks.link(order_num, amount, name,
+                              via="paw" if kind in ("c", "d") else "pd"))],
+        [InlineKeyboardButton(
+            text="🌍 Иностранный банк",
+            url=paylinks.link(order_num, amount, name, via=foreign_via))],
+    ])
+
+
+@router.callback_query(F.data.startswith("paymethod:"))
+async def cb_payment_method(callback: CallbackQuery):
+    """Показывает выбор платёжного потока непосредственно в боте."""
+    try:
+        _, order_num, amount_s = callback.data.split(":", 2)
+        order_type, user_id_s, product_id_s = order_num.split("_", 2)
+        amount = int(amount_s)
+        if int(user_id_s) != callback.from_user.id:
+            raise ValueError("чужой заказ")
+        if order_type not in ("c", "d"):
+            raise ValueError("для этого заказа выбор не нужен")
+    except (ValueError, TypeError):
+        await callback.answer("Ссылка на заказ устарела", show_alert=True)
+        return
+
+    name = "Заказ"
+    if order_type == "c":
+        option = await db.get_course_option(int(product_id_s))
+        if option:
+            name = option["title"]
+    else:
+        product = await db.get_product(int(product_id_s))
+        if product:
+            name = product["name"]
+
+    await callback.answer()
+    await callback.message.answer(
+        "Выберите способ оплаты:",
+        reply_markup=payment_method_keyboard(order_num, amount, name, order_type),
+    )
+
+
 async def current_provider(kind: str = "c") -> str:
     """Куда ведут ссылки сейчас. Схема Дани (23.10.2026): цифра (курс, LUT) —
     PayAnyWay Миши, физтовары ('p') — Prodamus Дани. Настройка /payments
@@ -282,6 +334,24 @@ async def handle_pay(request: web.Request) -> web.Response:
         return _page("Ссылка не работает",
                      "Похоже, ссылка повреждена. Вернитесь в бот и нажмите «Оплатить» ещё раз.",
                      bot_username, status=400)
+
+    if link['via'] in ('offer_paw', 'offer_lava'):
+        from services import course_outreach
+        if not await course_outreach.payment_allowed(link):
+            return _page('Срок спеццены завершился',
+                'Предложение действовало до 7 ноября, 23:59 МСК. Актуальная стоимость — в разделе «Курс» в боте.',
+                bot_username, status=410)
+        await course_outreach.event(link['user_id'], 'pay',
+            f"{link['name']}; {link['amount']} ₽; {link['via']}")
+        if link['via'] == 'offer_lava':
+            if not config.LAVA_ENABLED:
+                return _page('Оплата временно недоступна', 'Попробуйте позже.', bot_username, status=503)
+            return await _lava_page(request, link, bot_username)
+        if not config.PAYANYWAY_ENABLED:
+            return _page('Оплата временно недоступна', 'Попробуйте позже.', bot_username, status=503)
+        url = await _payanyway_url(link, f'https://t.me/{bot_username}')
+        await db.record_pay_click(link['order_num'], link['user_id'], link['amount'], link['name'], 'payanyway')
+        raise web.HTTPFound(url)
 
     # Заказ физтовара уже оплачен — повторный переход по старой кнопке не
     # должен привести ко второй оплате

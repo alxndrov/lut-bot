@@ -28,7 +28,9 @@ async def review_push_worker(bot: Bot):
             for push in due:
                 text = push.get("review_push_text") or DEFAULT_TEXT
                 try:
-                    await bot.send_message(push["user_id"], text)
+                    sent = await bot.send_message(push["user_id"], text)
+                    from services import course_outreach
+                    await course_outreach.remember_reply(push['user_id'], sent.message_id, 'review')
                     logger.info(
                         f"review_push sent: user={push['user_id']} "
                         f"product={push['product_id']} push_id={push['id']}"

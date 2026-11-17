@@ -153,7 +153,8 @@ async def course_screen(user_id: int) -> tuple[str, InlineKeyboardMarkup] | None
             else:
                 label = "Докупить " + o["title"] if owned else o["title"]
             rows.append([InlineKeyboardButton(
-                text=f"💳 {label} · {svc.rub(price)}", url=_payment_url(o, user_id, price))])
+                text=f"💳 {label} · {svc.rub(price)}",
+                callback_data=f"course:paymethod:{o['id']}:{price}")])
         if rows and config.LAVA_ENABLED and config.PAY_BASE_URL:
             rows.append([InlineKeyboardButton(text="🌍 Картой зарубежного банка (в $)",
                                               callback_data="course:foreign")])
@@ -206,6 +207,27 @@ async def cb_course_foreign(callback: CallbackQuery):
         "На странице оплаты укажите email: туда придёт подтверждение.\n\n"
         "<i>Pay by a non-Russian card in USD. Enter your email on the payment page.</i>",
         parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@router.callback_query(F.data.startswith("course:paymethod:"))
+async def cb_course_paymethod(callback: CallbackQuery):
+    try:
+        _, _, option_id_s, price_s = callback.data.split(":", 3)
+        option_id, price = int(option_id_s), int(price_s)
+    except (ValueError, TypeError):
+        await callback.answer("Ссылка на оплату устарела", show_alert=True)
+        return
+    option = await db.get_course_option(option_id)
+    if not option:
+        await callback.answer("Вариант курса больше недоступен", show_alert=True)
+        return
+    from handlers.pay_router import payment_method_keyboard
+    await callback.answer()
+    await callback.message.answer(
+        "Выберите способ оплаты:",
+        reply_markup=payment_method_keyboard(
+            f"c_{callback.from_user.id}_{option_id}", price, option["title"], "c"),
+    )
 
 
 async def send_course(message: Message, user_id: int) -> bool:

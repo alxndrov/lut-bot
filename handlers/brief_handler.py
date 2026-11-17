@@ -28,7 +28,7 @@ def _payment_keyboard(product: dict, user_id: int, quantity: int = 1,
     quantity — число позиций (клиент мог добавить ещё через повтор опроса).
     total/name — переопределение суммы/названия для смешанного заказа
     (несколько разных товаров), иначе считаются по одному product."""
-    # Физические товары — отдельный магазин Prodamus
+    # Физические товары всегда оплачиваются в отдельном магазине Prodamus.
     if not (config.PRODAMUS_SHOP_URL_PHYSICAL and user_id and product):
         return None
     quantity = max(1, quantity)

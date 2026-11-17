@@ -35,6 +35,8 @@ logging.basicConfig(
 
 async def main():
     await db.init_db(existing_cdek_contract=OLD_CONTRACT or CURRENT_CONTRACT)
+    from services import course_outreach
+    await course_outreach.init()
 
     bot = Bot(token=config.BOT_TOKEN)
     dp = Dispatcher(storage=MemoryStorage())
@@ -89,6 +91,7 @@ async def main():
     asyncio.create_task(finance_sync_loop())
     asyncio.create_task(metrics_sync_loop())
     asyncio.create_task(leads_sync_loop())   # «Миша Стор база заинтересованных»
+    asyncio.create_task(course_outreach.sync_loop())
     asyncio.create_task(daily_report_loop(bot))
     asyncio.create_task(funnel_worker(bot))
     asyncio.create_task(review_push_worker(bot))

@@ -11,7 +11,7 @@ from aiogram.dispatcher.event.bases import UNHANDLED
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (Message, InlineKeyboardMarkup, InlineKeyboardButton,
+from aiogram.types import (Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
                            BufferedInputFile)
 
 import config
@@ -62,7 +62,8 @@ async def relay_media(message: Message, to_bot: Bot, chat_id: int):
 
 async def notify_admins(message: Message, header: str, user_id: int,
                         bot_token: str | None = None, order: dict | None = None,
-                        extra_rows: list | None = None) -> bool:
+                        extra_rows: list | None = None,
+                        recipient_ids: list[int] | None = None) -> bool:
     """Шапка + само сообщение клиента всем админам в malimadmins.
 
     Если у клиента есть заказ, вопрос уходит ОТВЕТОМ на карточку этого
@@ -79,11 +80,11 @@ async def notify_admins(message: Message, header: str, user_id: int,
     ok = False
     bot = Bot(token=bot_token or config.WAITLIST_BOT_TOKEN)
     try:
-        for admin_id in config.ADMIN_IDS:
+        for admin_id in (config.ADMIN_IDS if recipient_ids is None else recipient_ids):
             try:
                 card = await db.order_card_in_chat(order["id"], admin_id) if order else None
                 if message.text:
-                    sent = await bot.send_message(admin_id, f"{header}\n\n{message.text}",
+                    sent = await bot.send_message(admin_id, f"{header}\n\n{escape(message.text)}",
                                                   parse_mode="HTML", reply_markup=kb,
                                                   reply_to_message_id=card)
                     await db.add_support_message(admin_id, sent.message_id, user_id)
@@ -100,7 +101,7 @@ async def notify_admins(message: Message, header: str, user_id: int,
                 # Карточку могли удалить — тогда шлём без привязки, лишь бы дошло
                 logger.error(f"support: notify admin {admin_id} failed: {e}")
                 try:
-                    text = f"{header}\n\n{message.text}" if message.text else header
+                    text = f"{header}\n\n{escape(message.text)}" if message.text else header
                     sent = await bot.send_message(admin_id, text, parse_mode="HTML",
                                                   reply_markup=kb)
                     await db.add_support_message(admin_id, sent.message_id, user_id)
@@ -181,9 +182,77 @@ def client_header(message: Message, title: str, extra: str = "") -> str:
     return header
 
 
+@router.callback_query(F.data == "course:question")
+async def cb_course_question(callback: CallbackQuery, state: FSMContext):
+    from services import course_outreach
+    context = await course_outreach.context(callback.from_user.id)
+    await course_outreach.event(callback.from_user.id, 'question')
+    await callback.answer()
+    await state.set_state(SupportState.waiting_text)
+    await state.update_data(course_outreach=bool(context))
+    sent = await callback.message.answer(
+        "Напишите вопрос о курсе — ответим прямо здесь.\n\nОтмена — /cancel.")
+    await course_outreach.remember_reply(callback.from_user.id, sent.message_id, 'course')
+
+
+async def _relay_course_reply(message: Message, context: dict, explicit_course=False) -> bool:
+    from services import course_outreach
+    order, hint = await order_hint(message.from_user.id)
+    topic = await course_outreach.reply_topic(message, context, explicit_course, order)
+    kind = {'course':'reply', 'review':'product_review', 'neutral':'neutral_reply'}[topic]
+    await course_outreach.event(message.from_user.id, kind,
+        message.text or message.caption or f'Вложение: {message.content_type}',
+        key=f'reply:{message.chat.id}:{message.message_id}')
+    recipient = context["recipient_id"]
+    if recipient not in config.ADMIN_IDS:
+        await message.answer("⚠️ Не получилось отправить, попробуйте ещё раз чуть позже.")
+        return False
+    extra_rows = None
+    if topic == 'review':
+        push = await db.recent_review_push(message.from_user.id)
+        if push and push.get('order_id'):
+            asked = await db.get_order(push['order_id'])
+            if asked:
+                order, hint = asked, order_line(asked)
+        review_id = await _save_review(message, order, (order or {}).get('product_id'))
+        if review_id:
+            pending = await db.pending_review_push(message.from_user.id)
+            if pending and pending.get('order_id') == (order or {}).get('id'):
+                await db.drop_review_push(pending['id'])
+        if review_id and (message.text or message.caption):
+            from handlers.reviews import publish_row
+            extra_rows = [publish_row(review_id, False)]
+        title = '⭐️ <b>Отзыв о покупке</b>'
+    elif topic == 'course':
+        title = '💬 <b>Ответ на сообщение о курсе</b>'
+    else:
+        title = '💬 <b>Сообщение клиента — тема не определена</b>'
+    ok = await notify_admins(
+        message, client_header(message, title, hint if topic != 'course' else ''),
+        message.from_user.id, recipient_ids=[recipient], extra_rows=extra_rows,
+        order=order if topic == 'review' else None)
+    await message.answer(("Спасибо за отзыв! 🙏 Передал команде." if topic == 'review' else
+                         "✅ Передал ваше сообщение — ответим здесь же.") if ok else
+                         "⚠️ Не получилось отправить, попробуйте ещё раз чуть позже.")
+    return ok
+
+
+@router.callback_query(F.data == 'outreach:offer')
+async def cb_outreach_offer(callback: CallbackQuery):
+    from services import course_outreach
+    await course_outreach.options_screen(callback)
+
+
+@router.callback_query(F.data.startswith('outreach:option:'))
+async def cb_outreach_option(callback: CallbackQuery):
+    from services import course_outreach
+    await course_outreach.option_screen(callback)
+
+
 @router.message(Command("help"))
 async def cmd_help(message: Message, state: FSMContext):
     await state.set_state(SupportState.waiting_text)
+    await state.update_data(course_outreach=False)
     await message.answer(
         "🆘 <b>Поддержка</b>\n\n"
         "Напишите ваш вопрос одним сообщением — я передам его команде, "
@@ -204,6 +273,11 @@ async def cmd_support_cancel(message: Message, state: FSMContext):
 async def on_support_message(message: Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
+    from services import course_outreach
+    context = await course_outreach.context(message.from_user.id)
+    if context and (data.get("course_outreach") or not data.get("pending_pid")):
+        await _relay_course_reply(message, context, explicit_course=bool(data.get('course_outreach')))
+        return
     order, hint = await order_hint(message.from_user.id)
     # Вопрос задан из-под незавершённого заказа — показываем, про какой
     if data.get("pending_pid"):
@@ -268,6 +342,11 @@ async def on_free_message(message: Message, state: FSMContext):
         return UNHANDLED
 
     user_id = message.from_user.id
+    from services import course_outreach
+    context = await course_outreach.context(user_id)
+    if context:
+        await _relay_course_reply(message, context)
+        return
     push = await db.recent_review_push(user_id)
     support_at = await db.recent_support_contact(user_id)
     # Было и то и другое — считаем продолжением того, что случилось позже

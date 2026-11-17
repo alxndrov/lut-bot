@@ -66,8 +66,10 @@ async def ask_policy(message: Message, renewed: bool = False):
         text += (f'\n\nКак мы обрабатываем и защищаем данные — в '
                  f'<a href="{config.PRIVACY_POLICY_URL}">политике обработки персональных данных</a>.')
     text += ("\n\n<i>Продавцы: самозанятые " + MISHA["short"] + f" (ИНН {MISHA['inn']}) — "
-             "цифровые товары и курс, " + DANYA["short"] + f" (ИНН {DANYA['inn']}) — изделия "
-             f"3D-печати. Связь: {CONTACT}</i>")
+             "цифровые товары и курс. Связь по цифровым товарам и курсу: "
+             f"{CONTACT}.\n"
+             + DANYA["short"] + f" (ИНН {DANYA['inn']}) — изделия 3D-печати. "
+             "Связь по физическим товарам: d.alxndrov@gmail.com</i>")
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True,
                          reply_markup=policy_keyboard())
 
@@ -79,10 +81,15 @@ class PolicyGate(BaseMiddleware):
     давал или удалил данные через /forget — обычный экран."""
 
     async def __call__(self, handler, event: CallbackQuery, data):
-        if (config.POLICY_REQUIRED and not (event.data or "").startswith(("policy:", "forget:"))
+        if (config.POLICY_REQUIRED and not (event.data or "").startswith(("policy:", "forget:", "course:question"))
                 and event.from_user.id not in ADMIN_IDS):
             status = await db.policy_status(event.from_user.id)
             if status != "ok":   # 'old' — давал прежнему оператору, 'none' — не давал или /forget
+                if (event.data or '').startswith('outreach:'):
+                    from services import course_outreach
+                    await course_outreach.event(event.from_user.id, 'offer',
+                        'Переход к предложению; требуется подтверждение документов', f'callback:{event.id}')
+                    await db.set_pending_payload(event.from_user.id, 'course_outreach')
                 await event.answer()
                 await ask_policy(event.message, renewed=status == "old")
                 return None
@@ -155,6 +162,10 @@ async def cb_policy_accept(callback: CallbackQuery):
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
+    if payload == 'course_outreach':
+        from services import course_outreach
+        await course_outreach.options_screen(callback)
+        return
     if payload == "course":
         from handlers.course import send_course
         await send_course(callback.message, callback.from_user.id)

@@ -6,8 +6,10 @@
 import logging
 import re
 from datetime import datetime, timedelta, timezone
+from html import escape
 
 from aiogram import Router, F
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -198,8 +200,6 @@ async def on_expense_payer(callback: CallbackQuery, state: FSMContext):
     name = f"@{u.username}" if u.username else (u.first_name or f"id:{u.id}")
     expense_id = await db.add_expense(category, amount, comment, u.id, name, paid_by=paid_by,
                                       purpose=data.get("purpose"))
-    await callback.answer("Записано")
-    await message.edit_reply_markup(reply_markup=None)
     await state.clear()
 
     from services.gsheets import request_expense_append
@@ -207,15 +207,33 @@ async def on_expense_payer(callback: CallbackQuery, state: FSMContext):
     request_expense_append(f"exp-{expense_id}", datetime.now(MSK).strftime("%d.%m.%Y %H:%M"),
                            amount, sheet_comment)
 
-    tail = f"\n💬 {comment}" if comment else ""
-    await message.answer(
-        f"✅ Записал расход\n\n🧾 <b>{category}</b> — <b>{amount:,.2f} ₽</b>{tail}\n"
-        f"На что: {db.PURPOSES.get(data.get('purpose') or 'physical')}\nОплатил: {paid_by}",
-        parse_mode="HTML",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"exp_del:{expense_id}")
-        ]]),
+    preview = comment[:3500] + ("…" if len(comment) > 3500 else "")
+    tail = f"\n💬 {escape(preview)}" if preview else ""
+    purpose = db.PURPOSES.get(data.get("purpose"), db.PURPOSES["physical"])
+    details = (
+        f"<b>{escape(category)}</b> — <b>{amount:,.2f} ₽</b>{tail}\n"
+        f"На что: {purpose}\nОплатил: {escape(paid_by)}"
     )
+    try:
+        await callback.answer("Записано")
+        await message.edit_reply_markup(reply_markup=None)
+        await message.answer(
+            f"✅ Записал расход\n\n🧾 {details}",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="🗑 Удалить", callback_data=f"exp_del:{expense_id}")
+            ]]),
+        )
+    finally:
+        for admin_id in set(config.ADMIN_IDS) - {u.id}:
+            try:
+                await callback.bot.send_message(
+                    admin_id, f"🧾 <b>Новый расход</b>\nВнёс: {escape(name)}\n\n{details}",
+                    parse_mode="HTML",
+                )
+            except TelegramAPIError as exc:
+                logger.warning("Расход %s: не удалось уведомить админа %s: %s",
+                               expense_id, admin_id, exc)
 
 
 @router.callback_query(F.data.startswith("exp_del:"))
