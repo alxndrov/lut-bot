@@ -102,11 +102,11 @@ class CourseOfferTest(unittest.IsolatedAsyncioTestCase):
     async def test_pay_link_checks_offer_and_records_click(self):
         where, notify = await self._open()
         self.assertEqual(where, "https://paw/x")
-        self.assertIn("Открыл ссылку со скидкой", notify.await_args.args[1])
+        notify.assert_not_awaited()   # о переходах пишет handle_pay (_click_notice), не _offer_pay
         self.assertEqual((await db.get_pay_click("c_1_1"))["amount"], 4490)
-        where, notify = await self._open()                       # второй клик — без уведомления
+        where, notify = await self._open()
         self.assertEqual(where, "https://paw/x")
-        notify.assert_not_awaited()
+        self.assertEqual((await db.get_pay_click("c_1_1"))["clicks"], 2)
         self.assertEqual((await self._open(now="2026-12-01 00:01"))[0], 410)   # срок вышел
         self.assertEqual((await self._open(amount=100))[0], 410)              # чужая сумма
         self.assertEqual((await self._open(order="c_2_1"))[0], 410)           # другой человек

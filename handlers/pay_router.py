@@ -327,6 +327,58 @@ async def check_lava_payment(bot: Bot, row: dict):
         logger.exception(f"lava: чек за {row['id']} не заведён: {e}")
 
 
+# Кто открывает ссылку не сам, а ради превью (Telegram, WhatsApp, VK и т.п.):
+# такой «переход» не считаем, не ведём в оплату и админам о нём не пишем
+_PREVIEW_UA = ("bot", "crawler", "spider", "preview", "facebookexternalhit", "whatsapp",
+               "vkshare", "skypeuripreview", "slack", "discord", "curl", "python-")
+_ROUTES = {"": "как в /payments", "paw": "PayAnyWay", "pd": "Prodamus (зарубежная карта)",
+           "yk": "ЮKassa", "lava": "lava.top"}
+_bg: set = set()
+
+
+def _is_preview(request: web.Request) -> bool:
+    headers = getattr(request, "headers", None)
+    if headers is None:            # запрос без заголовков бывает только в тестах
+        return False
+    ua = headers.get("User-Agent", "").lower()
+    return request.method == "HEAD" or not ua or any(x in ua for x in _PREVIEW_UA)
+
+
+def _device(ua: str) -> str:
+    s = ua.lower()
+    os_ = next((name for key, name in (("iphone", "iPhone"), ("ipad", "iPad"),
+                                       ("android", "Android"), ("windows", "Windows"),
+                                       ("macintosh", "Mac"), ("linux", "Linux")) if key in s), "?")
+    app = next((name for key, name in (("telegram", "Telegram"), ("instagram", "Instagram"),
+                                       ("yabrowser", "Яндекс Браузер"), ("edg/", "Edge"),
+                                       ("firefox", "Firefox"), ("chrome", "Chrome"),
+                                       ("safari", "Safari")) if key in s), "")
+    return f"{os_} · {app}" if app else os_
+
+
+async def _click_notice(request: web.Request, link: dict):
+    """Каждый переход по ссылке на оплату — админам: чья ссылка, какой по
+    счёту переход и с какого устройства/IP (чтобы отличить свой проверочный
+    переход от клиента). Ошибки уведомления оплату не ломают."""
+    try:
+        click = await db.get_pay_click(link["order_num"])
+        n = (click["clicks"] + 1) if click else 1
+        user = await db.get_user(link["user_id"]) or {}
+        who = f"@{user['username']}" if user.get("username") else (
+            user.get("first_name") or f"id:{link['user_id']}")
+        via = link["via"]
+        route = ("личная скидка" if via.startswith("offer") else _ROUTES.get(via, via))
+        ip = (request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+              or request.remote or "?")
+        await _notify(request.app["bot"],
+                      f"👀 <b>Переход по ссылке на оплату</b> — {n}-й\n"
+                      f"🛍 {escape(link['name'])} — {link['amount']} ₽ · {escape(route)}\n"
+                      f"👤 Ссылка для {escape(who)}\n"
+                      f"📱 {escape(_device(request.headers.get('User-Agent', '')))} · IP {escape(ip)}")
+    except Exception as e:
+        logger.warning(f"pay: уведомление о переходе {link.get('order_num')} не ушло: {e}")
+
+
 async def handle_pay(request: web.Request) -> web.Response:
     bot_username = request.app.get("bot_username", "")
     link = paylinks.parse_token(request.match_info["token"])
@@ -334,6 +386,13 @@ async def handle_pay(request: web.Request) -> web.Response:
         return _page("Ссылка не работает",
                      "Похоже, ссылка повреждена. Вернитесь в бот и нажмите «Оплатить» ещё раз.",
                      bot_username, status=400)
+    if _is_preview(request):
+        return _page("Оплата заказа", f"{link['name']} — {link['amount']} ₽", bot_username)
+    # POST — это email на странице lava.top, не новый переход
+    if getattr(request, "headers", None) is not None and request.method == "GET":
+        task = asyncio.create_task(_click_notice(request, link))
+        _bg.add(task)
+        task.add_done_callback(_bg.discard)
 
     if link['via'] in ('offer_paw', 'offer_lava'):
         from services import course_outreach
@@ -424,15 +483,7 @@ async def _offer_pay(request: web.Request, link: dict, bot_username: str) -> web
         return _page("Скидка не действует",
                      problem + " Актуальная стоимость — в разделе «Курс» в боте.",
                      bot_username, status=410)
-    key = f"offer_click:{token}"
-    if not await db.get_setting(key):
-        await db.set_setting(key, datetime.now(timezone.utc).isoformat())
-        user = await db.get_user(link["user_id"]) or {}
-        who = f"@{user['username']}" if user.get("username") else f"id:{link['user_id']}"
-        await _notify(request.app["bot"],
-                      f"👀 <b>Открыл ссылку со скидкой</b>\n{escape(who)} — "
-                      f"{escape(link['name'])}, {link['amount']} ₽ (до "
-                      f"{course_offer._date_text(offer)})")
+    # О каждом переходе админам пишет handle_pay (_click_notice)
     if method == "lava":
         if not config.LAVA_ENABLED:
             return _page("Оплата временно недоступна", "Попробуйте позже.", bot_username, status=503)
