@@ -1034,7 +1034,10 @@ async def init_db(existing_cdek_contract: str | None = None):
         for col in ("delivered_at TIMESTAMP DEFAULT NULL", "cdek_final TEXT DEFAULT NULL",
                     "keep_until TIMESTAMP DEFAULT NULL", "cdek_actual_cost REAL DEFAULT NULL",
                     # cdek_return_cost — обратная накладная, если посылку не забрали
-                    "cdek_return_cost REAL DEFAULT NULL"):
+                    "cdek_return_cost REAL DEFAULT NULL",
+                    # keep_reminded_for — срок хранения, о котором уже напомнили
+                    # за 2 дня (продлит СДЭК срок — напомним о новом)
+                    "keep_reminded_for TEXT DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except Exception:
@@ -2720,6 +2723,12 @@ async def get_orders_cdek_cost_check(days: int | None = 60) -> list[dict]:
         db.row_factory = aiosqlite.Row
         async with db.execute(sql + " ORDER BY id", params) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_order_keep_reminded(order_id: int, keep: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET keep_reminded_for = ? WHERE id = ?", (keep, order_id))
+        await db.commit()
 
 
 async def set_order_keep_until(order_id: int, stamp: str | None):

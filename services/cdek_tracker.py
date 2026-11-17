@@ -26,6 +26,7 @@ ARRIVED_CODES = {
 }
 # Уже получена — сообщать о прибытии поздно, просто закрываем отслеживание
 FINAL_CODES = {"DELIVERED", "NOT_DELIVERED"}
+KEEP_REMIND_HOURS = 48            # за сколько до конца бесплатного хранения напомнить
 
 
 def _utc(stamp: str | None) -> str | None:
@@ -64,6 +65,78 @@ def _arrived_text(order: dict) -> str:
     return text
 
 
+def _hours_left(stamp_utc: str | None) -> float | None:
+    from datetime import datetime, timezone
+    try:
+        until = datetime.strptime(stamp_utc, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return (until - datetime.now(timezone.utc)).total_seconds() / 3600
+
+
+def _msk(stamp_utc: str) -> str:
+    from datetime import datetime, timedelta
+    d = datetime.strptime(stamp_utc, "%Y-%m-%d %H:%M:%S") + timedelta(hours=3)
+    return d.strftime("%d.%m")
+
+
+async def _who(order: dict) -> str:
+    user = await db.get_user(order["user_id"]) or {}
+    name = f"@{user['username']}" if user.get("username") else f"id:{order['user_id']}"
+    return name + (f" ({order['recipient_name']})" if order.get("recipient_name") else "")
+
+
+async def _notify_admins(text: str):
+    from handlers.prodamus_webhook import _send_notify
+    await _send_notify(None, text)
+
+
+async def _send_client(bot: Bot, order: dict, text: str):
+    try:
+        await bot.send_message(order["user_id"], text, parse_mode="HTML")
+        return True
+    except Exception as e:
+        logger.error(f"CDEK: не написать клиенту {order['user_id']}: {e}")
+        return False
+
+
+async def _remind_keep(bot: Bot, order: dict, keep: str):
+    """За 2 дня до конца бесплатного хранения — клиенту и админам."""
+    num = order.get("order_code") or ""
+    pvz = pvz_from_delivery(order.get("summary"))
+    text = (f"⏳ <b>Заказ {num} ждёт в пункте выдачи до {_msk(keep)}</b>\n\n"
+            "Осталось 2 дня бесплатного хранения — потом СДЭК отправит посылку обратно.\n")
+    if pvz:
+        text += f"\n📍 {pvz}"
+    if order.get("cdek_number"):
+        text += f"\nТрек-номер: <code>{order['cdek_number']}</code>"
+    text += "\n\nДля получения понадобится паспорт или код из приложения СДЭК."
+    sent = await _send_client(bot, order, text)
+    await _notify_admins(
+        f"⏳ <b>{num}</b> — {await _who(order)}: посылка лежит в пункте выдачи, бесплатное "
+        f"хранение до {_msk(keep)}. " + ("Клиенту напомнил." if sent else
+                                         "⚠️ Клиенту написать не удалось — напомните сами."))
+    await db.set_order_keep_reminded(order["id"], keep)
+    logger.info(f"CDEK: {num} — напомнил о сроке хранения до {keep}")
+
+
+async def _not_picked_up(bot: Bot, client, order: dict, codes):
+    """Посылку не забрали — СДЭК везёт её обратно: клиенту, админам,
+    и стоимость обратной накладной — в «Отложено на СДЭК»."""
+    num = order.get("order_code") or ""
+    await _save_return_cost(client, order, codes)
+    back = (await db.get_order(order["id"]) or {}).get("cdek_return_cost")
+    sent = await _send_client(bot, order, (
+        f"↩️ <b>Заказ {num} не забрали из пункта выдачи</b>\n\n"
+        "Срок хранения закончился, и СДЭК везёт посылку обратно к нам. "
+        "Если заказ ещё нужен — напишите в поддержку (/help), договоримся о повторной отправке."))
+    await _notify_admins(
+        f"↩️ <b>{num}</b> — {await _who(order)}: посылку не забрали, она едет обратно.\n"
+        + (f"Обратная накладная: {back:.2f} ₽ — учтена в «Отложено на СДЭК»." if back is not None
+           else "Стоимость обратной накладной бот добавит в «Отложено на СДЭК», когда СДЭК её начислит.")
+        + ("" if sent else "\n⚠️ Клиенту написать не удалось."))
+
+
 async def _check_once(bot: Bot):
     from services.cdek_accounts import client_for_order
 
@@ -88,6 +161,8 @@ async def _check_once(bot: Bot):
             when = _utc((info.get("status_dates") or {}).get(final))
             await db.set_order_final(order["id"], final, when)
             await _after_final(bot, order, final, when)
+            if final == "NOT_DELIVERED":
+                await _not_picked_up(bot, client, order, codes)
 
         elif order.get("arrived_notified_at"):
             # О прибытии уже сообщили — ждём, когда заберут. Срок хранения
@@ -95,6 +170,14 @@ async def _check_once(bot: Bot):
             keep = _utc(info.get("keep_free_until"))
             if keep and keep != order.get("keep_until"):
                 await db.set_order_keep_until(order["id"], keep)
+            keep = keep or order.get("keep_until")
+            left = _hours_left(keep)
+            arrived_ago = _hours_left(order.get("arrived_notified_at"))
+            # Сообщение о прибытии само говорит срок — сразу за ним не напоминаем
+            if (keep and keep != order.get("keep_reminded_for") and left is not None
+                    and 0 < left <= KEEP_REMIND_HOURS
+                    and (arrived_ago is None or arrived_ago <= -12)):
+                await _remind_keep(bot, order, keep)
 
         elif codes & ARRIVED_CODES:
             # Отмечаем сразу и в любом случае, иначе будем слать каждые полчаса
