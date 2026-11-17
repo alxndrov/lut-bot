@@ -3688,12 +3688,15 @@ async def get_purchases_in_range(dt_from: str, dt_to: str) -> list[dict]:
 
 
 async def get_purchases_by_month(month: str) -> list[dict]:
-    """Отдельные покупки за месяц ('ГГГГ-ММ', по МСК) — сверить с «Мой налог»."""
+    """Отдельные покупки за месяц ('ГГГГ-ММ', по МСК) — сверить с «Мой налог».
+    who — чей это чек (danya | misha, как holder_sql), tax — НПД с него
+    (6% от юрлица/ИП, иначе NPD_PERCENT)."""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT pu.id, pu.user_id, pu.created_at, pu.amount, pu.delivery_amount,
-                      pr.name AS product_name, u.username, u.first_name
+            f"""SELECT pu.id, pu.user_id, pu.created_at, pu.amount, pu.delivery_amount,
+                      pr.name AS product_name, u.username, u.first_name,
+                      {holder_sql()} AS who, pu.amount * {misha_tax_rate_sql()} AS tax
                FROM purchases pu
                LEFT JOIN products pr ON pr.id = pu.product_id
                LEFT JOIN users u ON u.user_id = pu.user_id
@@ -3702,6 +3705,16 @@ async def get_purchases_by_month(month: str) -> list[dict]:
             (month,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_refunds_by_month(month: str) -> float:
+    """Возвраты покупателям за месяц (по МСК) — уменьшают доход Дани в месяце
+    возврата (чек аннулируют с причиной «Возврат средств»)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COALESCE(SUM(amount), 0) FROM refunds "
+            "WHERE strftime('%Y-%m', datetime(created_at, '+3 hours')) = ?", (month,)) as cur:
+            return float((await cur.fetchone())[0])
 
 
 async def get_npd_payments_by_month(limit: int = 6) -> list[dict]:

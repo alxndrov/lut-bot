@@ -275,5 +275,44 @@ async def list_incomes(since: datetime, until: datetime, account: str = "danya")
         raise NpdError(f"нет связи с «Мой налог» ({type(e).__name__})") from e
 
 
+_charges_cache: dict[str, tuple[float, list[dict]]] = {}
+
+
+async def tax_charges(account: str = "danya", max_age: float = 15 * 60) -> list[dict]:
+    """Начисления НПД налоговой (раздел «Налоги» в «Мой налог»): по записи на
+    начисление — налог за месяц (type ACCRUED) или поправка за прошлый месяц
+    после аннулирования чека (REDUCED_CORRECTION и т.п.). taxPeriodId — за
+    какой месяц (202610), chargeDate — когда начислено (10-го следующего
+    месяца); к оплате в один срок идут все записи с одним chargeDate.
+    Кэш на 15 минут: налоговая отвечает медленно, а связь — через туннель."""
+    cached = _charges_cache.get(account)
+    if cached and time.time() - cached[0] < max_age:
+        return cached[1]
+    data = await _post("/taxes/history", {"oktmo": None}, token=await _token(account))
+    records = [r for r in (data.get("records") or []) if r.get("taxPeriodId")]
+    _charges_cache[account] = (time.time(), records)
+    return records
+
+
+def month_charges(records: list[dict], month: str) -> dict:
+    """Что налоговая начислила за месяц 'ГГГГ-ММ': {'accrued', 'charge_date',
+    'corrections' — поправки за прошлые месяцы в тот же срок, 'due' — к оплате
+    в этот срок, 'later' — поправки к этому месяцу, начисленные позже}.
+    None — если за месяц ещё не начисляли (до 10-го следующего месяца)."""
+    period = int(month.replace("-", ""))
+    main = [r for r in records if r["taxPeriodId"] == period and r.get("type") == "ACCRUED"]
+    if not main:
+        return None
+    date = main[0].get("chargeDate")
+    accrued = round(sum(float(r["taxAmount"]) for r in main), 2)
+    same_day = [r for r in records if r.get("chargeDate") == date and r not in main]
+    later = [r for r in records if r["taxPeriodId"] == period and r not in main
+             and (r.get("chargeDate") or "") > (date or "")]
+    return {"accrued": accrued, "charge_date": date,
+            "corrections": round(sum(float(r["taxAmount"]) for r in same_day), 2),
+            "due": round(accrued + sum(float(r["taxAmount"]) for r in same_day), 2),
+            "later": [(r.get("chargeDate"), round(float(r["taxAmount"]), 2)) for r in later]}
+
+
 async def print_url(uuid: str, account: str = "danya") -> str:
     return f"{API}/v1/receipt/{await inn(account)}/{uuid}/print"

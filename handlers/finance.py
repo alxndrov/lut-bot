@@ -722,23 +722,71 @@ def _msk_dt(ts: str | None) -> str:
         return ""
 
 
-def _npd_detail_lines(month: str, purchases: list[dict], assessment: dict | None) -> list[str]:
-    year, mm = month.split("-", 1) if "-" in month else ("", month)
-    total = sum(float(p["amount"]) for p in purchases)
-    accrued = total * _NPD_RATE
-    current = float(assessment["accrued"]) if assessment else accrued
-    paid = float(assessment["paid"]) if assessment else 0.0
-    source = "вручную" if assessment and assessment["manual"] else "авторасчёт"
+def _ddmm(date: str | None) -> str:
+    return f"{date[8:10]}.{date[5:7]}" if date and len(date) >= 10 else "?"
 
-    lines = [
-        f"🧾 <b>НПД за {mm}.{year}</b>",
-        f"Продаж: <b>{len(purchases)}</b> на <b>{total:,.2f} ₽</b>",
-        f"Сумма НПД: <b>{current:,.2f} ₽</b> · {source}",
-        f"Оплачено: <b>{paid:,.2f} ₽</b>",
-    ]
-    if assessment and assessment["manual"] and abs(current - accrued) >= 0.005:
-        lines.append(f"Автооценка бота: {accrued:,.2f} ₽")
+
+def _tax_office_lines(ch) -> list[str]:
+    """Строки «что начислила налоговая» по services.npd.month_charges."""
+    if isinstance(ch, str):          # ошибка связи — показываем причину
+        return [f"• Налоговая: не узнать — {ch}"]
+    if ch is None:
+        return ["• Налоговая: ещё не начисляла (начислит 10-го следующего месяца)"]
+    out = [f"• Налоговая {_ddmm(ch['charge_date'])}: начислено <b>{ch['accrued']:,.2f} ₽</b>"]
+    if abs(ch["corrections"]) >= 0.005:
+        out.append(f"   поправки за прошлые месяцы {ch['corrections']:+,.2f} ₽ → "
+                   f"к оплате <b>{ch['due']:,.2f} ₽</b>")
+    for date, amount in ch["later"]:
+        out.append(f"   поправка к этому месяцу {amount:+,.2f} ₽ — в начислении {_ddmm(date)}")
+    return out
+
+
+def _npd_detail_lines(month: str, purchases: list[dict], assessment: dict | None,
+                      refunds: float = 0.0, charges: dict | None = None) -> list[str]:
+    """Экран месяца НПД: отдельно Даня и Миша — у каждого свой «Мой налог».
+    Оценка бота — налог по нашим продажам; «Налоговая» — что реально
+    начислено (services.npd.tax_charges), когда «Мой налог» на связи."""
+    year, mm = month.split("-", 1) if "-" in month else ("", month)
+    charges = charges or {}
+    lines = [f"🧾 <b>НПД за {mm}.{year}</b>"]
+    for who, name in (("danya", config.PARTNER_NAME), ("misha", config.OWNER_NAME)):
+        mine = [p for p in purchases if p.get("who", "danya") == who]
+        total = sum(float(p["amount"]) for p in mine)
+        estimate = sum(float(p["tax"]) if p.get("tax") is not None else float(p["amount"]) * _NPD_RATE
+                       for p in mine)
+        back = refunds if who == "danya" else 0.0   # возвраты — физтовары, деньги у Дани
+        estimate -= back * _NPD_RATE
+        if not mine and not back and who not in charges:
+            continue
+        lines += ["", f"👤 <b>{name}</b> — продаж: <b>{len(mine)}</b> на <b>{total:,.2f} ₽</b>"
+                  + (f", возвраты −{back:,.2f} ₽" if back else "")]
+        lines.append(f"• Оценка бота: {estimate:,.2f} ₽")
+        if who in charges:
+            lines += _tax_office_lines(charges[who])
+        if who == "danya":
+            current = float(assessment["accrued"]) if assessment else estimate
+            paid = float(assessment["paid"]) if assessment else 0.0
+            source = "вручную" if assessment and assessment["manual"] else "авторасчёт"
+            lines.append(f"• В боте: <b>{current:,.2f} ₽</b> · {source}, оплачено <b>{paid:,.2f} ₽</b>")
     return lines
+
+
+async def _npd_charges(month: str) -> dict:
+    """Начисления налоговой за месяц по обоим кабинетам. Не дольше 25 секунд:
+    «Мой налог» ходит через туннель с домашнего компа и может не ответить."""
+    from services import npd
+    out = {}
+    for who in ("danya", "misha"):
+        try:
+            if not await npd.connected(who):
+                continue
+            records = await asyncio.wait_for(npd.tax_charges(who), 25)
+            out[who] = npd.month_charges(records, month)
+        except (asyncio.TimeoutError, TimeoutError):
+            out[who] = "«Мой налог» не ответил"
+        except Exception as e:
+            out[who] = str(e)[:120]
+    return out
 
 
 @router.callback_query(F.data.startswith("npd_detail:"))
@@ -748,9 +796,12 @@ async def cb_npd_detail(callback: CallbackQuery):
     if not await _admin_only(callback):
         return
     month = callback.data.split(":", 1)[1]
+    await callback.answer("Сверяю с «Мой налог»…")
     purchases = await db.get_purchases_by_month(month)
     assessment = await tax_account.assessment(month)
-    lines = _npd_detail_lines(month, purchases, assessment)
+    lines = _npd_detail_lines(month, purchases, assessment,
+                              refunds=await db.get_refunds_by_month(month),
+                              charges=await _npd_charges(month))
 
     rows = []
     if assessment:
@@ -769,7 +820,6 @@ async def cb_npd_detail(callback: CallbackQuery):
                                                   callback_data=f"npd_del:{p['id']}")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="cash_log")])
 
-    await callback.answer()
     await callback.message.edit_text(
         "\n".join(lines), parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),

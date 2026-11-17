@@ -250,7 +250,7 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         ]
         text = "\n".join(finance._npd_detail_lines('2026-09', purchases, None))
         self.assertLess(len(text), 4096)
-        self.assertIn('Продаж: <b>150</b>', text)
+        self.assertIn('продаж: <b>150</b>', text)
         self.assertNotIn('Очень длинное название товара', text)
         self.assertNotIn('buyer_with_a_long_name', text)
 
