@@ -101,6 +101,30 @@ class SettleTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(after["held"]["danya"], after["reserve"]["danya"], places=1)
         self.assertAlmostEqual(after["held"]["misha"], after["reserve"]["misha"], places=1)
 
+    async def test_fee_per_payment_to_kopeck_like_sheet(self):
+        """Заказ из двух товаров — одна оплата Prodamus: комиссия с суммы оплаты
+        (3 302 × 3,8% = 125,476 → 125,48), а не с каждой позиции (60,91 + 64,56).
+        Пол-копейки — вверх: 399 × 4,5% = 17,955 → 17,96. Как в листе cashflow."""
+        async with aiosqlite.connect(db.DB_PATH) as c:
+            await c.execute("DELETE FROM purchases")
+            for code, amount in (("pd-035", 1603), ("pd-035", 1699), ("paw-9", 399)):
+                await c.execute("INSERT INTO purchases (user_id, product_id, telegram_payment_id, amount, "
+                                "created_at) VALUES (7, 1, ?, ?, '2026-10-20 10:00:00')", (code, amount))
+            await c.commit()
+        with mock.patch.object(config, "PRODAMUS_FEE_PERCENT", 3.8), \
+             mock.patch.object(config, "PAYANYWAY_FEE_PERCENT", 4.5):
+            inc = await db.income_by_holder()
+        self.assertEqual(inc["danya"]["fee"], 125.48)
+        self.assertEqual(inc["misha"]["fee"], 17.96)
+        self.assertEqual(inc["misha"]["paw_fee"], 17.96)
+
+    async def test_cdek_reserve_in_kopecks(self):
+        with mock.patch.object(db, "get_cdek_account", mock.AsyncMock(return_value={
+                "paid": 0.0, "due": 739.9680000000008})):
+            st = await settle.state()
+        self.assertEqual(st["cdek_due"], 739.97)
+        self.assertEqual(st["reserve"]["danya"], round(st["tax"]["danya"] + 739.97, 2))
+
 
 if __name__ == "__main__":
     unittest.main()

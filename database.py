@@ -6008,33 +6008,53 @@ async def misha_tax_codes() -> dict[str, float]:
             return {str(code): float(rate) for code, rate in await cur.fetchall()}
 
 
+def _money(value: float) -> float:
+    """До копеек, 0,5 копейки — вверх (как money() в services/finance_sheet)."""
+    from decimal import Decimal, ROUND_HALF_UP
+    return float(Decimal(str(value)).quantize(Decimal(".01"), rounding=ROUND_HALF_UP))
+
+
 async def income_by_holder() -> dict:
     """Всё принятое и комиссия по тому, у кого лежат деньги, за всё время.
     {'danya': {'gross', 'fee'}, 'misha': {...}}; налог Миши — 'misha_tax'."""
     import config
+    from collections import defaultdict
     rate = _yk_fee_rate_sql()
     prodamus = float(config.PRODAMUS_FEE_PERCENT) / 100
-    out = {"danya": {"gross": 0.0, "fee": 0.0}, "misha": {"gross": 0.0, "fee": 0.0}}
+    out = {"danya": {"gross": 0.0, "fee": 0.0, "paw_fee": 0.0},
+           "misha": {"gross": 0.0, "fee": 0.0, "paw_fee": 0.0}}
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            f"""SELECT {holder_sql()} who, SUM(pu.amount),
-                       -- комиссия округляется по каждой оплате, как в листе cashflow
-                       SUM(ROUND(pu.amount * CASE WHEN pu.telegram_payment_id LIKE 'yk-%'
-                                              OR pu.telegram_payment_id LIKE 'paw-%'
-                                              OR pu.telegram_payment_id LIKE 'lava-%'
-                                              OR pu.telegram_payment_id LIKE 'b2b-%'
-                                            THEN {rate} ELSE {prodamus} END, 2)),
-                       SUM(CASE WHEN {holder_sql()} = 'misha'
-                                THEN pu.amount * {misha_tax_rate_sql()} ELSE 0 END),
-                       SUM(CASE WHEN pu.telegram_payment_id LIKE 'paw-%'
-                                THEN ROUND(pu.amount * {rate}, 2) ELSE 0 END)
-                FROM purchases pu {_YK_JOIN} GROUP BY who""") as cur:
-            misha_tax = 0.0
-            for who, gross, fee, tax, paw_fee in await cur.fetchall():
-                # paw_fee — начислена в прибыль, но PayAnyWay возьмёт её только при выводе
-                out[who] = {"gross": float(gross or 0), "fee": float(fee or 0),
-                            "paw_fee": float(paw_fee or 0)}
-                misha_tax += float(tax or 0)
+            f"""SELECT {holder_sql()} who, pu.telegram_payment_id, pu.amount,
+                       CASE WHEN pu.telegram_payment_id LIKE 'yk-%'
+                                 OR pu.telegram_payment_id LIKE 'paw-%'
+                                 OR pu.telegram_payment_id LIKE 'lava-%'
+                                 OR pu.telegram_payment_id LIKE 'b2b-%'
+                            THEN {rate} ELSE {prodamus} END,
+                       CASE WHEN {holder_sql()} = 'misha'
+                            THEN pu.amount * {misha_tax_rate_sql()} ELSE 0 END
+                FROM purchases pu {_YK_JOIN}""") as cur:
+            rows = await cur.fetchall()
+    # Комиссия — как в листе cashflow и как берут Prodamus/ЮKassa: с оплаты
+    # целиком (заказ из нескольких товаров — одна оплата), до копеек по
+    # правилам арифметики (0,5 копейки — вверх). Раньше округлялась каждая
+    # позиция отдельно и средствами SQLite — расходилось с листом на копейки.
+    per_payment = defaultdict(float)
+    misha_tax = 0.0
+    for who, tid, amount, fee_rate, tax in rows:
+        out[who]["gross"] += float(amount or 0)
+        per_payment[(who, str(tid or ""))] += float(amount or 0) * float(fee_rate or 0)
+        misha_tax += float(tax or 0)
+    for (who, tid), fee in per_payment.items():
+        fee = _money(fee)
+        out[who]["fee"] += fee
+        if tid.startswith("paw-"):
+            # начислена в прибыль, но PayAnyWay возьмёт её только при выводе
+            out[who]["paw_fee"] += fee
+    for who in ("danya", "misha"):
+        out[who]["fee"] = round(out[who]["fee"], 2)
+        out[who]["paw_fee"] = round(out[who]["paw_fee"], 2)
+    async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT COALESCE(SUM(amount), 0) FROM refunds") as cur:
             out["danya"]["refunds"] = float((await cur.fetchone())[0])   # возвраты — физтовары, у Дани
         async with db.execute("SELECT COALESCE(SUM(fee), 0) FROM paw_withdrawals") as cur:

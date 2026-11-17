@@ -67,7 +67,9 @@ async def state() -> dict:
     months = await tax_account.months()
     tax = {"danya": sum(r["accrued"] - r["paid"] for r in months),
            "misha": inc["misha_tax"] - npd_paid.get("misha", 0)}
-    cdek_due = cdek["due"]
+    # До копеек, как «Ещё отложено на СДЭК» в листе: в начислениях по старой
+    # формуле есть доли копейки (739,968), из-за них итог расходился с листом
+    cdek_due = db._money(cdek["due"])
     share = {"danya": s["partner_left"], "misha": s["owner_left"]}
     reserve = {"danya": tax["danya"] + cdek_due, "misha": tax["misha"] + paw_fee}
     # Как на листе: свободные деньги — то, что уже на руках после резервов;
