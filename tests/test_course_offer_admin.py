@@ -222,13 +222,13 @@ class OfferCommandTest(unittest.IsolatedAsyncioTestCase):
 class NotePlanTest(unittest.TestCase):
     def test_appends_to_existing_row_or_takes_empty_one(self):
         cells = {"B": "=HYPERLINK(...)", "C": "Дофа", "D": "9"}
-        sheet = [["1", "@a", "А", "7", "", "", "", "", "", "", "", "", "", "было"],
+        sheet = [["1", "@a", "А", "7", "", "", "", "", "", "", "", "было"],
                  ["2", "@d", "Дофа", "5"],
                  ["3"]]
         self.assertEqual(leads_sheet.note_plan(sheet, 5, "новое", cells),
-                         [{"range": "N3", "values": [["'новое"]]}])
+                         [{"range": "L3", "values": [["'новое"]]}])
         self.assertEqual(leads_sheet.note_plan(sheet, 7, "ещё", cells),
-                         [{"range": "N2", "values": [["'было\nещё"]]}])
+                         [{"range": "L2", "values": [["'было\nещё"]]}])
         self.assertEqual(leads_sheet.note_plan(sheet, 9, "первое", cells),
                          [{"range": "B4:D4", "values": [["=HYPERLINK(...)", "'Дофа", "9"]]},
-                          {"range": "N4", "values": [["'первое"]]}])
+                          {"range": "L4", "values": [["'первое"]]}])

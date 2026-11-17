@@ -22,7 +22,7 @@ lava.top (та же ссылка с via offer:<код>:paw|lava, см. pay_route
 
 События (открыл предложение, перешёл к оплате, купил) — по одному каждого
 вида на предложение — пишутся в course_offer_events и дописываются в колонку
-«Ответ и заметки» этого человека в таблице «База» (services/leads_sheet);
+«Заметки» (L) этого человека в таблице «База» (services/leads_sheet);
 что не записалось — повторяется вместе с выгрузкой «Базы» раз в 15 минут.
 
 Ту же ссылку делает и scripts/make_course_offer.py (с сервера, скидкой в %).
@@ -131,7 +131,7 @@ def _event_line(event: dict, offer: dict | None, option: dict | None) -> str:
 
 
 async def flush_events() -> None:
-    """Дописать незаписанные события в «Ответ и заметки». Ошибка — повторим позже."""
+    """Дописать незаписанные события в «Заметки» (L). Ошибка — повторим позже."""
     if not config.LEADS_SHEET_ID:
         return
     from services import leads_sheet

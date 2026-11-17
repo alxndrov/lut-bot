@@ -6,12 +6,12 @@
     B Telegram, C Имя, D Telegram ID, E Интерес, F Что именно,
     G Где остановился, H Последняя активность, I В боте с
 
-Колонки Дани — J Статус, K Следующий шаг, L Когда написать, M Первое
-сообщение, N Ответ и заметки — бот пишет только один раз, при добавлении
-строки (J и пометка о рассылке 05.11 в N), и ещё ставит J = «Купил», когда
-человек оплатил то, чем интересовался. В N бот ещё дописывает события по
-личным скидкам /offer (handlers/course_offer.py): открыл, перешёл к оплате,
-купил. A — формула номера, её не трогаем.
+Колонки Дани — J Статус, K Коммент, L Заметки — бот пишет только один
+раз, при добавлении строки (J и пометка о рассылке 05.11 в L), и ещё ставит
+J = «Купил», когда человек оплатил то, чем интересовался. В L бот ещё
+дописывает события по личным скидкам /offer (handlers/course_offer.py):
+открыл, перешёл к оплате, купил. Колонок в листе ровно A–L: правей писать
+нельзя, Sheets отвечает «exceeds grid limits». A — формула номера, её не трогаем.
 
 Источники (время в SQLite — UTC, в таблицу пишется дата по Москве):
 - course_views — открыл экран курса в боте или приложении;
@@ -48,6 +48,8 @@ CATEGORY = {'physical': PHYSICAL, 'digital': DIGITAL, 'infobiz': COURSE}
 PAY_KIND = {'c': COURSE, 'p': PHYSICAL, 'd': DIGITAL}
 # Чем дальше человек дошёл, тем выше этап; по нему выбирается «Интерес»
 STAGES = {'Открыл товар': 1, 'Открыл курс': 1, 'Заполнил анкету доставки': 2, 'Перешёл к оплате': 3}
+NOTES = 'L'              # «Заметки» — последняя колонка листа
+WIDTH = 12               # A–L
 BOUGHT = 'Купил'
 NEW = 'Не связывались'
 
@@ -217,9 +219,9 @@ def _row_cells(cells: dict) -> list[str]:
 
 
 def plan(sheet: list[list[str]], leads: dict[int, dict], tracked: set[int]):
-    """sheet — значения A2:N как их показывает таблица. Возвращает
+    """sheet — значения A2:L как их показывает таблица. Возвращает
     (правки для batch_update, кого запомнить, кого забыть, сколько строк не хватило)."""
-    rows = [list(r) + [''] * (14 - len(r)) for r in sheet]
+    rows = [list(r) + [''] * (WIDTH - len(r)) for r in sheet]
     by_id, empty = {}, []
     for i, r in enumerate(rows):
         n = i + 2
@@ -249,13 +251,13 @@ def plan(sheet: list[list[str]], leads: dict[int, dict], tracked: set[int]):
             updates.append({'range': f'B{n}:J{n}',
                             'values': [_row_cells(lead['cells']) + [_text(lead['status'])]]})
             if lead['note']:
-                updates.append({'range': f'N{n}', 'values': [[_text(lead['note'])]]})
+                updates.append({'range': f'{NOTES}{n}', 'values': [[_text(lead['note'])]]})
             remember.append(uid)
     # /forget или аккаунт в исключениях: человека нет в leads — убираем его строку целиком
     for uid in tracked:
         n = by_id.get(uid)
         if uid not in leads and n:
-            updates.append({'range': f'B{n}:N{n}', 'values': [[''] * 13]})
+            updates.append({'range': f'B{n}:{NOTES}{n}', 'values': [[''] * (WIDTH - 1)]})
             forget.append(uid)
     missing = sum(1 for uid, l in leads.items()
                   if l['open'] and uid not in by_id and uid not in tracked and uid not in remember)
@@ -268,20 +270,20 @@ SHEET_LOCK = threading.Lock()
 
 
 def note_plan(sheet: list[list[str]], user_id: int, line: str, cells: dict) -> list[dict]:
-    """Дописать строку в «Ответ и заметки» (N) человека с этим Telegram ID.
+    """Дописать строку в «Заметки» (L) человека с этим Telegram ID.
     Нет строки — занимаем первую пустую и пишем ещё B–D (ник, имя, ID)."""
-    rows = [list(r) + [''] * (14 - len(r)) for r in sheet]
+    rows = [list(r) + [''] * (WIDTH - len(r)) for r in sheet]
     for i, r in enumerate(rows):
         if r[3].strip() == str(user_id):
-            old = r[13].strip()
+            old = r[WIDTH - 1].strip()
             text = old + '\n' + line if old else line
-            return [{'range': f'N{i + 2}', 'values': [[_text(text)]]}]
+            return [{'range': f'{NOTES}{i + 2}', 'values': [[_text(text)]]}]
     used = {i + 2 for i, r in enumerate(rows) if any(c.strip() for c in r[1:])}
     n = next((n for n in range(2, LAST_ROW + 1) if n not in used), None)
     if n is None:
         return []
     return [{'range': f'B{n}:D{n}', 'values': [[cells['B'], _text(cells['C']), cells['D']]]},
-            {'range': f'N{n}', 'values': [[_text(line)]]}]
+            {'range': f'{NOTES}{n}', 'values': [[_text(line)]]}]
 
 
 def append_note(user_id: int, username: str | None, first_name: str | None, line: str) -> bool:
@@ -290,7 +292,7 @@ def append_note(user_id: int, username: str | None, first_name: str | None, line
              'C': first_name or '', 'D': str(user_id)}
     with SHEET_LOCK:
         ws = _sheet()
-        updates = note_plan(ws.get(f'A2:N{LAST_ROW}'), user_id, line, cells)
+        updates = note_plan(ws.get(f'A2:{NOTES}{LAST_ROW}'), user_id, line, cells)
         if updates:
             ws.batch_update(updates, value_input_option='USER_ENTERED')
     return bool(updates)
@@ -306,7 +308,7 @@ def _sheet():
 def _publish(leads, tracked):
     with SHEET_LOCK:
         ws = _sheet()
-        current = ws.get(f'A2:N{LAST_ROW}')
+        current = ws.get(f'A2:{NOTES}{LAST_ROW}')
         updates, remember, forget, missing = plan(current, leads, tracked)
         if updates:
             ws.batch_update(updates, value_input_option='USER_ENTERED')

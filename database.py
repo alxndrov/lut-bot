@@ -587,7 +587,7 @@ async def init_db(existing_cdek_contract: str | None = None):
         except Exception:
             pass
         # События по личным скидкам (открыл, перешёл к оплате, купил) — для
-        # колонки «Ответ и заметки» таблицы «База»; synced = 1 — уже записано туда
+        # колонки «Заметки» (L) таблицы «База»; synced = 1 — уже записано туда
         await db.execute("""
             CREATE TABLE IF NOT EXISTS course_offer_events (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
