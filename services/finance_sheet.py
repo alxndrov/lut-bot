@@ -9,7 +9,11 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
-import fcntl
+try:
+    import fcntl
+except ImportError:  # Windows (локальная разработка): блокировка через msvcrt
+    fcntl = None
+    import msvcrt
 import logging
 import math
 from pathlib import Path
@@ -75,6 +79,18 @@ def process_lock():
     """Also serialize manual reconciliation against the running bot."""
     path = Path(db.DB_PATH).resolve().with_suffix('.finance-sync.lock')
     with path.open('a') as handle:
+        if fcntl is None:
+            handle.seek(0)
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                raise SheetsError('финансовая сверка уже выполняется')
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            return
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
