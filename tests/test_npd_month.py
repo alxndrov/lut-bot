@@ -55,6 +55,12 @@ class NpdDetailLinesTest(unittest.TestCase):
         self.assertIn("ещё не начисляла", misha)
         self.assertNotIn("В боте", misha)
 
+    def test_misha_charge_marked_as_whole_account(self):
+        text = "\n".join(finance._npd_detail_lines(
+            "2026-10", [{"amount": 399, "who": "misha", "tax": 15.96}], None,
+            charges={"misha": npd.month_charges(RECORDS, "2026-10")}))
+        self.assertIn("Налоговая 10.11 (весь кабинет, не только проект): начислено", text)
+
     def test_connection_error_is_shown(self):
         text = "\n".join(finance._npd_detail_lines(
             "2026-10", [{"amount": 100, "who": "danya", "tax": 4.0}], None,

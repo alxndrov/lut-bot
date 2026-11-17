@@ -726,13 +726,15 @@ def _ddmm(date: str | None) -> str:
     return f"{date[8:10]}.{date[5:7]}" if date and len(date) >= 10 else "?"
 
 
-def _tax_office_lines(ch) -> list[str]:
-    """Строки «что начислила налоговая» по services.npd.month_charges."""
+def _tax_office_lines(ch, whole_account: str = "") -> list[str]:
+    """Строки «что начислила налоговая» по services.npd.month_charges.
+    whole_account — пометка, что в кабинете есть и не проектные чеки."""
     if isinstance(ch, str):          # ошибка связи — показываем причину
         return [f"• Налоговая: не узнать — {ch}"]
     if ch is None:
         return ["• Налоговая: ещё не начисляла (начислит 10-го следующего месяца)"]
-    out = [f"• Налоговая {_ddmm(ch['charge_date'])}: начислено <b>{ch['accrued']:,.2f} ₽</b>"]
+    out = [f"• Налоговая {_ddmm(ch['charge_date'])}{whole_account}: "
+           f"начислено <b>{ch['accrued']:,.2f} ₽</b>"]
     if abs(ch["corrections"]) >= 0.005:
         out.append(f"   поправки за прошлые месяцы {ch['corrections']:+,.2f} ₽ → "
                    f"к оплате <b>{ch['due']:,.2f} ₽</b>")
@@ -762,7 +764,10 @@ def _npd_detail_lines(month: str, purchases: list[dict], assessment: dict | None
                   + (f", возвраты −{back:,.2f} ₽" if back else "")]
         lines.append(f"• Оценка бота: {estimate:,.2f} ₽")
         if who in charges:
-            lines += _tax_office_lines(charges[who])
+            # В кабинете Миши есть и его собственные, не проектные чеки:
+            # начисление налоговой — за весь кабинет, налог проекта — оценка выше
+            lines += _tax_office_lines(charges[who], " (весь кабинет, не только проект)"
+                                       if who == "misha" else "")
         if who == "danya":
             current = float(assessment["accrued"]) if assessment else estimate
             paid = float(assessment["paid"]) if assessment else 0.0
