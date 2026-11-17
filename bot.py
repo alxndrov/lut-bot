@@ -11,7 +11,7 @@ import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, order_widget, catalog_widget, client_order_widget, product_widget, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget, course_gift, course_files, manual_sale
-from handlers import course, course_admin, course_orders, course_invoice, npd_admin, friend_order
+from handlers import course, course_offer, course_admin, course_orders, course_invoice, npd_admin, friend_order
 from handlers import pay_router, payments_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
@@ -53,6 +53,7 @@ async def main():
     dp.include_router(start.router)
     dp.include_router(forget.router)        # /forget — удалить свои данные
     dp.include_router(course.router)        # кодовое слово — раньше поддержки
+    dp.include_router(course_offer.router)  # личная скидка на курс (?start=offer_…)
     dp.include_router(friend_order.router)  # заказ для друга — только админам
     dp.include_router(course_invoice.router)  # счёт за курс — только админам
     dp.include_router(catalog.router)

@@ -567,6 +567,21 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE course_gifts ADD COLUMN recipient TEXT")
         except Exception:
             pass
+        # Личная скидка на курс: ссылка t.me/<бот>?start=offer_<token>
+        # (handlers/course_offer.py) открывает вариант курса по цене price
+        # только человеку user_id и только до valid_until (YYYY-MM-DD по Москве,
+        # день включается). Создаёт scripts/make_course_offer.py.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_offers (
+                token       TEXT PRIMARY KEY,
+                option_id   INTEGER NOT NULL,
+                price       INTEGER NOT NULL,
+                user_id     INTEGER NOT NULL,
+                valid_until TEXT NOT NULL,
+                note        TEXT,
+                created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         # Очередь на личный разбор — первые N покупателей пакета. Место
         # выдаётся одним INSERT … SELECT MAX+1, уникальность position не даст
         # двум одновременным оплатам получить одно и то же место.
@@ -5826,6 +5841,23 @@ async def create_course_gift(token: str, purchase_id: int, buyer_id: int, sectio
                          "VALUES (?, ?, ?, ?, ?)",
                          (token, purchase_id, buyer_id, ",".join(sections), recipient))
         await db.commit()
+
+
+async def create_course_offer(token: str, option_id: int, price: int, user_id: int,
+                              valid_until: str, note: str | None = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO course_offers (token, option_id, price, user_id, valid_until, note) "
+                         "VALUES (?, ?, ?, ?, ?, ?)",
+                         (token, option_id, price, user_id, valid_until, note))
+        await db.commit()
+
+
+async def get_course_offer(token: str) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM course_offers WHERE token = ?", (token,)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
 
 
 async def set_gift_recipient(token: str, recipient: str | None):
