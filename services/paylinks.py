@@ -31,25 +31,31 @@ def _sig(body: str) -> str:
     return _b64(hmac.new(_KEY, body.encode(), hashlib.sha256).digest()[:15])
 
 
-def make_token(order_num: str, amount: int, name: str, via: str = "") -> str:
-    body = _b64(json.dumps([order_num, int(amount), name, via],
-                           ensure_ascii=False, separators=(",", ":")).encode())
+def make_token(order_num: str, amount: int, name: str, via: str = "",
+               manual: bool = False) -> str:
+    """manual — ссылку админ отправляет клиенту сам, в личке: бот по такому
+    заказу клиенту ничего не напоминает (pay_router._backup_allowed)."""
+    data = [order_num, int(amount), name, via] + ([1] if manual else [])
+    body = _b64(json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode())
     return f"{body}.{_sig(body)}"
 
 
 def parse_token(token: str) -> dict | None:
-    """{order_num, amount, name, via, kind, user_id} или None, если подпись не та."""
+    """{order_num, amount, name, via, manual, kind, user_id} или None, если
+    подпись не та. Старые ссылки — без manual (False)."""
     try:
         body, sig = token.split(".", 1)
         if not hmac.compare_digest(sig, _sig(body)):
             return None
-        order_num, amount, name, via = json.loads(_unb64(body))
+        data = json.loads(_unb64(body))
+        order_num, amount, name, via = data[:4]
         kind, user_id, _ = order_num.split("_", 2)
         return {"order_num": order_num, "amount": int(amount), "name": name,
-                "via": via, "kind": kind, "user_id": int(user_id)}
+                "via": via, "manual": len(data) > 4 and bool(data[4]),
+                "kind": kind, "user_id": int(user_id)}
     except Exception:
         return None
 
 
-def link(order_num: str, amount: int, name: str, via: str = "") -> str:
-    return f"{config.PAY_BASE_URL}/pay/{make_token(order_num, amount, name, via)}"
+def link(order_num: str, amount: int, name: str, via: str = "", manual: bool = False) -> str:
+    return f"{config.PAY_BASE_URL}/pay/{make_token(order_num, amount, name, via, manual)}"

@@ -70,6 +70,39 @@ class PayClickNoticeTest(unittest.IsolatedAsyncioTestCase):
         notify.assert_not_awaited()
         self.assertIsNone(await db.get_pay_click("p_294789073_10"))
 
+    async def test_manual_link_silences_bot(self):
+        """Ссылка из лички: переход отмечает заказ ручным — «Получилось оплатить?»
+        и «Оплата не прошла» клиенту не уходят; отметка не снимается обычной кнопкой."""
+        self.token = paylinks.make_token("p_294789073_10", 1693, "🎤 Kit", "", manual=True)
+        self.assertTrue(paylinks.parse_token(self.token)["manual"])
+        _, notify = await self._open(IPHONE_TG)
+        self.assertIn("Ссылка из лички", notify.await_args.args[1])
+        click = await db.get_pay_click("p_294789073_10")
+        self.assertEqual(click["manual"], 1)
+        self.assertFalse(await pay_router._backup_allowed(click))
+        bot = mock.AsyncMock()
+        with mock.patch.object(config, "YOOKASSA_ENABLED", True):
+            self.assertFalse(await pay_router.offer_after_failure(bot, "p_294789073_10"))
+        bot.send_message.assert_not_awaited()
+        # потом клиент жмёт обычную кнопку в боте — заказ всё равно ручной
+        self.token = paylinks.make_token("p_294789073_10", 1693, "🎤 Kit", "")
+        await self._open(IPHONE_TG)
+        self.assertEqual((await db.get_pay_click("p_294789073_10"))["manual"], 1)
+
+    async def test_mark_manual_before_click(self):
+        await db.mark_pay_manual("p_5_10", 5, 1000, "Kit")
+        self.assertIn("p_5_10", await db.manual_pay_orders())
+        click = await db.get_pay_click("p_5_10")
+        self.assertEqual(click["clicks"], 0)
+        self.assertFalse(await pay_router._backup_allowed(click))
+
+    def test_old_tokens_still_parse(self):
+        old = paylinks.make_token("c_1635621122_3", 6990, "Пакет", "paw")
+        link = paylinks.parse_token(old)
+        self.assertFalse(link["manual"])
+        self.assertEqual(link["via"], "paw")
+        self.assertTrue(pay_router._manual({"via": "offer:tok:paw", "manual": False}))
+
     def test_device(self):
         self.assertEqual(pay_router._device(IPHONE_TG), "iPhone · Telegram")
         self.assertEqual(pay_router._device(

@@ -739,6 +739,12 @@ async def init_db(existing_cdek_contract: str | None = None):
                 backup_sent_at  TIMESTAMP
             )
         """)
+        # manual — заказ ведёт админ в личке (ссылку отправил сам): бот
+        # клиенту не напоминает (record_pay_click)
+        try:
+            await db.execute("ALTER TABLE pay_clicks ADD COLUMN manual INTEGER DEFAULT 0")
+        except Exception:
+            pass
         # Платежи ЮKassa, созданные ботом: по ним опрашиваем статус и по
         # ним же узнаём магазин (kind) для уведомления
         await db.execute("""
@@ -5430,17 +5436,22 @@ async def get_user(user_id: int) -> Optional[dict]:
 # ── Ссылки на оплату и ЮKassa (handlers/pay_router.py) ───────────────────────
 
 async def record_pay_click(order_num: str, user_id: int, amount: int, name: str,
-                           provider: str):
+                           provider: str, manual: bool = False):
     """Переход по ссылке на оплату. Переход после уже пришедшей оплаты —
     новая покупка того же: прошлую оплату и запасную ссылку забываем. Через
-    сутки запасную ссылку снова можно предложить."""
+    сутки запасную ссылку снова можно предложить.
+
+    manual — ссылку админ сам отправил клиенту в личке: такой заказ ведёт
+    админ, бот клиенту ничего не напоминает. Отметка остаётся навсегда,
+    даже если потом клиент перейдёт по обычной кнопке в боте."""
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
-            """INSERT INTO pay_clicks (order_num, user_id, amount, name, provider)
-               VALUES (?, ?, ?, ?, ?)
+            """INSERT INTO pay_clicks (order_num, user_id, amount, name, provider, manual)
+               VALUES (?, ?, ?, ?, ?, ?)
                ON CONFLICT(order_num) DO UPDATE SET
                    amount = excluded.amount, name = excluded.name,
                    provider = excluded.provider, clicks = clicks + 1,
+                   manual = MAX(COALESCE(manual, 0), excluded.manual),
                    backup_sent_at = CASE WHEN paid_at IS NOT NULL
                        OR clicked_at < datetime('now', '-1 day')
                        THEN NULL ELSE backup_sent_at END,
@@ -5448,9 +5459,28 @@ async def record_pay_click(order_num: str, user_id: int, amount: int, name: str,
                        ELSE paid_payment_id END,
                    paid_at = NULL,
                    clicked_at = CURRENT_TIMESTAMP""",
-            (order_num, user_id, amount, name, provider),
+            (order_num, user_id, amount, name, provider, int(bool(manual))),
         )
         await db.commit()
+
+
+async def mark_pay_manual(order_num: str, user_id: int, amount: int, name: str):
+    """Админ взял заказ в личку (сгенерировал ссылку для отправки сам): бот
+    больше не напоминает клиенту об этом заказе. Переход не засчитывается."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO pay_clicks (order_num, user_id, amount, name, provider, clicks, manual)
+               VALUES (?, ?, ?, ?, 'manual', 0, 1)
+               ON CONFLICT(order_num) DO UPDATE SET manual = 1""",
+            (order_num, user_id, amount, name))
+        await db.commit()
+
+
+async def manual_pay_orders() -> set[str]:
+    """Заказы, которые админ ведёт в личке (pay_clicks.manual)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT order_num FROM pay_clicks WHERE manual = 1") as cur:
+            return {r[0] for r in await cur.fetchall()}
 
 
 async def get_pay_click(order_num: str) -> Optional[dict]:

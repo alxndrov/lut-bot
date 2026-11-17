@@ -563,19 +563,20 @@ async def cb_pending_paylink(callback: CallbackQuery, bot: Bot):
         return
 
     await callback.answer("Создаю ссылку…")
-    from services.prodamus import build_payment_url
-    url = build_payment_url(
-        shop_url=config.PRODAMUS_SHOP_URL_PHYSICAL,
-        product_name=await _pending_payment_name(order, product),
-        price=amount, user_id=uid, product_id=pid, order_type="p",
-        secret=config.PRODAMUS_SECRET_PHYSICAL,
-        notification_url=config.PRODAMUS_WEBHOOK_URL_PHYSICAL,
-    )
+    # Наша ссылка /pay/ (видно каждый переход) с отметкой «из лички»: заказ
+    # ведёт админ, поэтому бот клиенту больше ничего сам не напоминает
+    from services import paylinks
+    order_num = f"p_{uid}_{pid}"
+    name = await _pending_payment_name(order, product)
+    url = paylinks.link(order_num, amount, name, manual=True)
+    await db.mark_pay_manual(order_num, uid, amount, name)
 
     await callback.message.answer(
         f"🔗 <b>Новая ссылка на оплату</b> — <b>{amount} ₽</b>\n"
         f"{url}\n\n"
-        f"Клиенту пока не отправлена — скопируйте её или отправьте кнопкой ниже.",
+        f"Для отправки в личке: по этому заказу бот клиенту больше ничего сам не пишет "
+        f"(«Получилось оплатить?», рассылки) — о каждом переходе придёт уведомление сюда.\n"
+        f"Можно и отправить из бота кнопкой ниже.",
         parse_mode="HTML", disable_web_page_preview=True,
         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text="📨 Отправить клиенту",

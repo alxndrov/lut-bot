@@ -264,7 +264,7 @@ async def _lava_page(request: web.Request, link: dict, bot_username: str) -> web
         await db.add_lava_payment(inv["id"], link["order_num"], link["kind"], link["amount"],
                                   usd, rate, email, link["name"], url)
     await db.record_pay_click(link["order_num"], link["user_id"], link["amount"],
-                              link["name"], "lava")
+                              link["name"], "lava", manual=_manual(link))
     logger.info(f"pay: {link['order_num']} {link['amount']} ₽ → lava.top ${usd}")
     raise web.HTTPSeeOther(url)
 
@@ -336,6 +336,11 @@ _ROUTES = {"": "как в /payments", "paw": "PayAnyWay", "pd": "Prodamus (за�
 _bg: set = set()
 
 
+def _manual(link: dict) -> bool:
+    """Ссылку отправил админ в личке — ручная (или личная скидка /offer)."""
+    return bool(link.get("manual")) or link["via"].startswith("offer:")
+
+
 def _is_preview(request: web.Request) -> bool:
     headers = getattr(request, "headers", None)
     if headers is None:            # запрос без заголовков бывает только в тестах
@@ -372,7 +377,8 @@ async def _click_notice(request: web.Request, link: dict):
               or request.remote or "?")
         await _notify(request.app["bot"],
                       f"👀 <b>Переход по ссылке на оплату</b> — {n}-й\n"
-                      f"🛍 {escape(link['name'])} — {link['amount']} ₽ · {escape(route)}\n"
+                      + ("✋ Ссылка из лички — бот клиенту ничего не пишет\n" if _manual(link) else "")
+                      + f"🛍 {escape(link['name'])} — {link['amount']} ₽ · {escape(route)}\n"
                       f"👤 Ссылка для {escape(who)}\n"
                       f"📱 {escape(_device(request.headers.get('User-Agent', '')))} · IP {escape(ip)}")
     except Exception as e:
@@ -409,7 +415,8 @@ async def handle_pay(request: web.Request) -> web.Response:
         if not config.PAYANYWAY_ENABLED:
             return _page('Оплата временно недоступна', 'Попробуйте позже.', bot_username, status=503)
         url = await _payanyway_url(link, f'https://t.me/{bot_username}')
-        await db.record_pay_click(link['order_num'], link['user_id'], link['amount'], link['name'], 'payanyway')
+        await db.record_pay_click(link['order_num'], link['user_id'], link['amount'], link['name'], 'payanyway',
+                                  manual=_manual(link))
         raise web.HTTPFound(url)
 
     # Личная скидка на курс (handlers/course_offer.py): via = offer:<token>:paw|lava
@@ -461,7 +468,7 @@ async def handle_pay(request: web.Request) -> web.Response:
         url = prodamus_url(link["order_num"], link["amount"], link["name"])
 
     await db.record_pay_click(link["order_num"], link["user_id"], link["amount"],
-                              link["name"], provider)
+                              link["name"], provider, manual=_manual(link))
     logger.info(f"pay: {link['order_num']} {link['amount']} ₽ → {provider}"
                 f"{' (запасная)' if link['via'] else ''}")
     raise web.HTTPFound(url)
@@ -496,7 +503,7 @@ async def _offer_pay(request: web.Request, link: dict, bot_username: str) -> web
         return _page("Оплата временно недоступна", "Попробуйте позже.", bot_username, status=503)
     url = await _payanyway_url(link, f"https://t.me/{bot_username}" if bot_username else "")
     await db.record_pay_click(link["order_num"], link["user_id"], link["amount"],
-                              link["name"], "payanyway")
+                              link["name"], "payanyway", manual=True)   # личную скидку ведёт админ
     logger.info(f"pay: скидка {token} {link['order_num']} {link['amount']} ₽ → payanyway")
     raise web.HTTPFound(url)
 
@@ -666,7 +673,10 @@ FAILED_TEXT = (
 
 async def _backup_allowed(click: dict) -> bool:
     """Заказ ещё ждёт оплаты и его оформлял сам клиент (ссылку заказа для
-    друга админ пересылает другу — спрашивать админа незачем)."""
+    друга админ пересылает другу — спрашивать админа незачем). Заказ, который
+    админ ведёт в личке (ручная ссылка), бот не трогает — пишет только админ."""
+    if click.get("manual"):
+        return False
     order_type, uid, pid = click["order_num"].split("_", 2)
     if order_type == "p":
         pending = await db.get_pending_order(int(uid), int(pid))

@@ -180,9 +180,11 @@ COURSE_FOREIGN_TEXT = (
 async def _recent_orders() -> list[dict]:
     from datetime import datetime, timedelta, timezone
     since = (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)).strftime("%Y-%m-%d %H:%M:%S")
+    manual = await db.manual_pay_orders()   # эти заказы админ ведёт в личке — не рассылаем
     return [o for o in await db.get_pending_orders()
             if (o.get("created_at") or "") >= since and not o.get("friend_by")
-            and (o.get("amount") or 0) > 0]
+            and (o.get("amount") or 0) > 0
+            and f"p_{o['user_id']}_{o['product_id']}" not in manual]
 
 
 async def _course_lookers() -> list[dict]:
