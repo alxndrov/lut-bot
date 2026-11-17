@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 CHECK_INTERVAL = 30 * 60          # раз в полчаса
 FIRST_DELAY = 90                  # даём боту спокойно подняться
 COST_INTERVAL = 24 * 60 * 60      # суммы накладных сверяем раз в сутки
-COST_DAYS = 45                    # …за последние полтора месяца
+COST_DAYS = 60                    # …за последние два месяца (с возвратами)
 
 # Посылка доехала и её можно забирать
 ARRIVED_CODES = {
@@ -134,6 +134,23 @@ async def _save_cost(order: dict, total) -> bool:
     return True
 
 
+async def _save_return_cost(client, order: dict, codes) -> bool:
+    """Посылку не забрали — СДЭК везёт её обратно отдельной накладной и
+    выставляет её в том же счёте. Запоминаем её сумму."""
+    if "NOT_DELIVERED" not in set(codes or []):
+        return False
+    back = await client.get_return_cost(order["cdek_uuid"])
+    total = (back or {}).get("total")
+    if total is None:
+        return False
+    total = round(float(total), 2)
+    if order.get("cdek_return_cost") is not None and abs(float(order["cdek_return_cost"]) - total) < 0.005:
+        return False
+    await db.set_order_cdek_return_cost(order["id"], total)
+    logger.info(f"CDEK: обратная накладная по {order.get('order_code')} — {total:.2f} ₽")
+    return True
+
+
 async def refresh_costs(days: int | None = COST_DAYS) -> int:
     """Сверяет с API СДЭК суммы накладных за последние days дней (None — все).
     Нужна и после вручения: хранение в пункте выдачи СДЭК дописывает в
@@ -145,7 +162,11 @@ async def refresh_costs(days: int | None = COST_DAYS) -> int:
         if not client:
             continue
         info = await client.get_order_info(order["cdek_uuid"])
-        if info and await _save_cost(order, info.get("total_sum")):
+        if not info:
+            continue
+        if await _save_cost(order, info.get("total_sum")):
+            changed += 1
+        if await _save_return_cost(client, order, info.get("status_codes")):
             changed += 1
         await asyncio.sleep(0.5)
     return changed

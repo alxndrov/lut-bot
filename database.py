@@ -856,6 +856,17 @@ async def init_db(existing_cdek_contract: str | None = None):
         # потом выставляет счёт — его и записываем. Стоимость самих
         # накладных сюда НЕ пишется, она считается из заказов.
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS cdek_adjustments (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                adj_date   TIMESTAMP NOT NULL,
+                amount     REAL NOT NULL,
+                comment    TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        # Поправки к начисленному СДЭК по акту сверки: то, чего бот не видит
+        # в накладных (отправки из кабинета вручную, накладные без данных в API)
+        await db.execute("""
             CREATE TABLE IF NOT EXISTS cdek_payments (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
                 paid_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1021,7 +1032,9 @@ async def init_db(existing_cdek_contract: str | None = None):
         # (delivery_detail.total_sum: тариф, страховка, НДС по договору, хранение);
         # NULL — ещё не знаем, тогда в учёте наша оценка при оформлении
         for col in ("delivered_at TIMESTAMP DEFAULT NULL", "cdek_final TEXT DEFAULT NULL",
-                    "keep_until TIMESTAMP DEFAULT NULL", "cdek_actual_cost REAL DEFAULT NULL"):
+                    "keep_until TIMESTAMP DEFAULT NULL", "cdek_actual_cost REAL DEFAULT NULL",
+                    # cdek_return_cost — обратная накладная, если посылку не забрали
+                    "cdek_return_cost REAL DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except Exception:
@@ -2678,7 +2691,24 @@ async def set_order_cdek_cost(order_id: int, cost: float):
         await db.commit()
 
 
-async def get_orders_cdek_cost_check(days: int | None = 45) -> list[dict]:
+async def set_order_cdek_return_cost(order_id: int, cost: float):
+    """Обратная накладная по невыкупу — СДЭК выставляет её в том же счёте."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET cdek_return_cost = ? WHERE id = ?",
+                         (round(float(cost), 2), order_id))
+        await db.commit()
+
+
+async def add_cdek_adjustment(adj_date: str, amount: float, comment: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(
+            "INSERT INTO cdek_adjustments (adj_date, amount, comment) VALUES (?, ?, ?)",
+            (adj_date, round(float(amount), 2), comment))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def get_orders_cdek_cost_check(days: int | None = 60) -> list[dict]:
     """Накладные, сумму которых сверяем со СДЭК: доплата за хранение и
     прочие услуги появляются к вручению и позже. days=None — все."""
     sql = "SELECT * FROM orders WHERE cdek_uuid IS NOT NULL"
@@ -3772,7 +3802,13 @@ _CDEK_ACCRUED_SUMS = """
                                         WHEN COALESCE(pu.delivery_cost, 0) > 0
                                         THEN pu.delivery_cost
                                         ELSE COALESCE(o.covered_delivery_cost, 0)
-                                   END), 0) AS cost,
+                                   END
+                                   -- обратная накладная по невыкупу; если её уже
+                                   -- записали в возврат (refunds.return_delivery) — там
+                                   + CASE WHEN EXISTS (SELECT 1 FROM refunds r
+                                                        WHERE r.order_id = o.id
+                                                          AND COALESCE(r.return_delivery, 0) > 0)
+                                          THEN 0 ELSE COALESCE(o.cdek_return_cost, 0) END), 0) AS cost,
                       COALESCE(SUM(CASE WHEN o.cdek_actual_cost IS NULL
                                         AND COALESCE(pu.delivery_cost, 0) = 0
                                         AND COALESCE(o.covered_delivery_cost, 0) = 0
@@ -3871,6 +3907,11 @@ async def get_cdek_accrued(date_from: str | None = None,
             n, back = await cur.fetchone()
         row["count"] += n
         row["cost"] = float(row["cost"]) + float(back)
+        adj_sql = "SELECT COALESCE(SUM(amount), 0) FROM cdek_adjustments"
+        if params:
+            adj_sql += " WHERE datetime(adj_date) BETWEEN datetime(?) AND datetime(?)"
+        async with db.execute(adj_sql, params) as cur:
+            row["cost"] += float((await cur.fetchone())[0])
         return _cdek_total(row)
 
 
@@ -3894,6 +3935,13 @@ async def get_cdek_accrued_by_month(limit: int = 6) -> list[dict]:
                 r = rows.setdefault(month, {"month": month, "count": 0, "cost": 0.0, "legacy": 0.0})
                 r["count"] += n
                 r["cost"] = float(r["cost"]) + float(back)
+        async with db.execute(
+            "SELECT strftime('%Y-%m', datetime(adj_date, '+3 hours')) AS month, SUM(amount) "
+            "FROM cdek_adjustments GROUP BY month"
+        ) as cur:
+            for month, amount in await cur.fetchall():
+                r = rows.setdefault(month, {"month": month, "count": 0, "cost": 0.0, "legacy": 0.0})
+                r["cost"] = float(r["cost"]) + float(amount)
     ordered = sorted(rows.values(), key=lambda r: r["month"], reverse=True)[:int(limit)]
     return [_cdek_total(r) for r in ordered]
 

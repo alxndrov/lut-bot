@@ -75,3 +75,28 @@ class CdekActualCostTests(unittest.IsolatedAsyncioTestCase):
              patch.object(tracker.asyncio, "sleep", AsyncMock()):
             self.assertEqual(await tracker.refresh_costs(None), 0)
         self.assertAlmostEqual((await db.get_cdek_accrued())["total"], 216.67)
+
+    async def test_return_waybill_counted_once(self):
+        order_id = await self.make_order("p5", [(300, 275.51)])
+        client = SimpleNamespace(
+            get_order_info=AsyncMock(return_value={"total_sum": 275.51,
+                                                   "status_codes": ["NOT_DELIVERED"]}),
+            get_return_cost=AsyncMock(return_value={"total": 160.5}))
+        with patch("services.cdek_accounts.client_for_order", return_value=client), \
+             patch.object(tracker.asyncio, "sleep", AsyncMock()):
+            await tracker.refresh_costs(None)
+        self.assertAlmostEqual((await db.get_cdek_accrued())["total"], 436.01)
+        # Если обратную доставку уже записали в возврат — второй раз не считаем
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            await conn.execute("INSERT INTO refunds (order_id, amount, paid, return_delivery) "
+                               "VALUES (?, 1000, 1000, 160.5)", (order_id,))
+            await conn.commit()
+        self.assertAlmostEqual((await db.get_cdek_accrued())["total"], 436.01)
+
+    async def test_act_adjustment_in_total_and_its_month(self):
+        await self.make_order("p6", [(235, 216.67)])
+        await db.add_cdek_adjustment("2026-10-25 09:00:00", 100.5, "акт сверки")
+        self.assertAlmostEqual((await db.get_cdek_accrued())["total"], 317.17)
+        self.assertAlmostEqual((await db.get_cdek_accrued("2026-10-25", "2026-10-25"))["total"], 100.5)
+        months = {r["month"]: r["total"] for r in await db.get_cdek_accrued_by_month()}
+        self.assertAlmostEqual(months["2026-10"], 317.17)
