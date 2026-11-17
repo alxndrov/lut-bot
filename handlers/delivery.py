@@ -38,12 +38,15 @@ class DeliveryOrder(StatesGroup):
 
 
 def _normalize_phone(raw: str) -> str | None:
-    """Приводит телефон к виду +7XXXXXXXXXX. None — если не похоже на номер."""
+    """Российский — к виду +7XXXXXXXXXX; зарубежный с кодом страны
+    (+996 555 540-523, +375…) — как есть, одними цифрами. None — не номер."""
     digits = re.sub(r"\D", "", raw or "")
     if len(digits) == 11 and digits[0] in "78":
         digits = "7" + digits[1:]
     elif len(digits) == 10:
         digits = "7" + digits
+    elif (raw or "").strip().startswith("+") and 11 <= len(digits) <= 15:
+        pass   # зарубежный номер с кодом страны
     else:
         return None
     return "+" + digits
@@ -212,15 +215,19 @@ async def fsm_delivery_city(message: Message, state: FSMContext):
 
     if CDEK_CLIENT:
         await message.answer("⏳ Определяю город...")
-        city_code = await CDEK_CLIENT.get_city_code(city)
-        if not city_code:
+        found = await CDEK_CLIENT.find_city(city)
+        if not found:
             await message.answer(
                 "❌ Город не найден в СДЭК. Попробуй иначе, например: "
                 "<b>Москва</b>, <b>Санкт-Петербург</b>, <b>Казань</b>.",
                 parse_mode="HTML",
             )
             return
-        await state.update_data(cdek_city_code=city_code)
+        # За границей (Бишкек, Алматы…) называем страну — чтобы клиент
+        # увидел, что СДЭК понял его город, а не российского тёзку
+        label = found["city"] if found["country_code"] == "RU" else f'{found["city"]}, {found["country"]}'
+        await state.update_data(cdek_city_code=found["code"], country_code=found["country_code"],
+                                city=found["city"], city_label=label)
 
     await _offer_pvz(message, state)
 
@@ -246,7 +253,7 @@ async def _offer_pvz(message: Message, state: FSMContext):
     await state.update_data(pvz_all=points, pvz_total=len(points))
     await state.set_state(DeliveryOrder.waiting_geo)
     await message.answer(
-        f"📦 В городе <b>{data.get('city', '')}</b> найдено пунктов выдачи СДЭК: "
+        f"📦 В городе <b>{data.get('city_label') or data.get('city', '')}</b> найдено пунктов выдачи СДЭК: "
         f"<b>{len(points)}</b>.\n\n"
         "Чтобы показать ближайшие, отправь геолокацию кнопкой ниже "
         "или просто напиши улицу и дом — например, <i>Баумана 5</i>.",
@@ -276,7 +283,7 @@ async def fsm_pvz_geo_text(message: Message, state: FSMContext):
         return
 
     await message.answer("⏳ Ищу адрес...", reply_markup=ReplyKeyboardRemove())
-    point = await geocode(text, data.get("city", ""))
+    point = await geocode(text, data.get("city", ""), data.get("country_code") or "RU")
     if not point:
         await state.update_data(pvz_view=data.get("pvz_all", [])[:PVZ_KEEP])
         await message.answer(
@@ -424,7 +431,7 @@ async def fsm_recipient_name(message: Message, state: FSMContext):
     await message.answer(
         "📞 Теперь <b>телефон получателя</b> — на него СДЭК пришлёт СМС, "
         "когда посылка приедет в пункт выдачи.\n\n"
-        "Например: <code>+7 900 123-45-67</code>",
+        "Например: <code>+7 900 123-45-67</code>, номер другой страны — с её кодом.",
         parse_mode="HTML",
         reply_markup=phone_request_keyboard(),
     )
@@ -432,7 +439,8 @@ async def fsm_recipient_name(message: Message, state: FSMContext):
 
 @router.message(DeliveryOrder.waiting_phone, F.contact)
 async def fsm_recipient_phone_contact(message: Message, state: FSMContext):
-    await _accept_phone(message, state, message.contact.phone_number)
+    # Telegram отдаёт номер контакта без «+» — а зарубежный без него не узнать
+    await _accept_phone(message, state, "+" + message.contact.phone_number.lstrip("+"))
 
 
 @router.message(DeliveryOrder.waiting_phone)
@@ -466,7 +474,7 @@ async def fsm_pvz_choice(message: Message, state: FSMContext):
 
     data = await state.get_data()
     await message.answer("⏳ Ищу адрес...")
-    point = await geocode(text, data.get("city", ""))
+    point = await geocode(text, data.get("city", ""), data.get("country_code") or "RU")
     if point:
         await _apply_point(state, *point)
         await message.answer(f"📍 Ближайшие к адресу «{text}»:")

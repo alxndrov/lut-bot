@@ -96,6 +96,34 @@ class CDEKClient:
             logger.error(f"CDEK get_city_code error: {type(e).__name__}: {e}")
         return None
 
+    async def find_city(self, city_name: str) -> Optional[dict]:
+        """Город клиента в любой стране, где есть СДЭК (Бишкек, Алматы, Минск…).
+
+        Берём первый ответ СДЭК: он ставит крупный город выше тёзок — «Москва»
+        это Россия, «Минск» — Беларусь. На 45 городах прошлых заказов первым
+        везде шёл российский. {'code','city','country','country_code'} или None.
+        """
+        token = await self.get_token()
+        if not token:
+            return None
+        try:
+            async with aiohttp.ClientSession() as session:
+                resp = await session.get(
+                    f"{self.base_url}/location/cities",
+                    params={"city": city_name, "size": 1},
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                data = await resp.json()
+                if isinstance(data, list) and data and data[0].get("code"):
+                    x = data[0]
+                    return {"code": x["code"], "city": x.get("city") or city_name,
+                            "country": x.get("country") or "",
+                            "country_code": x.get("country_code") or "RU"}
+        except Exception as e:
+            logger.error(f"CDEK find_city error: {type(e).__name__}: {e}")
+        return None
+
     async def get_from_city_code(self) -> Optional[int]:
         """Код города отправления из конфига, считается один раз."""
         if self._from_city_code is not None:
@@ -466,9 +494,9 @@ class CDEKClient:
                 resp = await session.get(
                     f"{self.base_url}/deliverypoints",
                     params={
+                        # Страну задаёт сам город — пункты и за границей (Бишкек)
                         "city_code": city_code,
                         "type": "PVZ",
-                        "country_code": "RU",
                         "size": limit,
                     },
                     headers={"Authorization": f"Bearer {token}"},

@@ -14,8 +14,9 @@ USER_AGENT = "lut-bot/1.0 (Telegram shop bot; delivery point search)"
 logger = logging.getLogger(__name__)
 
 
-async def geocode(query: str, city: str = "") -> Optional[tuple[float, float]]:
-    """Возвращает (широта, долгота) или None, если адрес не найден."""
+async def geocode(query: str, city: str = "", country: str = "RU") -> Optional[tuple[float, float]]:
+    """Возвращает (широта, долгота) или None, если адрес не найден.
+    country — код страны города из СДЭК (RU, KG, KZ…): ищем адрес только в ней."""
     query = (query or "").strip()
     if not query:
         return None
@@ -31,7 +32,7 @@ async def geocode(query: str, city: str = "") -> Optional[tuple[float, float]]:
                     "format": "json",
                     "limit": 1,
                     "accept-language": "ru",
-                    "countrycodes": "ru",
+                    "countrycodes": (country or "RU").lower(),
                 },
                 headers={"User-Agent": USER_AGENT},
                 timeout=aiohttp.ClientTimeout(total=12),

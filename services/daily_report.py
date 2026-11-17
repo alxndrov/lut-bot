@@ -213,38 +213,9 @@ def _build_report(date_str: str, data: dict) -> str:
     return "\n".join(lines)
 
 
-async def _weekly_cdek_reminder(now: datetime) -> str | None:
-    now = now.astimezone(MSK)
-    if now.weekday() != 0:
-        return None
-    end = now.date() - timedelta(days=1)
-    start = end - timedelta(days=6)
-    lines = [
-        "🚚 <b>Напоминание: оплатить счёт СДЭК</b>",
-        f"За прошлую неделю: {start:%d.%m.%Y}–{end:%d.%m.%Y} (МСК).",
-        "",
-    ]
-    try:
-        accrued = await db.get_cdek_accrued(start.isoformat(), end.isoformat())
-        lines += [
-            f"Расчётная сумма: <b>{accrued['total']:,.2f} ₽</b>",
-            f"Накладных в учёте: {accrued['count']}.",
-        ]
-    except Exception:
-        logger.exception("weekly_cdek_reminder: failed to calculate amount")
-        lines.append("Расчётная сумма сейчас недоступна.")
-    lines += [
-        "",
-        "Сверьте сумму с выставленным счётом СДЭК и оплатите его. "
-        "После оплаты внесите платёж через /cdek.",
-    ]
-    return "\n".join(lines)
-
-
 async def send_daily_report(bot: Bot):
     now = datetime.now(MSK)
     yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-    reminder = await _weekly_cdek_reminder(now)
 
     try:
         data = await db.get_purchases_report(yesterday)
@@ -267,11 +238,6 @@ async def send_daily_report(bot: Bot):
                 await notify_bot.send_message(admin_id, text, parse_mode="HTML")
             except Exception as e:
                 logger.error(f"daily_report: send to admin {admin_id} failed: {e}")
-            if reminder:
-                try:
-                    await notify_bot.send_message(admin_id, reminder, parse_mode="HTML")
-                except Exception:
-                    logger.exception("weekly_cdek_reminder: send to admin %s failed", admin_id)
     finally:
         await notify_bot.session.close()
 
