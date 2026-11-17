@@ -4,6 +4,9 @@
 package, vip; дата — «20.11», действует до 23:59 МСК этого дня). Бот отвечает
 ссылкой https://app.malimabi.com/pay/<токен> (services/paylinks, via
 offer:<код>). /offers — активные предложения, /offer_cancel <код> — отменить.
+Со второй строки /offer — шаблон текста клиенту с метками {ссылка}, {цена},
+{старая_цена}, {срок}, {тариф}: бот вторым сообщением присылает готовый текст
+без разметки — скопировать в личку (render_template).
 
 Ссылка открывает страницу предложения (offer_page): тариф, цена, старая цена
 зачёркнутой, срок и выбор «Карта РФ или СБП» → PayAnyWay, «Иностранный банк» →
@@ -259,7 +262,29 @@ async def offer_page(request, offer: dict, link: dict, bot_username: str):
 
 USAGE = ("Формат: <code>/offer @ник ТАРИФ ЦЕНА ДО_ДАТЫ</code>\n"
          "Например: <code>/offer @dof0miin vip 11190 20.11</code>\n\n"
-         "Тарифы: shooting, editing, package, vip. Действует до 23:59 МСК этой даты.")
+         "Тарифы: shooting, editing, package, vip. Действует до 23:59 МСК этой даты.\n\n"
+         "Со следующей строки можно написать текст клиенту — бот вернёт его отдельным "
+         "сообщением с подставленными {ссылка}, {цена}, {старая_цена}, {срок}, {тариф}.")
+
+# {тариф} в тексте клиенту — по-русски, со строчной (он идёт внутри фразы)
+TARIFF_NAMES = {"vip": "пакет с созвоном", "bundle": "пакет: съёмка + монтаж",
+                "shooting": "съёмка", "editing": "монтаж"}
+_LABEL = re.compile(r"\{([^{}\n]*)\}")
+
+
+def render_template(text: str, values: dict[str, str]) -> tuple[str, list[str]]:
+    """Подставляет {метки}. Неизвестные оставляет как есть и возвращает списком
+    (по одной, в порядке появления). Переносы и пустые строки не трогает."""
+    unknown: list[str] = []
+
+    def sub(m: re.Match) -> str:
+        if m[1] in values:
+            return values[m[1]]
+        if m[0] not in unknown:
+            unknown.append(m[0])
+        return m[0]
+
+    return _LABEL.sub(sub, text), unknown
 
 
 def parse_until(text: str, today: date) -> date | None:
@@ -300,7 +325,9 @@ async def create_offer(user_id: int, option: dict, price: int, until: date,
 async def cmd_offer(message: Message, command: CommandObject):
     if message.from_user.id not in config.ADMIN_IDS:
         return
-    args = (command.args or "").split()
+    # Первая строка — параметры, всё после неё — шаблон текста клиенту
+    head, _, template = (command.args or "").partition("\n")
+    args = head.split()
     if len(args) != 4:
         await message.answer(USAGE, parse_mode="HTML")
         return
@@ -343,15 +370,32 @@ async def cmd_offer(message: Message, command: CommandObject):
     consent = ("" if not config.POLICY_REQUIRED or await db.policy_status(user_id) == "ok" else
                "\n\nСогласий с документами у человека ещё нет — ссылка сначала откроет бот "
                "с галочками, потом это предложение.")
+    link = pay_link(offer, option)
+    client_text, warnings = None, []
+    if template.strip():
+        client_text, unknown = render_template(template, {
+            "ссылка": link, "цена": svc.rub(price), "старая_цена": svc.rub(full),
+            "срок": svc.date_text(until.isoformat()),
+            "тариф": TARIFF_NAMES.get(option["slug"], option["title"])})
+        if "{ссылка}" not in template:
+            warnings.append("В тексте клиенту нет {ссылка} — ссылку вставь сам (она выше).")
+        if unknown:
+            warnings.append(f"Не знаю метки {', '.join(unknown)} — оставил как есть. "
+                            "Есть: {ссылка}, {цена}, {старая_цена}, {срок}, {тариф}.")
     await message.answer(
         f"🤍 <b>Личное предложение</b> для {escape(_who(user, user_id))}\n"
         f"{escape(option['title'])} — <b>{svc.rub(price)}</b>"
         + (f" вместо {svc.rub(full)}" if price < full else "")
         + f"\nДо {svc.date_text(until.isoformat())} включительно, 23:59 МСК. "
           f"Код <code>{offer['token']}</code>{consent}\n\n"
-          f"{pay_link(offer, option)}\n\n"
-          f"Отменить: <code>/offer_cancel {offer['token']}</code> · все: /offers",
+          f"{link}\n\n"
+          f"Отменить: <code>/offer_cancel {offer['token']}</code> · все: /offers"
+        + "".join(f"\n\n⚠️ {escape(w)}" for w in warnings),
         parse_mode="HTML", disable_web_page_preview=True)
+    if client_text:
+        # Только текст клиенту — без разметки и пометок, чтобы скопировать в личку
+        await message.answer(client_text, parse_mode=None, entities=None,
+                             disable_web_page_preview=True, protect_content=False)
 
 
 @admin_router.message(Command("offers"))

@@ -79,6 +79,52 @@ class OfferCommandTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Согласий", text)
         self.assertIn("Согласий", await self._cmd("@newbie package 7990 30.11"))
 
+    async def _cmd_all(self, args):
+        """Все ответы бота: [(текст, kwargs), ...]."""
+        msg = mock.AsyncMock()
+        msg.from_user.id = config.ADMIN_IDS[0]
+        await course_offer.cmd_offer(msg, mock.Mock(args=args))
+        return [(c.args[0], c.kwargs) for c in msg.answer.await_args_list]
+
+    async def test_template_gives_ready_text_for_dm(self):
+        replies = await self._cmd_all(
+            "@dof0miin vip 11190 20.11\n"
+            "Привет!\n\nДля тебя {тариф} за {цена} вместо {старая_цена} — до {срок}.\n"
+            "\nОплатить: {ссылка}\n")
+        self.assertEqual(len(replies), 2)
+        service, (client, kw) = replies[0][0], replies[1]
+        offer = await self._only_offer()
+        link = re.search(r"https://\S+/pay/\S+", service)[0]
+        self.assertEqual(client,
+                         "Привет!\n\nДля тебя пакет с созвоном за 11 190 ₽ вместо 12 490 ₽ — "
+                         f"до 20 ноября.\n\nОплатить: {link}\n")
+        self.assertEqual(paylinks.parse_token(link.rsplit("/pay/", 1)[1])["via"],
+                         f"offer:{offer['token']}")
+        self.assertIsNone(kw["parse_mode"])
+        self.assertFalse(kw["protect_content"])
+        self.assertNotIn("⚠️", service)
+        self.assertIn(f"/offer_cancel {offer['token']}", service)
+
+    async def test_template_warnings(self):
+        replies = await self._cmd_all("@dof0miin package 7990 30.11\nТебе {тариф}: {цена}, {скидка} {скидка}")
+        service, client = replies[0][0], replies[1][0]
+        self.assertEqual(client, "Тебе пакет: съёмка + монтаж: 7 990 ₽, {скидка} {скидка}")
+        self.assertIn("нет {ссылка}", service)
+        self.assertIn("Не знаю метки {скидка} — оставил как есть", service)
+        self.assertEqual(len(await db.get_active_course_offers("2026-11-17")), 1)   # создано
+
+    async def test_no_template_works_as_before(self):
+        replies = await self._cmd_all("@dof0miin shooting 3990 20.11")
+        self.assertEqual(len(replies), 1)
+        replies = await self._cmd_all("@dof0miin shooting 3900 21.11\n   \n")
+        self.assertEqual(len(replies), 1)
+        self.assertIn("3 900 ₽", replies[0][0])   # предложение создано, второго сообщения нет
+
+    def test_render_template(self):
+        text, unknown = course_offer.render_template("{срок}\n\n{x}{срок}{}", {"срок": "20 ноября"})
+        self.assertEqual(text, "20 ноября\n\n{x}20 ноября{}")
+        self.assertEqual(unknown, ["{x}", "{}"])
+
     async def test_offer_command_rejects_bad_input(self):
         self.assertIn("Не знаю тариф", await self._cmd("@dof0miin gold 100 20.11"))
         self.assertIn("дороже", await self._cmd("@dof0miin shooting 5990 20.11"))
