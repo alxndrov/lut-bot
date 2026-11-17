@@ -5,6 +5,7 @@
 """
 import asyncio
 import logging
+import time
 
 from aiogram import Bot
 
@@ -15,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL = 30 * 60          # раз в полчаса
 FIRST_DELAY = 90                  # даём боту спокойно подняться
+COST_INTERVAL = 24 * 60 * 60      # суммы накладных сверяем раз в сутки
+COST_DAYS = 45                    # …за последние полтора месяца
 
 # Посылка доехала и её можно забирать
 ARRIVED_CODES = {
@@ -75,6 +78,7 @@ async def _check_once(bot: Bot):
         info = await client.get_order_info(order["cdek_uuid"])
         if not info:
             continue
+        await _save_cost(order, info.get("total_sum"))
         codes = set(info.get("status_codes") or [])
         final = next((c for c in sorted(FINAL_CODES) if c in codes), None)
 
@@ -117,6 +121,36 @@ async def _check_once(bot: Bot):
         await asyncio.sleep(0.5)   # не частим с запросами к СДЭК
 
 
+async def _save_cost(order: dict, total) -> bool:
+    """Запоминает, сколько СДЭК начислил за накладную, если сумма изменилась."""
+    if total is None:
+        return False
+    total = round(float(total), 2)
+    if order.get("cdek_actual_cost") is not None and abs(float(order["cdek_actual_cost"]) - total) < 0.005:
+        return False
+    await db.set_order_cdek_cost(order["id"], total)
+    logger.info(f"CDEK: накладная {order.get('order_code')} — начислено {total:.2f} ₽ "
+                f"(было {order.get('cdek_actual_cost')})")
+    return True
+
+
+async def refresh_costs(days: int | None = COST_DAYS) -> int:
+    """Сверяет с API СДЭК суммы накладных за последние days дней (None — все).
+    Нужна и после вручения: хранение в пункте выдачи СДЭК дописывает в
+    накладную к выдаче, а опрос статусов вручённые уже не смотрит."""
+    from services.cdek_accounts import client_for_order
+    changed = 0
+    for order in await db.get_orders_cdek_cost_check(days):
+        client = client_for_order(order)
+        if not client:
+            continue
+        info = await client.get_order_info(order["cdek_uuid"])
+        if info and await _save_cost(order, info.get("total_sum")):
+            changed += 1
+        await asyncio.sleep(0.5)
+    return changed
+
+
 async def _after_final(bot: Bot, order: dict, final: str, when: str | None):
     """Вручена — просьба об отзыве через 2 дня; не вручена — пуш снимаем.
     «Мой заказ» переходит в «Получен» / «Не получен» без звука."""
@@ -148,9 +182,17 @@ async def cdek_tracking_worker(bot: Bot):
         return
     await asyncio.sleep(FIRST_DELAY)
     logger.info("CDEK-трекинг запущен")
+    last_costs = 0.0
     while True:
         try:
             await _check_once(bot)
         except Exception:
             logger.exception("CDEK-трекинг: ошибка обхода заказов")
+        if time.monotonic() - last_costs >= COST_INTERVAL or not last_costs:
+            try:
+                changed = await refresh_costs()
+                logger.info(f"CDEK: суммы накладных сверены, изменилось {changed}")
+                last_costs = time.monotonic()
+            except Exception:
+                logger.exception("CDEK: сверка сумм накладных не удалась")
         await asyncio.sleep(CHECK_INTERVAL)

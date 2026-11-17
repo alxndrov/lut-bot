@@ -366,6 +366,9 @@ class CDEKClient:
                     "status_dates": {s.get("code"): s.get("date_time") for s in reversed(statuses)},
                     # До какого момента посылка бесплатно хранится в пункте выдачи (UTC)
                     "keep_free_until": entity.get("keep_free_until"),
+                    # Сколько СДЭК начислил за накладную (с хранением и прочим) —
+                    # ровно эта сумма приходит в счёте
+                    "total_sum": (entity.get("delivery_detail") or {}).get("total_sum"),
                 }
         except Exception as e:
             logger.error(f"CDEK get_order_info error: {type(e).__name__}: {e}")

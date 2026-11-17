@@ -1017,8 +1017,11 @@ async def init_db(existing_cdek_contract: str | None = None):
         # Migration: чем закончилась доставка по данным СДЭК — вручена
         # (DELIVERED) или нет (NOT_DELIVERED, посылка уходит обратно)
         # keep_until — до какого времени посылка бесплатно ждёт в пункте выдачи
+        # cdek_actual_cost — сколько СДЭК реально начислил за накладную
+        # (delivery_detail.total_sum: тариф, страховка, НДС по договору, хранение);
+        # NULL — ещё не знаем, тогда в учёте наша оценка при оформлении
         for col in ("delivered_at TIMESTAMP DEFAULT NULL", "cdek_final TEXT DEFAULT NULL",
-                    "keep_until TIMESTAMP DEFAULT NULL"):
+                    "keep_until TIMESTAMP DEFAULT NULL", "cdek_actual_cost REAL DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except Exception:
@@ -2667,6 +2670,28 @@ async def set_order_final(order_id: int, code: str, when: str | None = None):
         await db.commit()
 
 
+async def set_order_cdek_cost(order_id: int, cost: float):
+    """Фактическая сумма СДЭК за накладную — из его API, рубль в рубль."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE orders SET cdek_actual_cost = ? WHERE id = ?",
+                         (round(float(cost), 2), order_id))
+        await db.commit()
+
+
+async def get_orders_cdek_cost_check(days: int | None = 45) -> list[dict]:
+    """Накладные, сумму которых сверяем со СДЭК: доплата за хранение и
+    прочие услуги появляются к вручению и позже. days=None — все."""
+    sql = "SELECT * FROM orders WHERE cdek_uuid IS NOT NULL"
+    params: tuple = ()
+    if days is not None:
+        sql += " AND COALESCE(shipped_at, created_at) >= datetime('now', ?)"
+        params = (f"-{int(days)} days",)
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql + " ORDER BY id", params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def set_order_keep_until(order_id: int, stamp: str | None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE orders SET keep_until = ? WHERE id = ?", (stamp, order_id))
@@ -3721,25 +3746,35 @@ async def get_personal_expenses(date_from: str, date_to: str) -> dict[str, float
 
 # Накладная набегает на счёт, когда заказ заведён в СДЭК (cdek_uuid) либо
 # отмечен отправленным — накладную могли создать руками в кабинете.
+# Покупки свёрнуты по заказу: в заказе из разных товаров строк purchases
+# несколько, а накладная одна — фактическую сумму СДЭК считаем один раз
 _CDEK_ACCRUED_FROM = """
                FROM orders o
-               LEFT JOIN purchases pu
+               LEFT JOIN (SELECT telegram_payment_id,
+                                 SUM(COALESCE(delivery_cost, 0)) AS delivery_cost,
+                                 SUM(COALESCE(delivery_amount, 0)) AS delivery_amount
+                            FROM purchases GROUP BY telegram_payment_id) pu
                       ON pu.telegram_payment_id = o.prodamus_order_id
                WHERE (o.cdek_uuid IS NOT NULL OR o.shipped_at IS NOT NULL)
-                 AND (COALESCE(o.covered_delivery_cost, 0) > 0
+                 AND (COALESCE(o.cdek_actual_cost, 0) > 0
+                      OR COALESCE(o.covered_delivery_cost, 0) > 0
                       OR COALESCE(pu.delivery_cost, 0) > 0
                       OR COALESCE(pu.delivery_amount, 0) > 0)"""
 
-# Две суммы, как в отчётах: по новым заказам счёт СДЭК сохранён
-# (тариф + страховка + НДС), у заказов до августа 2026 колонки не было —
-# для них в СДЭК уходило то, что осталось от delivery_amount после
-# комиссии Prodamus. Сводит их services.payout.delivery_out.
+# Сколько должны СДЭК (резерв «Отложено на СДЭК»): прежде всего фактическая
+# сумма из API СДЭК (orders.cdek_actual_cost) — она сходится со счётом рубль
+# в рубль. Пока её нет — наша оценка при оформлении (тариф + страховка + НДС),
+# а у заказов до августа 2026 без оценки — delivery_amount за вычетом
+# комиссии Prodamus (legacy, сводит services.payout.delivery_out).
 _CDEK_ACCRUED_SUMS = """
-                      COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) > 0
+                      COALESCE(SUM(CASE WHEN o.cdek_actual_cost IS NOT NULL
+                                        THEN o.cdek_actual_cost
+                                        WHEN COALESCE(pu.delivery_cost, 0) > 0
                                         THEN pu.delivery_cost
                                         ELSE COALESCE(o.covered_delivery_cost, 0)
                                    END), 0) AS cost,
-                      COALESCE(SUM(CASE WHEN COALESCE(pu.delivery_cost, 0) = 0
+                      COALESCE(SUM(CASE WHEN o.cdek_actual_cost IS NULL
+                                        AND COALESCE(pu.delivery_cost, 0) = 0
                                         AND COALESCE(o.covered_delivery_cost, 0) = 0
                                         THEN COALESCE(pu.delivery_amount, 0)
                                         ELSE 0 END), 0) AS legacy"""
