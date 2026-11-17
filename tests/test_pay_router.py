@@ -41,6 +41,34 @@ class TokenTest(unittest.TestCase):
             self.assertTrue(prodamus.prodamus_url("p_1_10", 100, "Kit").startswith("https://physical/"))
             self.assertTrue(prodamus.prodamus_url("c_1_3", 100, "Kit").startswith("https://digital/"))
 
+    def test_prodamus_order_id_carries_amount(self):
+        """Сумма у заказа поменялась (другая доставка) — в Prodamus новый номер,
+        иначе Prodamus.Pay отвечает «заказ, возможно, уже оплачен»."""
+        from urllib.parse import parse_qs, urlsplit
+        with mock.patch.multiple(config, PRODAMUS_SHOP_URL_PHYSICAL="https://physical",
+                                 PRODAMUS_SECRET_PHYSICAL="s"):
+            q1 = parse_qs(urlsplit(prodamus.prodamus_url("p_1_10", 1351, "Kit")).query)
+            q2 = parse_qs(urlsplit(prodamus.prodamus_url("p_1_10", 1693, "Kit")).query)
+        self.assertEqual(q1["order_id"], ["p_1_10-1351"])
+        self.assertEqual(q2["order_id"], ["p_1_10-1693"])
+        self.assertEqual(prodamus.order_num_from_prodamus("p_1_10-1693"), "p_1_10")
+        self.assertEqual(prodamus.order_num_from_prodamus("p_1_10"), "p_1_10")   # старые ссылки
+
+    async def test_webhook_strips_amount_suffix(self):
+        from aiohttp import web
+        from aiohttp.test_utils import make_mocked_request
+        from handlers import prodamus_webhook as pw
+        body = {"order_num": "p_294789073_10-1693", "order_id": "777", "sum": "1693.00",
+                "payment_status": "success"}
+        req = make_mocked_request("POST", "/prodamus/webhook/physical", app=web.Application())
+        req.post = mock.AsyncMock(return_value=body)
+        req.app["bot"] = mock.AsyncMock()
+        provision = mock.AsyncMock(return_value=True)
+        with mock.patch.object(pw, "provision_payment", provision):
+            resp = await pw.handle_webhook(req, secret="")
+        self.assertEqual(resp.status, 200)
+        self.assertEqual(provision.await_args.args[1:], (294789073, 10, "p", "777", 1693))
+
 
 class _DbCase(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):

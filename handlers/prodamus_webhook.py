@@ -16,7 +16,7 @@ from aiogram.types import BufferedInputFile
 
 import config
 import database as db
-from services.prodamus import verify_webhook
+from services.prodamus import order_num_from_prodamus, verify_webhook
 from services.logo_svg import to_svg, is_logo_question, is_vector
 from services.answer_labels import annotate, is_old_palette
 
@@ -56,9 +56,11 @@ async def handle_webhook(request: web.Request, secret: str | list = "") -> web.R
                           f"domain={raw.get('domain')!r})")
             return web.Response(text="invalid sign", status=403)
 
+    # В Prodamus номер уходит с хвостом «-<сумма>» (services/prodamus.prodamus_url)
+    order_num = order_num_from_prodamus(raw.get("order_num", ""))
+
     # Неуспешный платёж — уведомляем покупателя если знаем его user_id
     if raw.get("payment_status") != "success":
-        order_num = raw.get("order_num", "")
         if order_num:
             try:
                 # Есть ЮKassa — сразу запасная ссылка на тот же заказ
@@ -77,7 +79,6 @@ async def handle_webhook(request: web.Request, secret: str | list = "") -> web.R
         return web.Response(text="ok")
 
     # Сквозной параметр order_num: "{order_type}_{user_id}_{product_id}"
-    order_num = raw.get("order_num", "")
     if not order_num:
         logger.warning(
             f"prodamus webhook: нет order_num — ручной платёж из дашборда? "

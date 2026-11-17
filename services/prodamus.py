@@ -123,7 +123,12 @@ def build_payment_url(
 
 def prodamus_url(order_num: str, price: int, product_name: str) -> str:
     """Прямая ссылка Prodamus по номеру заказа: физтовары ('p_…') — в свой
-    магазин, остальное — в основной, как и раньше выбирали вызывающие."""
+    магазин, остальное — в основной, как и раньше выбирали вызывающие.
+
+    В Prodamus уходит номер с суммой: p_<user>_<товар>-<сумма>. Prodamus.Pay
+    помнит заказ по номеру, и если сумма у того же номера поменялась (клиент
+    сменил доставку), отвечает «заказ, возможно, уже оплачен» и оплатить не
+    даёт. Хвост «-<сумма>» вебхук отрезает (order_num_from_prodamus)."""
     order_type, user_id, product_id = order_num.split("_", 2)
     physical = order_type == "p"
     shop_url = config.PRODAMUS_SHOP_URL_PHYSICAL if physical else config.PRODAMUS_SHOP_URL
@@ -131,8 +136,13 @@ def prodamus_url(order_num: str, price: int, product_name: str) -> str:
         product_name, price, int(user_id), int(product_id), order_type,
         config.PRODAMUS_SECRET_PHYSICAL if physical else config.PRODAMUS_SECRET,
         config.PRODAMUS_WEBHOOK_URL_PHYSICAL if physical else config.PRODAMUS_WEBHOOK_URL,
-        do="pay")
+        do="pay", order_id=f"{order_num}-{int(price)}")
     return shop_url.rstrip("/") + "/?" + _urlencode(params)
+
+
+def order_num_from_prodamus(order_id: str) -> str:
+    """p_1_10-1693 → p_1_10. Старые ссылки шли без хвоста — их как есть."""
+    return (order_id or "").split("-", 1)[0]
 
 
 def clean_product_name(name: str) -> str:
@@ -150,10 +160,10 @@ def clean_product_name(name: str) -> str:
 
 def _payment_params(product_name: str, price: int, user_id: int, product_id: int,
                     order_type: str, secret: str, notification_url: str,
-                    do: str) -> dict:
+                    do: str, order_id: str = "") -> dict:
     params = {
         "do": do,
-        "order_id": f"{order_type}_{user_id}_{product_id}",
+        "order_id": order_id or f"{order_type}_{user_id}_{product_id}",
         "products[0][name]": clean_product_name(product_name),
         "products[0][price]": str(price),
         "products[0][quantity]": "1",
