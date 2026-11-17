@@ -29,6 +29,8 @@ class CourseOfferTest(unittest.IsolatedAsyncioTestCase):
         await db.create_course_offer("tok", 1, 4490, 1, "2026-11-30")
         p = mock.patch("handlers.course.send_course", mock.AsyncMock())
         self.send_course = p.start(); self.addCleanup(p.stop)
+        p = mock.patch.object(config, "LEADS_SHEET_ID", "")   # в настоящую «Базу» не пишем
+        p.start(); self.addCleanup(p.stop)
 
     async def asyncTearDown(self):
         db.DB_PATH = self.old
@@ -57,7 +59,7 @@ class CourseOfferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("4 490 ₽", text)
         self.assertIn("<s>4 990 ₽</s>", text)
         kb = msg.answer.await_args.kwargs["reply_markup"]
-        self.assertEqual(kb.inline_keyboard[0][0].callback_data, "course:offer:tok")
+        self.assertTrue(kb.inline_keyboard[0][0].url.split("/pay/")[1])   # «Карта РФ или СБП»
         stranger = mock.AsyncMock()
         await course_offer.claim(stranger, 2, "tok")
         self.assertIn("другого", stranger.answer.await_args.args[0])

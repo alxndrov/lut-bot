@@ -582,6 +582,24 @@ async def init_db(existing_cdek_contract: str | None = None):
                 created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        try:   # отменённое /offer_cancel предложение не действует
+            await db.execute("ALTER TABLE course_offers ADD COLUMN cancelled_at TIMESTAMP")
+        except Exception:
+            pass
+        # События по личным скидкам (открыл, перешёл к оплате, купил) — для
+        # колонки «Ответ и заметки» таблицы «База»; synced = 1 — уже записано туда
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_offer_events (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                token      TEXT NOT NULL,
+                user_id    INTEGER NOT NULL,
+                kind       TEXT NOT NULL,
+                detail     TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                synced     INTEGER NOT NULL DEFAULT 0,
+                UNIQUE (token, kind)
+            )
+        """)
         # Очередь на личный разбор — первые N покупателей пакета. Место
         # выдаётся одним INSERT … SELECT MAX+1, уникальность position не даст
         # двум одновременным оплатам получить одно и то же место.
@@ -5871,6 +5889,65 @@ async def get_course_offer(token: str) -> Optional[dict]:
         async with db.execute("SELECT * FROM course_offers WHERE token = ?", (token,)) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None
+
+
+async def cancel_course_offer(token: str) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("UPDATE course_offers SET cancelled_at = CURRENT_TIMESTAMP "
+                               "WHERE token = ? AND cancelled_at IS NULL", (token,))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_active_course_offers(today: str) -> list[dict]:
+    """Не отменённые и с valid_until не раньше today (YYYY-MM-DD по Москве)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+                "SELECT o.*, u.username, u.first_name, x.title, x.slug FROM course_offers o "
+                "LEFT JOIN users u ON u.user_id = o.user_id "
+                "LEFT JOIN course_options x ON x.id = o.option_id "
+                "WHERE o.cancelled_at IS NULL AND o.valid_until >= ? "
+                "ORDER BY o.valid_until, o.created_at", (today,)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def latest_course_offer(user_id: int, option_id: int) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM course_offers WHERE user_id = ? AND option_id = ? "
+                              "AND cancelled_at IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                              (user_id, option_id)) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def add_course_offer_event(token: str, user_id: int, kind: str, detail: str = "") -> bool:
+    """Одно событие каждого вида на предложение. True — записано впервые."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("INSERT OR IGNORE INTO course_offer_events (token, user_id, kind, detail) "
+                               "VALUES (?, ?, ?, ?)", (token, user_id, kind, detail))
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def get_course_offer_events(token: str | None = None, unsynced: bool = False) -> list[dict]:
+    sql, args = "SELECT * FROM course_offer_events WHERE 1 = 1", []
+    if token:
+        sql += " AND token = ?"
+        args.append(token)
+    if unsynced:
+        sql += " AND synced = 0"
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql + " ORDER BY id", args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
+async def mark_course_offer_event_synced(event_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("UPDATE course_offer_events SET synced = 1 WHERE id = ?", (event_id,))
+        await db.commit()
 
 
 async def set_gift_recipient(token: str, recipient: str | None):

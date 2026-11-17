@@ -9,7 +9,9 @@
 Колонки Дани — J Статус, K Следующий шаг, L Когда написать, M Первое
 сообщение, N Ответ и заметки — бот пишет только один раз, при добавлении
 строки (J и пометка о рассылке 05.11 в N), и ещё ставит J = «Купил», когда
-человек оплатил то, чем интересовался. A — формула номера, её не трогаем.
+человек оплатил то, чем интересовался. В N бот ещё дописывает события по
+личным скидкам /offer (handlers/course_offer.py): открыл, перешёл к оплате,
+купил. A — формула номера, её не трогаем.
 
 Источники (время в SQLite — UTC, в таблицу пишется дата по Москве):
 - course_views — открыл экран курса в боте или приложении;
@@ -25,6 +27,7 @@
 """
 import asyncio
 import logging
+import threading
 from datetime import datetime, timedelta, timezone
 
 import aiosqlite
@@ -259,6 +262,40 @@ def plan(sheet: list[list[str]], leads: dict[int, dict], tracked: set[int]):
     return updates, remember, forget, missing
 
 
+# Запись в лист идёт из двух мест (выгрузка раз в 15 минут и заметки по личным
+# скидкам) — по очереди, чтобы обе не заняли одну и ту же пустую строку
+SHEET_LOCK = threading.Lock()
+
+
+def note_plan(sheet: list[list[str]], user_id: int, line: str, cells: dict) -> list[dict]:
+    """Дописать строку в «Ответ и заметки» (N) человека с этим Telegram ID.
+    Нет строки — занимаем первую пустую и пишем ещё B–D (ник, имя, ID)."""
+    rows = [list(r) + [''] * (14 - len(r)) for r in sheet]
+    for i, r in enumerate(rows):
+        if r[3].strip() == str(user_id):
+            old = r[13].strip()
+            text = old + '\n' + line if old else line
+            return [{'range': f'N{i + 2}', 'values': [[_text(text)]]}]
+    used = {i + 2 for i, r in enumerate(rows) if any(c.strip() for c in r[1:])}
+    n = next((n for n in range(2, LAST_ROW + 1) if n not in used), None)
+    if n is None:
+        return []
+    return [{'range': f'B{n}:D{n}', 'values': [[cells['B'], _text(cells['C']), cells['D']]]},
+            {'range': f'N{n}', 'values': [[_text(line)]]}]
+
+
+def append_note(user_id: int, username: str | None, first_name: str | None, line: str) -> bool:
+    """Синхронно (звать через asyncio.to_thread). False — в листе нет места."""
+    cells = {'B': f'=HYPERLINK("https://t.me/{username}";"@{username}")' if username else '',
+             'C': first_name or '', 'D': str(user_id)}
+    with SHEET_LOCK:
+        ws = _sheet()
+        updates = note_plan(ws.get(f'A2:N{LAST_ROW}'), user_id, line, cells)
+        if updates:
+            ws.batch_update(updates, value_input_option='USER_ENTERED')
+    return bool(updates)
+
+
 def _sheet():
     import gspread
     client = gspread.service_account(filename=config.GOOGLE_CREDENTIALS_FILE)
@@ -267,11 +304,12 @@ def _sheet():
 
 
 def _publish(leads, tracked):
-    ws = _sheet()
-    current = ws.get(f'A2:N{LAST_ROW}')
-    updates, remember, forget, missing = plan(current, leads, tracked)
-    if updates:
-        ws.batch_update(updates, value_input_option='USER_ENTERED')
+    with SHEET_LOCK:
+        ws = _sheet()
+        current = ws.get(f'A2:N{LAST_ROW}')
+        updates, remember, forget, missing = plan(current, leads, tracked)
+        if updates:
+            ws.batch_update(updates, value_input_option='USER_ENTERED')
     return len(updates), remember, forget, missing
 
 
@@ -304,4 +342,11 @@ async def leads_sync_loop():
             raise
         except Exception:
             logger.exception('Заинтересованные: выгрузка в таблицу не удалась')
+        try:   # заметки по личным скидкам, которые не записались сразу
+            from handlers import course_offer
+            await course_offer.flush_events()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception('Заинтересованные: заметки по личным скидкам не записались')
         await asyncio.sleep(PERIOD)

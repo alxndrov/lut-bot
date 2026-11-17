@@ -138,6 +138,7 @@ async def main():
         admin_dp.include_router(refunds.router)
         admin_dp.include_router(course_admin.router)
         admin_dp.include_router(course_gift.router)   # /gift — курс в подарок
+        admin_dp.include_router(course_offer.admin_router)   # /offer — личное предложение на курс
         admin_dp.include_router(manual_sale.router)    # /sale — продажа вне бота
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)
@@ -168,6 +169,7 @@ async def main():
                 BotCommand(command="courseorders", description="🎓 Заказы по курсу"),
                 BotCommand(command="sale", description="🧾 Продажа вне бота (перевод)"),
                 BotCommand(command="gift", description="🎁 Курс в подарок"),
+                BotCommand(command="offers", description="🤍 Личные предложения на курс"),
                 BotCommand(command="nalog", description="🧾 Чеки «Мой налог» (ЮKassa)"),
                 BotCommand(command="finance", description="💳 Финансы"),
                 BotCommand(command="payments", description="🔀 Оплата: Prodamus / ЮKassa"),

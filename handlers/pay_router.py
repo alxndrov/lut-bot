@@ -483,6 +483,10 @@ async def _offer_pay(request: web.Request, link: dict, bot_username: str) -> web
         return _page("Скидка не действует",
                      problem + " Актуальная стоимость — в разделе «Курс» в боте.",
                      bot_username, status=410)
+    if method not in ("paw", "lava"):   # страница предложения: тариф, цены, срок, способ оплаты
+        return await course_offer.offer_page(request, offer, link, bot_username)
+    if request.method == "GET":
+        await course_offer.log_event(offer, f"pay_{method}")
     # О каждом переходе админам пишет handle_pay (_click_notice)
     if method == "lava":
         if not config.LAVA_ENABLED:

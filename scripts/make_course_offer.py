@@ -5,6 +5,7 @@
 и до --until включительно по Москве (по умолчанию — до конца текущего месяца).
 Подробности — handlers/course_offer.py.
 
+Обычно удобнее /offer в админ-боте; скрипт — то же самое из консоли сервера.
 Запуск на сервере из корня репозитория:
     venv/bin/python -m scripts.make_course_offer @ник shooting --percent 10
     venv/bin/python -m scripts.make_course_offer 123456 bundle --price 7990 --until 2026-12-15
@@ -68,10 +69,9 @@ async def main():
     who = f"@{user['username']}" if user.get("username") else user["user_id"]
     print(f"{option['title']}: {svc.rub(full)} → {svc.rub(price)} для {who} "
           f"(id {user['user_id']}) до {until} включительно")
-    print("Оплата картой РФ / СБП:", pay_link(offer, option))
-    if config.LAVA_ENABLED:
-        print("Зарубежная карта:      ", pay_link(offer, option, "lava"))
-    print("Экран скидки в боте:   ", f"https://t.me/{username}?start={PREFIX}{token}")
+    print("Ссылка (страница предложения и выбор оплаты):", pay_link(offer, option))
+    print("Сразу карта РФ / СБП:", pay_link(offer, option, "paw"))
+    print("То же предложение в боте:", f"https://t.me/{username}?start={PREFIX}{token}")
 
 
 if __name__ == "__main__":

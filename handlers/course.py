@@ -364,6 +364,11 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
                      else "\n♻️ Докупка второго раздела")
         await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {user.get('first_name') or '—'} {who}\n"
                           f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}", sale=payment_id)
+        try:   # оплата по личному предложению — в «Базу» (handlers/course_offer.py)
+            from handlers import course_offer
+            await course_offer.on_purchase(user_id, option_id, amount)
+        except Exception as e:
+            logger.warning(f"course: событие покупки по предложению не записано: {e}")
 
     call_until = None
     if svc.is_call_option(option):
