@@ -837,7 +837,8 @@ async def sync_finance():
                 header, cols = header_columns(values[config.GOOGLE_SHEET_FINANCE_TAB][0]
                                               if values[config.GOOGLE_SHEET_FINANCE_TAB] else [])
                 rows = settle.sheet_values(cols, await db.get_last_settlement(),
-                                           config.GOOGLE_SHEET_FINANCE_TAB)
+                                           config.GOOGLE_SHEET_FINANCE_TAB,
+                                           (await db.get_cdek_account())["due"])
                 await asyncio.to_thread(_publish_bot_tab, book, props, SETTLE_TAB, rows,
                                         (0, 4, 7, 14, 16, 18), 1, 1, date_cells=[(1, 1)])
             except Exception:

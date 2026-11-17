@@ -289,6 +289,12 @@ async def init_db(existing_cdek_contract: str | None = None):
                     f"ALTER TABLE {table} ADD COLUMN delivery_cost REAL DEFAULT 0")
             except Exception:
                 pass
+        # Migration: оценка доставки при оформлении — когда СДЭК начислит
+        # фактическую сумму, она встаёт в delivery_cost (db.apply_actual_delivery)
+        try:
+            await db.execute("ALTER TABLE purchases ADD COLUMN delivery_cost_est REAL DEFAULT NULL")
+        except Exception:
+            pass
         # Migration: получатель для накладной СДЭК — ФИО и телефон
         for col in ("recipient_name TEXT DEFAULT NULL",
                     "recipient_phone TEXT DEFAULT NULL",
@@ -1037,7 +1043,10 @@ async def init_db(existing_cdek_contract: str | None = None):
                     "cdek_return_cost REAL DEFAULT NULL",
                     # keep_reminded_for — срок хранения, о котором уже напомнили
                     # за 2 дня (продлит СДЭК срок — напомним о новом)
-                    "keep_reminded_for TEXT DEFAULT NULL"):
+                    "keep_reminded_for TEXT DEFAULT NULL",
+                    # covered_delivery_cost_est — наша оценка доставки повтора до того,
+                    # как её заменила фактическая сумма СДЭК
+                    "covered_delivery_cost_est REAL DEFAULT NULL"):
             try:
                 await db.execute(f"ALTER TABLE orders ADD COLUMN {col}")
             except Exception:
@@ -2692,6 +2701,43 @@ async def set_order_cdek_cost(order_id: int, cost: float):
         await db.execute("UPDATE orders SET cdek_actual_cost = ? WHERE id = ?",
                          (round(float(cost), 2), order_id))
         await db.commit()
+    await apply_actual_delivery(order_id)
+
+
+async def apply_actual_delivery(order_id: int) -> bool:
+    """Фактическую сумму СДЭК (накладная + обратная по невыкупу) — в доставку
+    заказа, по которой считаются прибыль, доли и лист «cashflow»: в строку
+    purchases с доставкой, у повтора — в covered_delivery_cost. Оценка при
+    оформлении остаётся в *_est. Цена доставки для клиента не меняется.
+    Обратная доставка, уже записанная в возврат денег, второй раз не идёт."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT o.*, EXISTS (SELECT 1 FROM refunds r WHERE r.order_id = o.id
+                                    AND COALESCE(r.return_delivery, 0) > 0) AS refund_back
+               FROM orders o WHERE o.id = ?""", (order_id,)) as cur:
+            o = await cur.fetchone()
+        if not o or o["cdek_actual_cost"] is None:
+            return False
+        cost = round(float(o["cdek_actual_cost"])
+                     + (0.0 if o["refund_back"] else float(o["cdek_return_cost"] or 0)), 2)
+        async with db.execute(
+            """SELECT id FROM purchases WHERE telegram_payment_id = ?
+                 AND (COALESCE(delivery_amount, 0) > 0 OR COALESCE(delivery_cost, 0) > 0)
+               ORDER BY id LIMIT 1""", (o["prodamus_order_id"],)) as cur:
+            row = await cur.fetchone()
+        if row:
+            await db.execute(
+                "UPDATE purchases SET delivery_cost_est = COALESCE(delivery_cost_est, delivery_cost), "
+                "delivery_cost = ? WHERE id = ?", (cost, row["id"]))
+        elif float(o["covered_delivery_cost"] or 0) > 0:
+            await db.execute(
+                "UPDATE orders SET covered_delivery_cost_est = COALESCE(covered_delivery_cost_est, "
+                "covered_delivery_cost), covered_delivery_cost = ? WHERE id = ?", (cost, order_id))
+        else:
+            return False
+        await db.commit()
+        return True
 
 
 async def set_order_cdek_return_cost(order_id: int, cost: float):
@@ -2700,6 +2746,7 @@ async def set_order_cdek_return_cost(order_id: int, cost: float):
         await db.execute("UPDATE orders SET cdek_return_cost = ? WHERE id = ?",
                          (round(float(cost), 2), order_id))
         await db.commit()
+    await apply_actual_delivery(order_id)
 
 
 async def add_cdek_adjustment(adj_date: str, amount: float, comment: str) -> int:

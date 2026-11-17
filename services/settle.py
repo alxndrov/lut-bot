@@ -300,7 +300,11 @@ def _col_letter(i: int) -> str:
     return out
 
 
-def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashflow") -> list[list]:
+CDEK_LABEL = "Отложено на СДЭК по счетам СДЭК"   # на неё ссылается «Финансы» (по подписи)
+
+
+def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashflow",
+                 cdek_due: float | None = None) -> list[list]:
     """Лист «Взаиморасчёт» (решение Дани 28.10.2026): свободные деньги каждого
     берутся из «Финансов» («После резервов у …»), здесь — только доли с
     последнего расчёта и кто кому переводит. Справа (E:F) — прибыль за период,
@@ -347,7 +351,9 @@ def sheet_values(cols: dict[str, int], last: dict | None, cashflow: str = "cashf
         ["", "Миша", "Даня", "", "Расходы на физтовары", exp("Физтовары")],              # 5
         ["Свободные деньги на руках", f(fin_row("После резервов у Миши")),
          f(fin_row("После резервов у Дани")), "", "Общие расходы", exp("Общее")],
-        [],
+        # Резерв СДЭК — из бота: фактические суммы накладных по API СДЭК,
+        # обратные накладные и поправки по актам сверки минус оплаты
+        ["", "", "", "", CDEK_LABEL, round(cdek_due, 2) if cdek_due is not None else ""],
         ["ДОЛЯ С ПОСЛЕДНЕГО РАСЧЁТА"],                                                # 8
         [f"Цифра минус её расходы {100 - digital}/{digital}",
          f(f"(F2-F4)*{100 - digital}/100"), f(f"(F2-F4)*{digital}/100")],

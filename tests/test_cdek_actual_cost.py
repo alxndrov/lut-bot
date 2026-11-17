@@ -100,3 +100,15 @@ class CdekActualCostTests(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual((await db.get_cdek_accrued("2026-10-25", "2026-10-25"))["total"], 100.5)
         months = {r["month"]: r["total"] for r in await db.get_cdek_accrued_by_month()}
         self.assertAlmostEqual(months["2026-10"], 317.17)
+
+    async def test_actual_goes_into_profit_delivery_keeping_estimate(self):
+        order_id = await self.make_order("p7", [(235, 216.67), (0, 0)])
+        await db.set_order_cdek_cost(order_id, 202.49)
+        await db.set_order_cdek_return_cost(order_id, 160.5)
+        async with aiosqlite.connect(db.DB_PATH) as conn:
+            rows = await (await conn.execute(
+                "SELECT delivery_amount, delivery_cost, delivery_cost_est FROM purchases "
+                "WHERE telegram_payment_id = 'p7' ORDER BY id")).fetchall()
+        self.assertEqual(rows[0], (235, 362.99, 216.67))   # клиент платил 235 — не меняется
+        self.assertEqual(rows[1][1], 0)
+        self.assertAlmostEqual((await db.get_cdek_accrued())["total"], 362.99)
