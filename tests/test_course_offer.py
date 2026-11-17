@@ -6,10 +6,11 @@ from unittest import mock
 
 import aiosqlite
 
+import config
 import database as db
 from handlers import course_offer
 from scripts.make_course_offer import discounted, month_end
-from services import course as svc
+from services import course as svc, paylinks
 
 
 class CourseOfferTest(unittest.IsolatedAsyncioTestCase):
@@ -73,9 +74,43 @@ class CourseOfferTest(unittest.IsolatedAsyncioTestCase):
         cb.data = "course:offer:tok"
         cb.from_user.id = 1
         with mock.patch.object(svc, "now_msk", return_value=self._at("2026-11-20 12:00")), \
-             mock.patch("handlers.pay_router.payment_method_keyboard") as kb:
+             mock.patch.object(config, "LAVA_ENABLED", False):
             await course_offer.cb_pay(cb)
-        kb.assert_called_once_with("c_1_1", 4490, "Съёмка", "c")
+        url = cb.message.answer.await_args.kwargs["reply_markup"].inline_keyboard[0][0].url
+        link = paylinks.parse_token(url.rsplit("/pay/", 1)[1])
+        self.assertEqual((link["order_num"], link["amount"], link["via"]),
+                         ("c_1_1", 4490, "offer:tok:paw"))
+
+    async def _open(self, token_via="offer:tok:paw", amount=4490, order="c_1_1",
+                    now="2026-11-20 12:00"):
+        from aiohttp import web
+        from handlers import pay_router
+        link = paylinks.parse_token(paylinks.make_token(order, amount, "Съёмка", token_via))
+        req = mock.Mock(app={"bot": mock.AsyncMock()})
+        notify = mock.AsyncMock()
+        with mock.patch.object(svc, "now_msk", return_value=self._at(now)), \
+             mock.patch.object(config, "PAYANYWAY_ENABLED", True), \
+             mock.patch.object(pay_router, "_notify", notify), \
+             mock.patch.object(pay_router, "_payanyway_url",
+                               mock.AsyncMock(return_value="https://paw/x")):
+            try:
+                resp = await pay_router._offer_pay(req, link, "malimabibot")
+            except web.HTTPFound as e:
+                return e.location, notify
+        return resp.status, notify
+
+    async def test_pay_link_checks_offer_and_records_click(self):
+        where, notify = await self._open()
+        self.assertEqual(where, "https://paw/x")
+        self.assertIn("Открыл ссылку со скидкой", notify.await_args.args[1])
+        self.assertEqual((await db.get_pay_click("c_1_1"))["amount"], 4490)
+        where, notify = await self._open()                       # второй клик — без уведомления
+        self.assertEqual(where, "https://paw/x")
+        notify.assert_not_awaited()
+        self.assertEqual((await self._open(now="2026-12-01 00:01"))[0], 410)   # срок вышел
+        self.assertEqual((await self._open(amount=100))[0], 410)              # чужая сумма
+        self.assertEqual((await self._open(order="c_2_1"))[0], 410)           # другой человек
+        self.assertEqual((await self._open(token_via="offer:nope:paw"))[0], 410)
 
     def test_helpers(self):
         self.assertEqual(discounted(4990, 10), 4490)

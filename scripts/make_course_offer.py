@@ -1,4 +1,5 @@
-"""Личная скидка на курс — ссылка t.me/<бот>?start=offer_<token>.
+"""Личная скидка на курс: ссылка на оплату app.malimabi.com/pay/<токен>
+(и экран скидки в боте t.me/<бот>?start=offer_<token>).
 
 Работает только у указанного аккаунта (по Telegram ID, ник берём для поиска)
 и до --until включительно по Москве (по умолчанию — до конца текущего месяца).
@@ -19,7 +20,7 @@ from aiogram import Bot
 
 import config
 import database as db
-from handlers.course_offer import PREFIX
+from handlers.course_offer import PREFIX, pay_link
 from services import course as svc
 
 
@@ -58,6 +59,7 @@ async def main():
 
     token = secrets.token_urlsafe(9)
     await db.create_course_offer(token, option["id"], price, user["user_id"], until, args.note)
+    offer = await db.get_course_offer(token)
     bot = Bot(token=config.BOT_TOKEN)
     try:
         username = (await bot.get_me()).username
@@ -66,7 +68,10 @@ async def main():
     who = f"@{user['username']}" if user.get("username") else user["user_id"]
     print(f"{option['title']}: {svc.rub(full)} → {svc.rub(price)} для {who} "
           f"(id {user['user_id']}) до {until} включительно")
-    print(f"https://t.me/{username}?start={PREFIX}{token}")
+    print("Оплата картой РФ / СБП:", pay_link(offer, option))
+    if config.LAVA_ENABLED:
+        print("Зарубежная карта:      ", pay_link(offer, option, "lava"))
+    print("Экран скидки в боте:   ", f"https://t.me/{username}?start={PREFIX}{token}")
 
 
 if __name__ == "__main__":

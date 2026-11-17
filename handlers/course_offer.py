@@ -7,8 +7,10 @@ Telegram-аккаунту, для которого она сделана, и т�
 и ведёт на обычный экран курса.
 
 Оплата — тем же заказом c_{клиент}_{вариант}, что и с экрана курса, поэтому
-доступ после оплаты выдаётся сам. Срок и владельца проверяем и при открытии
-ссылки, и при нажатии «Оплатить»: старое сообщение после срока не сработает.
+доступ после оплаты выдаётся сам. Ссылку на оплату можно дать и сразу —
+pay_link(): https://app.malimabi.com/pay/<токен>; при переходе по ней
+handlers/pay_router._offer_pay снова проверяет срок и сумму, пишет клик
+в pay_clicks, а о первом переходе сообщает админам.
 """
 import logging
 from datetime import datetime
@@ -46,6 +48,15 @@ async def _check(offer: dict | None, user_id: int, now: datetime | None = None) 
     if set(svc.option_sections(option)) <= await db.get_user_course_sections(user_id):
         return "Этот раздел у тебя уже есть 🤍"
     return None
+
+
+def pay_link(offer: dict, option: dict, method: str = "paw") -> str:
+    """https://app.malimabi.com/pay/<токен> — переход проверяет срок и сумму
+    (handlers/pay_router._offer_pay), фиксирует клик и ведёт в PayAnyWay
+    (method='paw') или lava.top ('lava')."""
+    from services import paylinks
+    return paylinks.link(f"c_{offer['user_id']}_{offer['option_id']}", offer["price"],
+                         option["title"], via=f"offer:{offer['token']}:{method}")
 
 
 def _date_text(offer: dict) -> str:
@@ -96,9 +107,10 @@ async def cb_pay(callback: CallbackQuery):
         await callback.answer(problem, show_alert=True)
         return
     option = await db.get_course_option(offer["option_id"])
-    from handlers.pay_router import payment_method_keyboard
+    rows = [[InlineKeyboardButton(text="💳 Карта РФ или СБП", url=pay_link(offer, option))]]
+    if config.LAVA_ENABLED:
+        rows.append([InlineKeyboardButton(text="🌍 Иностранный банк",
+                                          url=pay_link(offer, option, "lava"))])
     await callback.answer()
-    await callback.message.answer(
-        "Выберите способ оплаты:",
-        reply_markup=payment_method_keyboard(
-            f"c_{callback.from_user.id}_{option['id']}", offer["price"], option["title"], "c"))
+    await callback.message.answer("Выберите способ оплаты:",
+                                  reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))

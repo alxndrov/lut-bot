@@ -353,6 +353,10 @@ async def handle_pay(request: web.Request) -> web.Response:
         await db.record_pay_click(link['order_num'], link['user_id'], link['amount'], link['name'], 'payanyway')
         raise web.HTTPFound(url)
 
+    # Личная скидка на курс (handlers/course_offer.py): via = offer:<token>:paw|lava
+    if link["via"].startswith("offer:"):
+        return await _offer_pay(request, link, bot_username)
+
     # Заказ физтовара уже оплачен — повторный переход по старой кнопке не
     # должен привести ко второй оплате
     if link["kind"] == "p":
@@ -401,6 +405,44 @@ async def handle_pay(request: web.Request) -> web.Response:
                               link["name"], provider)
     logger.info(f"pay: {link['order_num']} {link['amount']} ₽ → {provider}"
                 f"{' (запасная)' if link['via'] else ''}")
+    raise web.HTTPFound(url)
+
+
+async def _offer_pay(request: web.Request, link: dict, bot_username: str) -> web.Response:
+    """Ссылка с личной скидкой: та же проверка, что в боте (владелец, срок,
+    раздел ещё не куплен), плюс что вариант и сумма совпадают с предложением.
+    Первый переход — админам, все переходы — в pay_clicks."""
+    from handlers import course_offer
+    _, token, method = (link["via"].split(":") + ["", ""])[:3]
+    offer = await db.get_course_offer(token)
+    problem = await course_offer._check(offer, link["user_id"])
+    if not problem and (link["kind"] != "c" or link["amount"] != offer["price"]
+                        or link["order_num"] != f"c_{offer['user_id']}_{offer['option_id']}"):
+        problem = "Эта ссылка не работает."
+    if problem:
+        logger.info(f"pay: скидка {token} ({link['order_num']}) не открыта: {problem}")
+        return _page("Скидка не действует",
+                     problem + " Актуальная стоимость — в разделе «Курс» в боте.",
+                     bot_username, status=410)
+    key = f"offer_click:{token}"
+    if not await db.get_setting(key):
+        await db.set_setting(key, datetime.now(timezone.utc).isoformat())
+        user = await db.get_user(link["user_id"]) or {}
+        who = f"@{user['username']}" if user.get("username") else f"id:{link['user_id']}"
+        await _notify(request.app["bot"],
+                      f"👀 <b>Открыл ссылку со скидкой</b>\n{escape(who)} — "
+                      f"{escape(link['name'])}, {link['amount']} ₽ (до "
+                      f"{course_offer._date_text(offer)})")
+    if method == "lava":
+        if not config.LAVA_ENABLED:
+            return _page("Оплата временно недоступна", "Попробуйте позже.", bot_username, status=503)
+        return await _lava_page(request, link, bot_username)
+    if not config.PAYANYWAY_ENABLED:
+        return _page("Оплата временно недоступна", "Попробуйте позже.", bot_username, status=503)
+    url = await _payanyway_url(link, f"https://t.me/{bot_username}" if bot_username else "")
+    await db.record_pay_click(link["order_num"], link["user_id"], link["amount"],
+                              link["name"], "payanyway")
+    logger.info(f"pay: скидка {token} {link['order_num']} {link['amount']} ₽ → payanyway")
     raise web.HTTPFound(url)
 
 
