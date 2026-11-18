@@ -537,8 +537,12 @@ async def handle_payanyway_notify(request: web.Request) -> web.Response:
         params.update({k: v for k, v in (await request.post()).items() if isinstance(v, str)})
     txn = params.get("MNT_TRANSACTION_ID", "")
     bot = request.app["bot"]
+    # Адрес отправителя — копим, с каких серверов шлёт PayAnyWay: списка IP он
+    # не публикует, а фильтр по адресам — вторая защита после подписи
+    ip = (request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+          or request.remote or "?")
     logger.info(f"payanyway: уведомление {txn} {params.get('MNT_AMOUNT')} ₽ "
-                f"op={params.get('MNT_OPERATION_ID')} test={params.get('MNT_TEST_MODE')}")
+                f"op={params.get('MNT_OPERATION_ID')} test={params.get('MNT_TEST_MODE')} ip={ip}")
     if not config.PAYANYWAY_ENABLED:
         return web.Response(text="FAIL", status=503)
     if not txn:   # пустой запрос (сканеры, проверка адреса) — без тревоги

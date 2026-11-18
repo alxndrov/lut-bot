@@ -1,4 +1,5 @@
 import asyncio
+import os
 import logging
 
 from aiohttp import web
@@ -33,9 +34,24 @@ logging.basicConfig(
 )
 
 
+async def _poll(dp: Dispatcher, bot: Bot, **kw) -> None:
+    """Поллинг, который переживает сбой Telegram на старте: aiogram сначала
+    спрашивает get_me и на 502 падает — а с ним весь процесс, и вместе с
+    ботом ложатся мини-апп, ссылки на оплату и вебхуки касс."""
+    while True:
+        try:
+            await bot.me()
+            break
+        except Exception as e:
+            logging.warning(f"Telegram недоступен ({e}) — повтор через 15 с")
+            await asyncio.sleep(15)
+    await dp.start_polling(bot, **kw)
+
+
 async def _try(what: str, call) -> None:
     try:
-        await call
+        # Не дольше 20 с: пока ждём Telegram, вебхук-сервер ещё не поднят
+        await asyncio.wait_for(call, 20)
     except Exception as e:
         logging.warning(f"Старт: {what} не задано — {e}")
 
@@ -116,10 +132,11 @@ async def main():
     # Запускаем aiohttp-сервер для приёма вебхуков от Prodamus
     webhook_app = create_webhook_app(bot)
     try:
-        bot_username = (await bot.get_me()).username or ""
+        bot_username = (await bot.get_me(request_timeout=15)).username or ""
     except Exception as e:
+        # Без ника ссылки «вернуться в бот» после оплаты пустые — берём известный
         logging.warning(f"get_me не удался: {e}")
-        bot_username = ""
+        bot_username = os.getenv("BOT_USERNAME", "malimabibot")
     course.setup_web(webhook_app, bot_username)
     pay_router.setup_web(webhook_app, bot_username)
     asyncio.create_task(pay_router.pay_worker(bot))
@@ -136,6 +153,9 @@ async def main():
         admin_bot = Bot(token=config.WAITLIST_BOT_TOKEN)
         admin_dp = Dispatcher(storage=MemoryStorage())
         admin_dp.update.outer_middleware(MessageLogMiddleware("админ"))
+        # Не админ — дальше не идёт (обработчики проверяют и сами)
+        from services.admin_guard import AdminOnlyMiddleware
+        admin_dp.update.outer_middleware(AdminOnlyMiddleware())
         # Нажатия в виджете /worders (Bot API 10.4) — aiogram их не знает
         admin_dp.update.outer_middleware(order_widget.WidgetQueryMiddleware())
         # Первым: ловит ответы на карточки заказов по курсу и ввод времени созвона
@@ -160,7 +180,7 @@ async def main():
         # Последним: ловит присланный файл, который не забрал никто
         admin_dp.include_router(logo.router)
         asyncio.create_task(
-            admin_dp.start_polling(admin_bot,
+            _poll(admin_dp, admin_bot,
                                    allowed_updates=["callback_query", "message", "widget_query"])
         )
         asyncio.create_task(report_loop(admin_bot))
@@ -192,7 +212,7 @@ async def main():
         logging.info("Поллинг админского бота (malimadmins) запущен.")
 
     logging.info("Бот запущен.")
-    await dp.start_polling(bot, allowed_updates=["message", "callback_query",
+    await _poll(dp, bot, allowed_updates=["message", "callback_query",
                                                   "chat_join_request", "pre_checkout_query",
                                                   "shipping_query", "widget_query"])
 

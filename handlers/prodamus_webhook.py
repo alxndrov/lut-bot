@@ -19,6 +19,7 @@ import database as db
 from services.prodamus import order_num_from_prodamus, verify_webhook
 from services.logo_svg import to_svg, is_logo_question, is_vector
 from services.answer_labels import annotate, is_old_palette
+from html import escape
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +220,7 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
 
         await _send_notify(bot, (
             f"💰 <b>Новая покупка</b>\n\n"
-            f"👤 {first_name} {username_str}\n"
+            f"👤 {escape(first_name)} {username_str}\n"
             f"🛍 {product['name']}\n"
             f"💵 {amount} ₽\n"
             f"🕐 {now}"
@@ -270,8 +271,8 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
                 if vid and not await db.take_variant_stock(vid):
                     await _send_notify(bot, (
                         f"⚠️ <b>Оплачен вариант, которого уже нет в наличии</b>\n\n"
-                        f"👤 {first_name} {username_str}\n"
-                        f"🛍 {a.get('text')}\n"
+                        f"👤 {escape(first_name)} {username_str}\n"
+                        f"🛍 {escape(str(a.get('text') or ''))}\n"
                         f"Свяжитесь с клиентом: замена или возврат."
                     ))
         for pid in set(round_products):
@@ -631,7 +632,8 @@ def _format_order(first_name: str, username_str: str, product_name: str, amount:
     if order_number:
         head += f" <code>{order_number}</code>"
     lines = ["<b>ТАЦ!</b> 🪿", head]
-    lines += ["", f"👤 {first_name} {username_str}"]
+    # Имя и ответы — от клиента: «Аня <3» без экранирования роняет карточку
+    lines += ["", f"👤 {escape(first_name)} {escape(username_str)}"]
     if mixed and products_by_id:
         order_ids = list(dict.fromkeys(round_products))
         counts = {pid: round_products.count(pid) for pid in order_ids}
@@ -659,8 +661,8 @@ def _format_order(first_name: str, username_str: str, product_name: str, amount:
             ans = (annotate(a.get("q", ""), a.get("text"), old_palette)
                    or ("📷 фото" if a.get("photo")
                        else ("📎 файл" if a.get("doc") else "—")))
-            lines.append(f"<b>{i}. {a.get('q', '')}</b>\n{ans}")
-    lines.append(f"\n🚚 <b>Доставка:</b>\n{delivery_info}")
+            lines.append(f"<b>{i}. {a.get('q', '')}</b>\n{escape(ans)}")
+    lines.append(f"\n🚚 <b>Доставка:</b>\n{escape(delivery_info)}")
     return "\n".join(lines)
 
 

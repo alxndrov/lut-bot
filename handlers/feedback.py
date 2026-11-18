@@ -7,6 +7,7 @@ import logging
 
 import config
 from config import ADMIN_IDS
+from html import escape
 
 logger = logging.getLogger(__name__)
 
@@ -43,8 +44,8 @@ async def receive_feedback(message: Message, state: FSMContext, bot: Bot):
 
     notify_text = (
         f"💬 <b>Обратная связь</b>\n\n"
-        f"👤 {user.first_name} {username}\n\n"
-        f"📝 {message.text}"
+        f"👤 {escape(user.first_name or '—')} {username}\n\n"
+        f"📝 {escape(message.text or '')}"
     )
 
     try:

@@ -20,6 +20,7 @@ import database as db
 from services.prodamus import build_payment_url
 from keyboards.user import back_to_catalog_keyboard
 from handlers.delivery import start_delivery_flow, _goods_breakdown, _goods_payment_name
+from html import escape
 
 
 def _payment_keyboard(product: dict, user_id: int, quantity: int = 1,
@@ -647,10 +648,10 @@ async def fsm_receive_brief(message: Message, state: FSMContext, bot: Bot):
 
     notify_text = (
         f"📋 <b>Новое ТЗ</b>\n\n"
-        f"👤 {first_name} {username_str}\n"
-        f"🛍 {product_name}\n"
+        f"👤 {escape(first_name)} {username_str}\n"
+        f"🛍 {escape(product_name)}\n"
         f"🕐 {now}\n\n"
-        f"<b>Сообщение:</b>\n{message.text or '(без текста)'}"
+        f"<b>Сообщение:</b>\n{escape(message.text or '(без текста)')}"
     )
 
     # Пересылаем в админ-чат через notify-бот

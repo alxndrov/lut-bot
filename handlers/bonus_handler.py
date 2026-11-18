@@ -11,6 +11,7 @@ from aiogram.types import Message
 
 import config
 import database as db
+from html import escape
 
 router = Router()
 logger = logging.getLogger(__name__)
@@ -55,9 +56,9 @@ async def handle_possible_video_link(message: Message, bot: Bot):
     # Уведомляем всех админов
     notify_text = (
         f"🎬 <b>Новая ссылка на разбор</b>\n\n"
-        f"👤 {first_name} {username_str}\n"
-        f"🛍 {target['product_name']}\n"
-        f"🔗 {link}\n\n"
+        f"👤 {escape(first_name)} {username_str}\n"
+        f"🛍 {escape(target['product_name'])}\n"
+        f"🔗 {escape(link)}\n\n"
         f"Напиши разбор напрямую в личку пользователю."
     )
     for admin_id in config.ADMIN_IDS:

@@ -7,9 +7,11 @@
 """
 import asyncio
 import html
+import json
 import logging
 import mimetypes
 import re
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -362,7 +364,7 @@ async def provision(bot: Bot, user_id: int, option_id: int, payment_id: str, amo
         if owned_before:
             again = ("\n⬆️ Переход на VIP — доплата" if svc.is_call_option(option)
                      else "\n♻️ Докупка второго раздела")
-        await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {user.get('first_name') or '—'} {who}\n"
+        await notify(bot, f"🎓 <b>Курс оплачен</b>\n\n👤 {html.escape(user.get('first_name') or '—')} {who}\n"
                           f"🛍 {option['title']}\n💵 {amount} ₽{again}{extra}", sale=payment_id)
         try:   # оплата по личному предложению — в «Базу» (handlers/course_offer.py)
             from handlers import course_offer
@@ -765,13 +767,56 @@ async def api_view(request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def api_log(request: web.Request) -> web.Response:
-    """Сбой загрузки мини-приложения у пользователя (см. __appLog в index.html)."""
+_LOG_FIELDS = ("kind", "msg", "t", "ua", "ready")
+_LOG_PER_IP, _LOG_WINDOW = 12, 600          # не больше 12 записей с адреса за 10 минут
+_log_hits: dict[str, list[float]] = {}
+
+
+def _log_allowed(ip: str, now: float) -> bool:
+    if len(_log_hits) > 5000:               # не копим адреса бесконечно
+        _log_hits.clear()
+    hits = [t for t in _log_hits.get(ip, []) if now - t < _LOG_WINDOW]
+    if len(hits) >= _LOG_PER_IP:
+        _log_hits[ip] = hits
+        return False
+    _log_hits[ip] = hits + [now]
+    return True
+
+
+def _log_line(raw: bytes) -> str:
+    """Запись от мини-приложения → одна строка журнала. Пишет кто угодно,
+    поэтому берём только известные поля, режем переводы строк (иначе можно
+    подделать строки журнала) и вырезаем #tgWebAppData — в адресе страницы
+    это данные входа пользователя."""
     try:
-        raw = (await request.read())[:2000].decode("utf-8", "replace")
+        body = json.loads(raw[:4000].decode("utf-8", "replace"))
     except Exception:
-        raw = ""
-    logger.warning(f"miniapp: {raw}")
+        body = None
+    if not isinstance(body, dict):
+        body = {"msg": raw[:300].decode("utf-8", "replace")}
+    parts = []
+    for k in _LOG_FIELDS:
+        if k in body:
+            v = re.sub(r"#tgWebApp\S*", "#…", str(body[k]))
+            v = re.sub(r"[\x00-\x1f\x7f]+", " ", v)[:500]
+            parts.append(f"{k}={v}")
+    return " | ".join(parts) or "—"
+
+
+async def api_log(request: web.Request) -> web.Response:
+    """Сбой загрузки мини-приложения у пользователя (см. __appLog в index.html).
+
+    Без проверки входа: отчёт уходит и тогда, когда скрипт Telegram не
+    загрузился и initData нет, — ради этих случаев журнал и заведён."""
+    ip =(request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
+          or request.remote or "?")
+    if not _log_allowed(ip, time.monotonic()):
+        return web.Response(status=429)
+    try:
+        raw = await request.content.read(4000)
+    except Exception:
+        raw = b""
+    logger.warning(f"miniapp: {_log_line(raw)}")
     return web.Response(status=204)
 
 
