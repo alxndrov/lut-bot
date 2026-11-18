@@ -33,6 +33,13 @@ logging.basicConfig(
 )
 
 
+async def _try(what: str, call) -> None:
+    try:
+        await call
+    except Exception as e:
+        logging.warning(f"Старт: {what} не задано — {e}")
+
+
 async def main():
     await db.init_db(existing_cdek_contract=OLD_CONTRACT or CURRENT_CONTRACT)
     from services import course_outreach
@@ -86,8 +93,10 @@ async def main():
         BotCommand(command="info",        description="ℹ️ Продавцы и условия"),
         BotCommand(command="forget",      description="🗑 Удалить мои данные"),
     ]
-    await bot.set_my_commands(commands)
-    await course.set_admin_commands(bot, commands)
+    # Сбой Telegram (502) на старте не должен ронять бота: без меню команд
+    # жить можно, без вебхуков касс — нет
+    await _try("меню команд", bot.set_my_commands(commands))
+    await _try("команды админов", course.set_admin_commands(bot, commands))
 
     asyncio.create_task(finance_sync_loop())
     asyncio.create_task(metrics_sync_loop())
@@ -115,7 +124,7 @@ async def main():
     pay_router.setup_web(webhook_app, bot_username)
     asyncio.create_task(pay_router.pay_worker(bot))
     # Кнопка приложения курса: до анонса — только админам
-    await course.sync_menu_button(bot)
+    await _try("кнопка приложения", course.sync_menu_button(bot))
     runner = web.AppRunner(webhook_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", config.PRODAMUS_WEBHOOK_PORT)
