@@ -173,12 +173,12 @@ def client_header(message: Message, title: str, extra: str = "") -> str:
     user = message.from_user
     username = f"@{user.username}" if user.username else f"id:{user.id}"
     header = (f"{title}\n"
-              f"👤 {user.first_name or '—'} {username} (id:{user.id})")
+              f"👤 {escape(user.first_name or '—')} {username} (id:{user.id})")
     if extra:
         header += f"\n{extra}"
     # Подпись к фото/видео — тоже текст сообщения, показываем её в шапке
     if not message.text and message.caption:
-        header += f"\n\n{message.caption}"
+        header += f"\n\n{escape(message.caption)}"
     return header
 
 
@@ -342,6 +342,10 @@ async def on_free_message(message: Message, state: FSMContext):
         return UNHANDLED
 
     user_id = message.from_user.id
+    # Ответ на опрос покупателей курса — раньше всего остального
+    from handlers import course_survey
+    if await course_survey.on_reply(message):
+        return
     from services import course_outreach
     context = await course_outreach.context(user_id)
     if context:

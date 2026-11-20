@@ -711,6 +711,23 @@ async def init_db(existing_cdek_contract: str | None = None):
                 done_at      TIMESTAMP
             )
         """)
+        # Опрос покупателей курса (handlers/course_survey.py)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_survey (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id     INTEGER NOT NULL,
+                grp         INTEGER NOT NULL,
+                test        INTEGER NOT NULL DEFAULT 0,
+                stage       TEXT NOT NULL DEFAULT 'await',
+                reason      TEXT,
+                rating      INTEGER,
+                answer      TEXT,
+                publish     INTEGER,
+                sent_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                answered_at TIMESTAMP,
+                done_at     TIMESTAMP
+            )
+        """)
         # Заявки на личный разбор из вкладки «Разбор» мини-приложения
         await db.execute("""
             CREATE TABLE IF NOT EXISTS course_review_requests (
@@ -5847,7 +5864,7 @@ async def orders_in_progress(user_id: int) -> list[int]:
 # Удаляются целиком: переписка, отзывы, рассылки, интерес к курсу, ссылки на
 # видео, неоплаченные корзины и переходы к оплате, email.
 FORGET_DELETE = ("support_messages", "reviews", "funnel_queue", "review_push_queue",
-                 "course_nudges", "course_views", "course_review_requests", "course_orders",
+                 "course_nudges", "course_views", "course_review_requests", "course_orders", "course_survey",
                  "waitlist_entries", "bonus_reviews", "channel_access", "pending_deliveries",
                  "product_views")
 

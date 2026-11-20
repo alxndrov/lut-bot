@@ -12,7 +12,7 @@ import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, order_widget, catalog_widget, client_order_widget, product_widget, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget, course_gift, course_files, manual_sale
-from handlers import course, course_offer, course_admin, course_orders, course_invoice, npd_admin, friend_order
+from handlers import course, course_offer, course_admin, course_orders, course_invoice, npd_admin, friend_order, course_survey
 from handlers import pay_router, payments_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
@@ -97,6 +97,7 @@ async def main():
     dp.include_router(funnel_handler.router)
     dp.include_router(bonus_handler.router)
     # Последним: ловит ответ на просьбу об отзыве — всё, что не разобрали выше
+    dp.include_router(course_survey.router)   # кнопки опроса покупателей курса
     dp.include_router(support.review_router)
 
     commands = [
@@ -168,6 +169,7 @@ async def main():
         admin_dp.include_router(course_admin.router)
         admin_dp.include_router(course_gift.router)   # /gift — курс в подарок
         admin_dp.include_router(course_offer.admin_router)   # /offer — личное предложение на курс
+        admin_dp.include_router(course_survey.admin_router)  # /survey — опрос покупателей курса
         admin_dp.include_router(manual_sale.router)    # /sale — продажа вне бота
         admin_dp.include_router(expenses.router)
         admin_dp.include_router(cdek_account.router)
