@@ -79,6 +79,29 @@ class SurveyTest(unittest.IsolatedAsyncioTestCase):
         s = await cs._get(sid)
         self.assertEqual((s["publish"], s["stage"]), (0, "done"))
 
+    async def test_cards_show_question(self):
+        sid = await self._send(2)
+        await cs.on_button(_cb(f"svy:{sid}:c:broken"))
+        line = self.notify.await_args.args[2]
+        self.assertIn("❓ Что мешает продолжить?\n→ 🚨 <b>Что-то не работает</b>", line)
+        await cs.on_reply(_msg("Видео не грузится"))
+        header = self.admins.await_args.args[1]
+        self.assertIn("❓ <b>Что не работает и с какого устройства?</b>\n💬 Ответ:", header)
+        self.assertIn("→ 🚨 <b>Что-то не работает</b>", header)
+        # группа 1: текст после оценки 6 — ответ на «что не понравилось»
+        sid = await self._send(1)
+        await cs.on_button(_cb(f"svy:{sid}:r:6"))
+        self.assertIn("❓ Как тебе курс?", self.notify.await_args.args[2])
+        await cs.on_reply(_msg("Мало практики"))
+        self.assertIn("❓ <b>Что не понравилось или чего не хватило?</b>",
+                      self.admins.await_args.args[1])
+        # сразу текстом с оценкой — ответ на первый вопрос
+        sid = await self._send(1)
+        await cs.on_reply(_msg("8/10, всё супер"))
+        h = self.admins.await_args.args[1]
+        self.assertIn("❓ <b>Как тебе курс? Оценка 1–10 и что зашло, чего не хватило</b>", h)
+        self.assertIn("Оценка в тексте: <b>8</b>", h)
+
     async def test_low_rating_reply(self):
         sid = await self._send(1)
         cb = _cb(f"svy:{sid}:r:5")

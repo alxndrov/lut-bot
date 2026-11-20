@@ -179,14 +179,74 @@ async def send(bot: Bot, user_id: int, grp: int, test: bool = False) -> int:
 
 # ── Уведомления админам ────────────────────────────────────────────────────────
 
+def who_line(first_name: str | None, username: str | None, user_id: int) -> str:
+    handle = f"@{username}" if username else f"id:{user_id}"
+    return f"{escape(first_name or '—')} {handle} (id:{user_id})"
+
+
 def _who(user) -> str:
-    username = f"@{user.username}" if user.username else f"id:{user.id}"
-    return f"{escape(user.first_name or '—')} {username} (id:{user.id})"
+    return who_line(user.first_name, user.username, user.id)
+
+
+def event_card(s: dict, who: str, line: str) -> str:
+    return f"{_title(s)}\n👤 {who}\n{line}"
 
 
 def _title(s: dict) -> str:
     test = "🧪 ТЕСТ · " if s["test"] else ""
     return f"📝 <b>{test}Опрос по курсу</b> · группа {s['grp']} ({GROUPS[s['grp']]})"
+
+
+# Вопросы — коротко, для карточек админам: видно, на что человек отвечает
+Q_FIRST = {1: "Как тебе курс? Оценка 1–10 и что зашло, чего не хватило",
+           2: "Что мешает продолжить?",
+           3: "Получилось открыть курс?"}
+Q_RATED = {True: "Что зашло больше всего и чего не хватило?",
+           False: "Что не понравилось или чего не хватило?"}
+Q_FOLLOW = {"time": "Что сделало бы курс удобнее?",
+            "hard": "На каком уроке стало сложно и что непонятно?",
+            "broken": "Что не работает и с какого устройства?",
+            "other": "Что мешает?",
+            "noopen": "Что видно при открытии и с какого устройства?"}
+Q_PUBLISH = "Можно указать имя при публикации отзыва?"
+
+
+def q_line(question: str, answer_html: str) -> str:
+    return f"❓ {escape(question)}\n→ {answer_html}"
+
+
+def rating_line(rating: int, typed: bool = False) -> str:
+    return q_line(Q_FIRST[1], f"⭐️ <b>{rating}</b> из 10" + (" (написал цифрой)" if typed else ""))
+
+
+def choice_line(grp: int, reason: str) -> str:
+    label, _, _, alarm = CHOICES[reason]
+    return q_line(Q_FIRST[grp], f"{'🚨' if alarm else '👆'} <b>{escape(label)}</b>")
+
+
+def publish_line(yes: bool) -> str:
+    return q_line(Q_PUBLISH, "✅ Да, с именем" if yes else "🙈 Нет, без имени")
+
+
+def answered_question(s: dict) -> str:
+    """На какой вопрос отвечает текст — по состоянию опроса ДО этого сообщения."""
+    if s["grp"] == 1:
+        return Q_RATED[s["rating"] >= 8] if s.get("rating") else Q_FIRST[1]
+    return Q_FOLLOW.get(s.get("reason") or "", Q_FIRST[s["grp"]])
+
+
+def answer_extra(before: dict, rating_in_text: int | None = None) -> str:
+    """Шапка карточки с ответом текстом: что было до него и на какой вопрос он."""
+    lines = []
+    if before.get("rating"):
+        lines.append(rating_line(before["rating"]))
+    if before.get("reason"):
+        lines.append(choice_line(before["grp"], before["reason"]))
+    lines.append(f"❓ <b>{escape(answered_question(before))}</b>")
+    if rating_in_text:
+        lines.append(f"⭐️ Оценка в тексте: <b>{rating_in_text}</b> из 10")
+    lines.append("💬 Ответ:")
+    return "\n".join(lines)
 
 
 def _recipients(s: dict, user_id: int) -> list[int]:
@@ -196,7 +256,7 @@ def _recipients(s: dict, user_id: int) -> list[int]:
 
 async def _notify(s: dict, user, line: str) -> None:
     from handlers.support import notify_admins_text
-    text = f"{_title(s)}\n👤 {_who(user)}\n{line}"
+    text = event_card(s, _who(user), line)
     if s["test"]:
         bot = Bot(token=config.WAITLIST_BOT_TOKEN)
         try:
@@ -249,22 +309,20 @@ async def on_button(callback: CallbackQuery):
     if kind == "r" and value.isdigit():
         rating = int(value)
         await _update(s["id"], rating=rating)
-        await _notify(s, callback.from_user, f"⭐️ Оценка: <b>{rating}</b> из 10")
+        await _notify(s, callback.from_user, rating_line(rating))
         if s["stage"] == "await":
             await callback.message.answer(RATED_HIGH if rating >= 8 else RATED_LOW)
     elif kind == "c" and value in CHOICES:
         label, reply, wait_text, alarm = CHOICES[value]
         await _update(s["id"], reason=value, **({} if wait_text else {"stage": "done"}))
-        await _notify(s, callback.from_user,
-                      f"{'🚨' if alarm else '👆'} Нажал(а): <b>{escape(label)}</b>")
+        await _notify(s, callback.from_user, choice_line(s["grp"], value))
         await callback.message.answer(reply)
         if not wait_text:
             await _next_test(callback.bot, s)
     elif kind == "p" and value in ("1", "0"):
         await _update(s["id"], publish=int(value), stage="done",
                       done_at=_now_sql())
-        await _notify(s, callback.from_user,
-                      "✅ Можно публиковать с именем" if value == "1" else "🙈 Публиковать без имени")
+        await _notify(s, callback.from_user, publish_line(value == "1"))
         await callback.message.answer(PUBLISH_YES if value == "1" else PUBLISH_NO)
         await _next_test(callback.bot, s)
 
@@ -291,10 +349,11 @@ async def on_reply(message: Message) -> bool:
         # Прислал только цифру — это оценка, отзыв ещё впереди
         rating = int(_ONLY_RATING.fullmatch(text).group(1))
         await _update(s["id"], rating=rating)
-        await _notify(s, message.from_user, f"⭐️ Оценка: <b>{rating}</b> из 10")
+        await _notify(s, message.from_user, rating_line(rating, typed=True))
         await message.answer(RATED_HIGH if rating >= 8 else RATED_LOW)
         return True
 
+    before = dict(s)
     fields = {"answer": text or f"[{message.content_type}]", "answered_at": _now_sql()}
     if s["grp"] == 1 and s["rating"] is None:
         m = _RATING_IN_TEXT.search(text)
@@ -305,12 +364,7 @@ async def on_reply(message: Message) -> bool:
     s.update(fields)
 
     from handlers.support import client_header, notify_admins
-    extra = []
-    if s.get("rating"):
-        extra.append(f"⭐️ Оценка: <b>{s['rating']}</b> из 10")
-    if s.get("reason"):
-        extra.append(f"👆 Кнопка: {escape(CHOICES[s['reason']][0])}")
-    header = client_header(message, _title(s), "\n".join(extra))
+    header = client_header(message, _title(s), answer_extra(before, fields.get("rating")))
     await notify_admins(message, header, message.from_user.id,
                         recipient_ids=_recipients(s, message.from_user.id))
 
