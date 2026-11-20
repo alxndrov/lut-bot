@@ -139,6 +139,16 @@ async def _update(survey_id: int, **fields) -> None:
         await conn.commit()
 
 
+async def cancel_open_tests(user_id: int) -> int:
+    """Закрывает незаконченные тестовые опросы — новый тест начинается с чистого листа."""
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        cur = await conn.execute(
+            """UPDATE course_survey SET stage = 'cancelled'
+                WHERE user_id = ? AND test = 1 AND stage IN ('await', 'publish')""", (user_id,))
+        await conn.commit()
+        return cur.rowcount
+
+
 async def audience() -> dict[int, list[dict]]:
     """Покупатели курса (без тестовых и отозванных доступов) по группам."""
     async with aiosqlite.connect(db.DB_PATH) as conn:
@@ -208,7 +218,21 @@ async def _own(callback: CallbackQuery) -> tuple[dict | None, str, str]:
     if not s or s["user_id"] != callback.from_user.id:
         await callback.answer()
         return None, kind, value
+    if s["stage"] == "cancelled":
+        await callback.answer("Этот опрос уже закрыт.")
+        return None, kind, value
     return s, kind, value
+
+
+async def _next_test(bot: Bot, s: dict) -> None:
+    """Тестовый прогон — по одной группе: закончил эту, приходит следующая."""
+    if not s["test"] or s["grp"] >= 3:
+        if s["test"]:
+            await bot.send_message(s["user_id"], "🧪 Тест закончен: все три группы пройдены.")
+        return
+    grp = s["grp"] + 1
+    await bot.send_message(s["user_id"], f"🧪 Дальше — группа {grp}: {GROUPS[grp]}.")
+    await send(bot, s["user_id"], grp, test=True)
 
 
 @router.callback_query(F.data.startswith("svy:"))
@@ -234,12 +258,15 @@ async def on_button(callback: CallbackQuery):
         await _notify(s, callback.from_user,
                       f"{'🚨' if alarm else '👆'} Нажал(а): <b>{escape(label)}</b>")
         await callback.message.answer(reply)
+        if not wait_text:
+            await _next_test(callback.bot, s)
     elif kind == "p" and value in ("1", "0"):
         await _update(s["id"], publish=int(value), stage="done",
                       done_at=_now_sql())
         await _notify(s, callback.from_user,
                       "✅ Можно публиковать с именем" if value == "1" else "🙈 Публиковать без имени")
         await callback.message.answer(PUBLISH_YES if value == "1" else PUBLISH_NO)
+        await _next_test(callback.bot, s)
 
 
 def _now_sql() -> str:
@@ -294,6 +321,7 @@ async def on_reply(message: Message) -> bool:
             ("Да", f"svy:{s['id']}:p:1"), ("Нет", f"svy:{s['id']}:p:0")]]))
     else:
         await message.answer(f"Спасибо, {name}! 🙏 Получил, посмотрю.", parse_mode="HTML")
+        await _next_test(message.bot, s)
     return True
 
 
@@ -305,18 +333,19 @@ async def cmd_survey(message: Message, command: CommandObject):
         return
     args = (command.args or "").split()
     if args[:1] == ["test"]:
-        grps = [int(a) for a in args[1:] if a in ("1", "2", "3")] or [1, 2, 3]
+        # По одной группе: следующая придёт, когда эта пройдена (_next_test)
+        grp = next((int(a) for a in args[1:] if a in ("1", "2", "3")), 1)
+        await cancel_open_tests(message.from_user.id)
         bot = Bot(token=config.BOT_TOKEN)
         try:
-            for g in grps:
-                await send(bot, message.from_user.id, g, test=True)
+            await send(bot, message.from_user.id, grp, test=True)
         except Exception as e:
             await message.answer(f"⚠️ Не отправилось: {escape(str(e))}", parse_mode="HTML")
             return
         finally:
             await bot.session.close()
         await message.answer(
-            f"🧪 Прислал в основной бот опрос для групп {', '.join(map(str, grps))}. "
+            f"🧪 Прислал в основной бот опрос группы {grp}. Пройдёшь — придёт следующая. "
             "Ответы придут только тебе.")
         return
 

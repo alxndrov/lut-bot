@@ -122,6 +122,21 @@ class SurveyTest(unittest.IsolatedAsyncioTestCase):
         cb.message.answer.assert_not_awaited()
         self.assertIsNone((await cs._get(sid))["rating"])
 
+    async def test_test_run_goes_one_group_at_a_time(self):
+        sid = await cs.send(self.bot, 5, 2, test=True)
+        await cs.on_button(_cb(f"svy:{sid}:c:time"))
+        msg = _msg("Работа")
+        await cs.on_reply(msg)
+        sent = [c.args[1] for c in msg.bot.send_message.await_args_list]
+        self.assertIn("🧪 Дальше — группа 3", sent[0])
+        self.assertIn("уроки курса у тебя пока не открыты", sent[1])
+        # старые тестовые опросы закрываются, их кнопки больше не работают
+        self.assertEqual(await cs.cancel_open_tests(5), 1)
+        cb = _cb(f"svy:{sid + 1}:c:soon")
+        await cs.on_button(cb)
+        cb.answer.assert_awaited_with("Этот опрос уже закрыт.")
+        cb.message.answer.assert_not_awaited()
+
     async def test_no_survey_no_catch(self):
         self.assertFalse(await cs.on_reply(_msg("привет")))
 
