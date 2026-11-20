@@ -725,7 +725,23 @@ async def init_db(existing_cdek_contract: str | None = None):
                 publish     INTEGER,
                 sent_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 answered_at TIMESTAMP,
-                done_at     TIMESTAMP
+                done_at     TIMESTAMP,
+                answer_q    TEXT,
+                rating_in_text INTEGER NOT NULL DEFAULT 0
+            )
+        """)
+        for col in ("answer_q TEXT", "rating_in_text INTEGER NOT NULL DEFAULT 0"):
+            try:
+                await db.execute(f"ALTER TABLE course_survey ADD COLUMN {col}")
+            except Exception:
+                pass   # колонка уже есть
+        # Одна карточка опроса на человека у каждого админа — обновляется по ходу ответов
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS course_survey_cards (
+                survey_id  INTEGER NOT NULL,
+                chat_id    INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (survey_id, chat_id)
             )
         """)
         # Заявки на личный разбор из вкладки «Разбор» мини-приложения

@@ -36,9 +36,14 @@ class SurveyTest(unittest.IsolatedAsyncioTestCase):
         db.DB_PATH = os.path.join(self.tmp.name, "t.db")
         await db.init_db()
         await db.upsert_user(5, "anya", "Аня <3")
-        self.notify = mock.patch.object(cs, "_notify", mock.AsyncMock()).start()
-        self.admins = mock.patch("handlers.support.notify_admins", mock.AsyncMock()).start()
+        self.real_show = cs._show
+        self.show = mock.patch.object(cs, "_show", mock.AsyncMock()).start()
         self.bot = mock.AsyncMock()
+
+    def _card(self):
+        """Карточка, которую увидели бы админы после последнего события."""
+        s, who = self.show.await_args.args[:2]
+        return cs.render_card(s, who)
 
     async def asyncTearDown(self):
         mock.patch.stopall()
@@ -79,28 +84,53 @@ class SurveyTest(unittest.IsolatedAsyncioTestCase):
         s = await cs._get(sid)
         self.assertEqual((s["publish"], s["stage"]), (0, "done"))
 
-    async def test_cards_show_question(self):
+    async def test_one_card_collects_everything(self):
         sid = await self._send(2)
         await cs.on_button(_cb(f"svy:{sid}:c:broken"))
-        line = self.notify.await_args.args[2]
-        self.assertIn("❓ Что мешает продолжить?\n→ 🚨 <b>Что-то не работает</b>", line)
-        await cs.on_reply(_msg("Видео не грузится"))
-        header = self.admins.await_args.args[1]
-        self.assertIn("❓ <b>Что не работает и с какого устройства?</b>\n💬 Ответ:", header)
-        self.assertIn("→ 🚨 <b>Что-то не работает</b>", header)
-        # группа 1: текст после оценки 6 — ответ на «что не понравилось»
+        self.assertIn("❓ Что мешает продолжить?\n→ 🚨 <b>Что-то не работает</b>", self._card())
+        await cs.on_reply(_msg("Видео <не> грузится"))
+        card = self._card()
+        self.assertIn("→ 🚨 <b>Что-то не работает</b>", card)
+        self.assertIn("❓ <b>Что не работает и с какого устройства?</b>\n💬 Видео &lt;не&gt; грузится", card)
+        # группа 1: оценка 9, текст, «Нет» — одна карточка, публикация тихой правкой
         sid = await self._send(1)
-        await cs.on_button(_cb(f"svy:{sid}:r:6"))
-        self.assertIn("❓ Как тебе курс?", self.notify.await_args.args[2])
-        await cs.on_reply(_msg("Мало практики"))
-        self.assertIn("❓ <b>Что не понравилось или чего не хватило?</b>",
-                      self.admins.await_args.args[1])
+        await cs.on_button(_cb(f"svy:{sid}:r:9"))
+        await cs.on_reply(_msg("Лутов"))
+        card = self._card()
+        self.assertIn("→ ⭐️ <b>9</b> из 10", card)
+        self.assertIn("❓ <b>Что зашло больше всего и чего не хватило?</b>\n💬 Лутов", card)
+        self.assertIn("→ ⏳ пока не ответил(а)", card)
+        await cs.on_button(_cb(f"svy:{sid}:p:0"))
+        self.assertEqual(self.show.await_args.kwargs.get("resend"), False)
+        self.assertIn("❓ Можно указать имя при публикации отзыва?\n→ 🙈 Нет, без имени", self._card())
         # сразу текстом с оценкой — ответ на первый вопрос
         sid = await self._send(1)
         await cs.on_reply(_msg("8/10, всё супер"))
-        h = self.admins.await_args.args[1]
-        self.assertIn("❓ <b>Как тебе курс? Оценка 1–10 и что зашло, чего не хватило</b>", h)
-        self.assertIn("Оценка в тексте: <b>8</b>", h)
+        card = self._card()
+        self.assertIn("❓ <b>Как тебе курс? Оценка 1–10 и что зашло, чего не хватило</b>", card)
+        self.assertIn("Оценка в тексте: <b>8</b>", card)
+        self.assertNotIn("→ ⭐️", card)
+
+    async def test_show_resends_and_deletes_old_then_edits(self):
+        sid = await self._send(2)
+        s = await cs._get(sid)
+        s.update(reason="time")
+        fake = mock.AsyncMock()
+        fake.send_message.side_effect = [mock.Mock(message_id=m) for m in (100, 200, 300, 400)]
+        with mock.patch.object(cs, "Bot", return_value=fake), \
+             mock.patch.object(cs.config, "ADMIN_IDS", [11, 22]), \
+             mock.patch.object(cs.db, "add_support_message", mock.AsyncMock()) as reg:
+            await self.real_show(s, "who")
+            self.assertEqual(await cs._card_ids(sid), {11: 100, 22: 200})
+            fake.delete_message.assert_not_awaited()
+            await self.real_show(s, "who")                       # новое событие — заново
+            self.assertEqual(await cs._card_ids(sid), {11: 300, 22: 400})
+            self.assertEqual([c.args for c in fake.delete_message.await_args_list],
+                             [(11, 100), (22, 200)])
+            await self.real_show(s, "who", resend=False)          # тихая правка
+            self.assertEqual(fake.edit_message_text.await_count, 2)
+            self.assertEqual(fake.send_message.await_count, 4)
+            self.assertEqual(reg.await_count, 4)            # Reply на карточку → клиенту
 
     async def test_low_rating_reply(self):
         sid = await self._send(1)

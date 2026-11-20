@@ -177,7 +177,11 @@ async def send(bot: Bot, user_id: int, grp: int, test: bool = False) -> int:
     return survey_id
 
 
-# ── Уведомления админам ────────────────────────────────────────────────────────
+# ── Карточка для админов ───────────────────────────────────────────────────────
+# Одна на опрос у каждого админа: оценка, кнопка, ответ и публикация собираются
+# в одном сообщении. Новое важное (оценка, кнопка, текст) — карточка приходит
+# заново, а старая удаляется: так есть уведомление. Ответ про публикацию —
+# тихая правка той же карточки.
 
 def who_line(first_name: str | None, username: str | None, user_id: int) -> str:
     handle = f"@{username}" if username else f"id:{user_id}"
@@ -186,10 +190,6 @@ def who_line(first_name: str | None, username: str | None, user_id: int) -> str:
 
 def _who(user) -> str:
     return who_line(user.first_name, user.username, user.id)
-
-
-def event_card(s: dict, who: str, line: str) -> str:
-    return f"{_title(s)}\n👤 {who}\n{line}"
 
 
 def _title(s: dict) -> str:
@@ -209,23 +209,11 @@ Q_FOLLOW = {"time": "Что сделало бы курс удобнее?",
             "other": "Что мешает?",
             "noopen": "Что видно при открытии и с какого устройства?"}
 Q_PUBLISH = "Можно указать имя при публикации отзыва?"
+ANSWER_MAX = 3000   # карточка целиком не длиннее 4096 символов
 
 
 def q_line(question: str, answer_html: str) -> str:
     return f"❓ {escape(question)}\n→ {answer_html}"
-
-
-def rating_line(rating: int, typed: bool = False) -> str:
-    return q_line(Q_FIRST[1], f"⭐️ <b>{rating}</b> из 10" + (" (написал цифрой)" if typed else ""))
-
-
-def choice_line(grp: int, reason: str) -> str:
-    label, _, _, alarm = CHOICES[reason]
-    return q_line(Q_FIRST[grp], f"{'🚨' if alarm else '👆'} <b>{escape(label)}</b>")
-
-
-def publish_line(yes: bool) -> str:
-    return q_line(Q_PUBLISH, "✅ Да, с именем" if yes else "🙈 Нет, без имени")
 
 
 def answered_question(s: dict) -> str:
@@ -235,39 +223,92 @@ def answered_question(s: dict) -> str:
     return Q_FOLLOW.get(s.get("reason") or "", Q_FIRST[s["grp"]])
 
 
-def answer_extra(before: dict, rating_in_text: int | None = None) -> str:
-    """Шапка карточки с ответом текстом: что было до него и на какой вопрос он."""
-    lines = []
-    if before.get("rating"):
-        lines.append(rating_line(before["rating"]))
-    if before.get("reason"):
-        lines.append(choice_line(before["grp"], before["reason"]))
-    lines.append(f"❓ <b>{escape(answered_question(before))}</b>")
-    if rating_in_text:
-        lines.append(f"⭐️ Оценка в тексте: <b>{rating_in_text}</b> из 10")
-    lines.append("💬 Ответ:")
+def render_card(s: dict, who: str) -> str:
+    lines = [_title(s), f"👤 {who}"]
+    if s["grp"] == 1:
+        if s.get("rating") and not s.get("rating_in_text"):
+            lines.append(q_line(Q_FIRST[1], f"⭐️ <b>{s['rating']}</b> из 10"))
+    elif s.get("reason"):
+        label, _, _, alarm = CHOICES[s["reason"]]
+        lines.append(q_line(Q_FIRST[s["grp"]],
+                            f"{'🚨' if alarm else '👆'} <b>{escape(label)}</b>"))
+    if s.get("answer"):
+        answer = s["answer"]
+        if len(answer) > ANSWER_MAX:
+            answer = answer[:ANSWER_MAX] + "…"
+        lines.append(f"❓ <b>{escape(s.get('answer_q') or answered_question(s))}</b>")
+        if s.get("rating_in_text") and s.get("rating"):
+            lines.append(f"⭐️ Оценка в тексте: <b>{s['rating']}</b> из 10")
+        lines.append(f"💬 {escape(answer)}")
+    if s.get("publish") is not None:
+        lines.append(q_line(Q_PUBLISH, "✅ Да, с именем" if s["publish"] else "🙈 Нет, без имени"))
+    elif s["grp"] == 1 and s.get("stage") == "publish":
+        lines.append(q_line(Q_PUBLISH, "⏳ пока не ответил(а)"))
     return "\n".join(lines)
 
 
-def _recipients(s: dict, user_id: int) -> list[int]:
+def _recipients(s: dict) -> list[int]:
     # Тест — только тому, кто проходит, остальных админов не дёргаем
-    return [user_id] if s["test"] and user_id in config.ADMIN_IDS else list(config.ADMIN_IDS)
+    uid = s["user_id"]
+    return [uid] if s["test"] and uid in config.ADMIN_IDS else list(config.ADMIN_IDS)
 
 
-async def _notify(s: dict, user, line: str) -> None:
-    from handlers.support import notify_admins_text
-    text = event_card(s, _who(user), line)
-    if s["test"]:
-        bot = Bot(token=config.WAITLIST_BOT_TOKEN)
-        try:
-            for admin_id in _recipients(s, user.id):
-                await bot.send_message(admin_id, text, parse_mode="HTML")
-        except Exception as e:
-            logger.error(f"survey: уведомление не ушло: {e}")
-        finally:
-            await bot.session.close()
-        return
-    await notify_admins_text(text, user.id)
+async def _card_ids(survey_id: int) -> dict[int, int]:
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        async with conn.execute("SELECT chat_id, message_id FROM course_survey_cards "
+                                "WHERE survey_id = ?", (survey_id,)) as cur:
+            return {r[0]: r[1] for r in await cur.fetchall()}
+
+
+async def _save_card(survey_id: int, chat_id: int, message_id: int) -> None:
+    async with aiosqlite.connect(db.DB_PATH) as conn:
+        await conn.execute("INSERT OR REPLACE INTO course_survey_cards "
+                           "(survey_id, chat_id, message_id) VALUES (?, ?, ?)",
+                           (survey_id, chat_id, message_id))
+        await conn.commit()
+
+
+async def _show(s: dict, who: str, resend: bool = True, media: Message | None = None) -> None:
+    """Показывает админам карточку опроса в текущем состоянии.
+
+    resend — прислать заново (с уведомлением) и удалить прежнюю; иначе тихо
+    поправить прежнюю. media — вложение из ответа: идёт копией следом."""
+    from handlers.support import relay_media
+    text = render_card(s, who)
+    kb = None if s["test"] else InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(
+        text="✍️ Ответить", callback_data=f"sup_reply:{s['user_id']}")]])
+    old = await _card_ids(s["id"])
+    bot = Bot(token=config.WAITLIST_BOT_TOKEN)
+    try:
+        for admin_id in _recipients(s):
+            try:
+                mid = old.get(admin_id)
+                if mid and not resend:
+                    try:
+                        await bot.edit_message_text(text=text, chat_id=admin_id, message_id=mid,
+                                                    parse_mode="HTML", reply_markup=kb)
+                        continue
+                    except Exception as e:
+                        if "not modified" in str(e):
+                            continue
+                        logger.warning(f"survey: карточку не поправить ({e}) — шлю заново")
+                sent = await bot.send_message(admin_id, text, parse_mode="HTML", reply_markup=kb)
+                await _save_card(s["id"], admin_id, sent.message_id)
+                if not s["test"]:   # ответ Reply на карточку уходит клиенту
+                    await db.add_support_message(admin_id, sent.message_id, s["user_id"])
+                if mid:
+                    try:
+                        await bot.delete_message(admin_id, mid)
+                    except Exception:
+                        pass
+                if media is not None:
+                    copy = await relay_media(media, bot, admin_id)
+                    if copy and not s["test"]:
+                        await db.add_support_message(admin_id, copy.message_id, s["user_id"])
+            except Exception as e:
+                logger.error(f"survey: карточка админу {admin_id} не ушла: {e}")
+    finally:
+        await bot.session.close()
 
 
 # ── Кнопки ─────────────────────────────────────────────────────────────────────
@@ -308,21 +349,25 @@ async def on_button(callback: CallbackQuery):
 
     if kind == "r" and value.isdigit():
         rating = int(value)
-        await _update(s["id"], rating=rating)
-        await _notify(s, callback.from_user, rating_line(rating))
+        await _update(s["id"], rating=rating, rating_in_text=0)
+        s.update(rating=rating, rating_in_text=0)
+        await _show(s, _who(callback.from_user))
         if s["stage"] == "await":
             await callback.message.answer(RATED_HIGH if rating >= 8 else RATED_LOW)
     elif kind == "c" and value in CHOICES:
         label, reply, wait_text, alarm = CHOICES[value]
-        await _update(s["id"], reason=value, **({} if wait_text else {"stage": "done"}))
-        await _notify(s, callback.from_user, choice_line(s["grp"], value))
+        upd = {"reason": value, **({} if wait_text else {"stage": "done"})}
+        await _update(s["id"], **upd)
+        s.update(upd)
+        await _show(s, _who(callback.from_user))
         await callback.message.answer(reply)
         if not wait_text:
             await _next_test(callback.bot, s)
     elif kind == "p" and value in ("1", "0"):
-        await _update(s["id"], publish=int(value), stage="done",
-                      done_at=_now_sql())
-        await _notify(s, callback.from_user, publish_line(value == "1"))
+        upd = {"publish": int(value), "stage": "done", "done_at": _now_sql()}
+        await _update(s["id"], **upd)
+        s.update(upd)
+        await _show(s, _who(callback.from_user), resend=False)   # тихо, той же карточкой
         await callback.message.answer(PUBLISH_YES if value == "1" else PUBLISH_NO)
         await _next_test(callback.bot, s)
 
@@ -349,24 +394,23 @@ async def on_reply(message: Message) -> bool:
         # Прислал только цифру — это оценка, отзыв ещё впереди
         rating = int(_ONLY_RATING.fullmatch(text).group(1))
         await _update(s["id"], rating=rating)
-        await _notify(s, message.from_user, rating_line(rating, typed=True))
+        s["rating"] = rating
+        await _show(s, _who(message.from_user))
         await message.answer(RATED_HIGH if rating >= 8 else RATED_LOW)
         return True
 
-    before = dict(s)
-    fields = {"answer": text or f"[{message.content_type}]", "answered_at": _now_sql()}
+    fields = {"answer": text or f"[{message.content_type}]", "answered_at": _now_sql(),
+              "answer_q": answered_question(s)}
     if s["grp"] == 1 and s["rating"] is None:
         m = _RATING_IN_TEXT.search(text)
         if m:
-            fields["rating"] = int(m.group(1))
+            fields.update(rating=int(m.group(1)), rating_in_text=1)
     fields["stage"] = "publish" if s["grp"] == 1 else "done"
     await _update(s["id"], **fields)
     s.update(fields)
 
-    from handlers.support import client_header, notify_admins
-    header = client_header(message, _title(s), answer_extra(before, fields.get("rating")))
-    await notify_admins(message, header, message.from_user.id,
-                        recipient_ids=_recipients(s, message.from_user.id))
+    await _show(s, _who(message.from_user),
+                media=None if message.content_type == "text" else message)
 
     name = escape(message.from_user.first_name or "")
     if s["grp"] == 1:
