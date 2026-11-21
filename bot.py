@@ -12,7 +12,7 @@ import database as db
 from handlers import start, catalog, payment, admin, delivery, waitlist_handler, feedback, brief_handler, channel_access
 from handlers import funnel_handler, bonus_handler, order_actions, order_widget, catalog_widget, client_order_widget, product_widget, expenses, cdek_account, finance, debug_cmd, consumables
 from handlers import support, support_admin, logo, reviews, pending_nudge, operations_menu, refunds, shop_reviews, sellers_info, forget, course_gift, course_files, manual_sale
-from handlers import course, course_offer, course_admin, course_orders, course_invoice, npd_admin, friend_order, course_survey
+from handlers import course, course_offer, course_admin, course_orders, course_invoice, npd_admin, friend_order, course_survey, blogger_order
 from handlers import pay_router, payments_admin
 from handlers.prodamus_webhook import create_app as create_webhook_app
 from services.daily_report import daily_report_loop
@@ -78,6 +78,7 @@ async def main():
     dp.include_router(course.router)        # кодовое слово — раньше поддержки
     dp.include_router(course_offer.router)  # личная скидка на курс (?start=offer_…)
     dp.include_router(friend_order.router)  # заказ для друга — только админам
+    dp.include_router(blogger_order.router)  # бесплатный заказ блогера
     dp.include_router(course_invoice.router)  # счёт за курс — только админам
     dp.include_router(catalog.router)
     dp.include_router(catalog_widget.router)   # /catalogwidget — кому каталог виджетом
@@ -168,6 +169,7 @@ async def main():
         admin_dp.include_router(refunds.router)
         admin_dp.include_router(course_admin.router)
         admin_dp.include_router(course_gift.router)   # /gift — курс в подарок
+        admin_dp.include_router(blogger_order.admin_router)   # /blogger — товар блогеру
         admin_dp.include_router(course_offer.admin_router)   # /offer — личное предложение на курс
         admin_dp.include_router(course_survey.admin_router)  # /survey — опрос покупателей курса
         admin_dp.include_router(manual_sale.router)    # /sale — продажа вне бота
@@ -200,6 +202,7 @@ async def main():
                 BotCommand(command="courseorders", description="🎓 Заказы по курсу"),
                 BotCommand(command="sale", description="🧾 Продажа вне бота (перевод)"),
                 BotCommand(command="gift", description="🎁 Курс в подарок"),
+                BotCommand(command="blogger", description="🎬 Бесплатный товар блогеру"),
                 BotCommand(command="offers", description="🤍 Личные предложения на курс"),
                 BotCommand(command="nalog", description="🧾 Чеки «Мой налог» (ЮKassa)"),
                 BotCommand(command="finance", description="💳 Финансы"),

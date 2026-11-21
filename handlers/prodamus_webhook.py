@@ -31,6 +31,13 @@ DEFAULT_POST_PAYMENT = (
     "В течение нескольких рабочих дней я отправлю вам заказ."
 )
 
+# Бесплатный заказ блогера (handlers/blogger_order.py) — без слов об оплате
+BLOGGER_THANKS = (
+    "🎁 Подарочный заказ оформлен! Спасибо 🤍\n\n"
+    "Номер заказа: {order}\n"
+    "В течение нескольких рабочих дней мы отправим его СДЭК."
+)
+
 
 async def handle_webhook(request: web.Request, secret: str | list = "") -> web.Response:
     bot: Bot = request.app["bot"]
@@ -327,7 +334,10 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
             # Анкета заполнена до смены палитры — номер цвета старый
             old_palette=is_old_palette(pending.get("created_at")),
         )
-        if gift:
+        blogger = pending.get("blogger")
+        if blogger:   # бесплатный заказ блогера — handlers/blogger_order.py
+            summary = summary.replace("💵 0 ₽", f"🎬 Блогер {escape(blogger)} — бесплатно", 1)
+        elif gift:
             summary = summary.replace("💵 0 ₽", "🎁 Подарок, без оплаты", 1)
         order_row_id = await db.create_order(
             user_id, product_id, prodamus_order_id, summary,
@@ -384,7 +394,9 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
         )
         fresh_order = await db.get_order(order_row_id)
         credits = await db.order_print_credits(fresh_order, [], config.ADMIN_IDS)
-        if gift:
+        if blogger:
+            goods_comment = f"Блогер {blogger}: {goods_comment}"
+        elif gift:
             goods_comment = f"Подарок другу: {goods_comment}"
         request_finance_append(order_code, order_date_msk, amount, sheet_delivery_cost,
                                comment=goods_comment, goods_type="Физический",
@@ -413,7 +425,8 @@ async def _provision_payment(bot: Bot, user_id: int, product_id: int, order_type
                 f"🎁 Подарок оформлен: заказ {order_code} ушёл в работу." if gift else
                 f"🤝 Друг оплатил заказ {order_code} — он ушёл в работу."))
         else:
-            paid_text = (product.get("post_payment_text") or DEFAULT_POST_PAYMENT)
+            paid_text = (BLOGGER_THANKS if blogger else
+                         product.get("post_payment_text") or DEFAULT_POST_PAYMENT)
             paid_text = paid_text.replace("{order}", order_code)
             await bot.send_message(user_id, paid_text)
             # «Мой заказ» — живая карточка заказа у клиента (кому включено)

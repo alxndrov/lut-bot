@@ -567,6 +567,28 @@ async def init_db(existing_cdek_contract: str | None = None):
             await db.execute("ALTER TABLE course_gifts ADD COLUMN recipient TEXT")
         except Exception:
             pass
+        # Бесплатный заказ для блогера (handlers/blogger_order.py): админ
+        # в malimadmins даёт /blogger @ник, бот выдаёт ссылку
+        # t.me/<бот>?start=blog_<token>. Один заказ из одного товара;
+        # username — ник без @ в нижнем регистре, user_id — кто открыл.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS blogger_invites (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                token        TEXT UNIQUE NOT NULL,
+                username     TEXT NOT NULL,
+                created_by   INTEGER,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                user_id      INTEGER,
+                opened_at    TIMESTAMP,
+                used_at      TIMESTAMP,
+                order_code   TEXT,
+                cancelled_at TIMESTAMP
+            )
+        """)
+        try:
+            await db.execute("ALTER TABLE pending_deliveries ADD COLUMN blogger TEXT DEFAULT NULL")
+        except Exception:
+            pass
         # Личная скидка на курс: ссылка t.me/<бот>?start=offer_<token>
         # (handlers/course_offer.py) открывает вариант курса по цене price
         # только человеку user_id и только до valid_until (YYYY-MM-DD по Москве,
@@ -2696,7 +2718,8 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                                 delivery_amount: int = 0,
                                 delivery_cost: float = 0.0,
                                 round_products_json: str | None = None,
-                                pickup: bool = False, friend_by: str | None = None):
+                                pickup: bool = False, friend_by: str | None = None,
+                                blogger: str | None = None):
     """Сохраняет детали будущего заказа (адрес + ответы опроса + сумму) до оплаты.
 
     ФИО, телефон и код ПВЗ нужны, чтобы после оплаты завести заказ в СДЭК.
@@ -2710,8 +2733,8 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
             """INSERT INTO pending_deliveries
                    (user_id, product_id, delivery_str, survey_json, amount,
                     recipient_name, recipient_phone, pvz_code, delivery_amount,
-                    delivery_cost, round_products_json, pickup, friend_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    delivery_cost, round_products_json, pickup, friend_by, blogger)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(user_id, product_id) DO UPDATE SET
                    delivery_str = excluded.delivery_str,
                    survey_json = excluded.survey_json,
@@ -2724,11 +2747,12 @@ async def save_pending_delivery(user_id: int, product_id: int, delivery_str: str
                    round_products_json = excluded.round_products_json,
                    pickup = excluded.pickup,
                    friend_by = excluded.friend_by,
+                   blogger = excluded.blogger,
                    created_at = CURRENT_TIMESTAMP,
                    nudged_at = NULL""",
             (user_id, product_id, delivery_str, survey_json, amount,
              recipient_name, recipient_phone, pvz_code, delivery_amount,
-             delivery_cost, round_products_json, int(bool(pickup)), friend_by),
+             delivery_cost, round_products_json, int(bool(pickup)), friend_by, blogger),
         )
         await db.commit()
 
@@ -4682,6 +4706,87 @@ async def delete_pending_delivery(user_id: int, product_id: int):
             (user_id, product_id),
         )
         await db.commit()
+
+
+# ── Бесплатный заказ для блогера (handlers/blogger_order.py) ──────────────────
+
+async def _blogger_one(sql: str, args: tuple) -> Optional[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(sql, args) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+
+async def _blogger_write(sql: str, args: tuple) -> bool:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute(sql, args)
+        await db.commit()
+        return cur.rowcount > 0
+
+
+async def open_blogger_invite_by_username(username: str) -> Optional[dict]:
+    """Непогашенное приглашение на ник (без @, регистр не важен)."""
+    return await _blogger_one(
+        """SELECT * FROM blogger_invites WHERE username = lower(?)
+             AND used_at IS NULL AND cancelled_at IS NULL
+           ORDER BY id DESC LIMIT 1""", (username.lstrip("@"),))
+
+
+async def create_blogger_invite(token: str, username: str, created_by: int) -> dict:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT INTO blogger_invites (token, username, created_by) "
+                         "VALUES (?, lower(?), ?)", (token, username.lstrip("@"), created_by))
+        await db.commit()
+    return await get_blogger_invite(token)
+
+
+async def get_blogger_invite(token: str) -> Optional[dict]:
+    return await _blogger_one("SELECT * FROM blogger_invites WHERE token = ?", (token,))
+
+
+async def get_blogger_invite_by_id(invite_id: int) -> Optional[dict]:
+    return await _blogger_one("SELECT * FROM blogger_invites WHERE id = ?", (invite_id,))
+
+
+async def bind_blogger_invite(invite_id: int, user_id: int) -> bool:
+    """Привязывает приглашение к аккаунту при первом открытии."""
+    return await _blogger_write(
+        """UPDATE blogger_invites SET user_id = ?, opened_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND user_id IS NULL AND cancelled_at IS NULL""", (user_id, invite_id))
+
+
+async def use_blogger_invite(invite_id: int, user_id: int) -> bool:
+    """Гасит приглашение ровно один раз — второй заказ по нему не пройдёт."""
+    return await _blogger_write(
+        """UPDATE blogger_invites SET used_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND user_id = ? AND used_at IS NULL AND cancelled_at IS NULL""",
+        (invite_id, user_id))
+
+
+async def unuse_blogger_invite(invite_id: int) -> None:
+    """Заказ не провёлся — приглашение снова в силе."""
+    await _blogger_write("UPDATE blogger_invites SET used_at = NULL WHERE id = ? "
+                         "AND order_code IS NULL", (invite_id,))
+
+
+async def set_blogger_order_code(invite_id: int, order_code: str) -> None:
+    await _blogger_write("UPDATE blogger_invites SET order_code = ? WHERE id = ?",
+                         (order_code, invite_id))
+
+
+async def cancel_blogger_invite(invite_id: int) -> bool:
+    return await _blogger_write(
+        """UPDATE blogger_invites SET cancelled_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND used_at IS NULL AND cancelled_at IS NULL""", (invite_id,))
+
+
+async def list_blogger_invites(limit: int = 30) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM blogger_invites ORDER BY id DESC LIMIT ?",
+                              (limit,)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
 
 async def upsert_user(user_id: int, username: Optional[str], first_name: str,

@@ -1,6 +1,7 @@
 import logging
 from aiogram import BaseMiddleware, Router, F
 from aiogram.filters import CommandStart, Command
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
 )
@@ -145,15 +146,15 @@ async def cb_policy_toggle(callback: CallbackQuery):
 
 
 @router.callback_query(F.data == "policy:accept")
-async def cb_policy_accept(callback: CallbackQuery):
-    state = _boxes(callback.message.reply_markup)
-    if state is None:   # старый экран с одной кнопкой — показываем новый, с галочками
+async def cb_policy_accept(callback: CallbackQuery, state: FSMContext | None = None):
+    boxes = _boxes(callback.message.reply_markup)
+    if boxes is None:   # старый экран с одной кнопкой — показываем новый, с галочками
         await callback.answer()
         await ask_policy(callback.message, renewed=await db.policy_status(callback.from_user.id) == "old")
         return
-    if not all(state.values()):
+    if not all(boxes.values()):
         await callback.answer("Отметь, пожалуйста, "
-                              + ("оба пункта" if len(state) > 1 else "пункт") + " 🙏",
+                              + ("оба пункта" if len(boxes) > 1 else "пункт") + " 🙏",
                               show_alert=True)
         return
     payload = await db.accept_policy(callback.from_user.id)
@@ -178,12 +179,19 @@ async def cb_policy_accept(callback: CallbackQuery):
         from handlers import course_offer
         await course_offer.claim(callback.message, callback.from_user.id, payload[6:])
         return
+    from handlers import blogger_order   # бесплатный заказ блогера
+    if payload and payload.startswith(blogger_order.PREFIX):
+        await blogger_order.claim(callback.message, callback.from_user, state,
+                                  payload[len(blogger_order.PREFIX):])
+        return
+    if not payload and await blogger_order.claim_by_username(callback.message, callback.from_user, state):
+        return
     await _start_funnel(callback.from_user.id, payload)
     await show_catalog(callback.message, user_id=callback.from_user.id)
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, state: FSMContext):
     # Парсим deep link: /start PAYLOAD
     # Форматы:
     #   src_reels_24apr       → просто отслеживание источника
@@ -235,6 +243,14 @@ async def cmd_start(message: Message):
     if payload and payload.startswith("offer_"):   # личная скидка на курс — handlers/course_offer.py
         from handlers import course_offer
         await course_offer.claim(message, message.from_user.id, payload[6:])
+        return
+
+    from handlers import blogger_order   # бесплатный заказ блогера
+    if payload and payload.startswith(blogger_order.PREFIX):
+        await blogger_order.claim(message, message.from_user, state,
+                                  payload[len(blogger_order.PREFIX):])
+        return
+    if not payload and await blogger_order.claim_by_username(message, message.from_user, state):
         return
 
     if funnel_to_start:

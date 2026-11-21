@@ -169,7 +169,8 @@ async def start_delivery_flow(target: Message, state: FSMContext, product_id: in
     if not CDEK_CLIENT:
         return False
     # Заказ для друга (метку ставит только админский handlers/friend_order.py)
-    friend_by = (await state.get_data()).get("friend_by")
+    prev = await state.get_data()
+    friend_by = prev.get("friend_by")
     await state.clear()
     await state.set_state(DeliveryOrder.waiting_city)
     await state.update_data(
@@ -178,6 +179,9 @@ async def start_delivery_flow(target: Message, state: FSMContext, product_id: in
         rounds=rounds or [],
         round_products=round_products or [product_id] * max(1, quantity),
         friend_by=friend_by,
+        # Подарок блогеру (handlers/blogger_order.py) — в конце без оплаты
+        blogger_invite=prev.get("blogger_invite"),
+        blogger=prev.get("blogger"),
     )
     if friend_by:
         from handlers.friend_order import ask_receive_method
@@ -628,6 +632,26 @@ async def _calculate_and_confirm(message: Message, state: FSMContext, user_id: i
         delivery_str += f"\nПолучатель: {name}, {phone}"
     friend_by = data.get("friend_by")
     rounds = data.get("rounds") or []
+    if data.get("blogger_invite"):
+        # Подарок блогеру (handlers/blogger_order.py): клиент не платит ни за
+        # товар, ни за доставку; delivery_cost — счёт СДЭК, он наш расход
+        from handlers import blogger_order
+        await db.save_pending_delivery(
+            user_id, product["id"], delivery_str,
+            survey_json=json.dumps(rounds, ensure_ascii=False) if rounds else None,
+            amount=0, recipient_name=name or None, recipient_phone=phone or None,
+            pvz_code=pvz_code or None, delivery_amount=0,
+            delivery_cost=round(delivery_real, 2),
+            round_products_json=json.dumps(round_products, ensure_ascii=False),
+            blogger=data.get("blogger"),
+        )
+        await state.clear()
+        esc = blogger_order.html.escape
+        await blogger_order.send_confirm(
+            message, user_id, product["id"], data, esc(_goods_line(goods_items)),
+            f"Доставка ({delivery_type_str}): за наш счёт\nАдрес: {esc(full_address)}"
+            + (f"\nПолучатель: {esc(name)}, {esc(phone)}" if name else ""))
+        return
     await db.save_pending_delivery(
         user_id, product["id"], delivery_str,
         survey_json=json.dumps(rounds, ensure_ascii=False) if rounds else None,

@@ -347,6 +347,8 @@ async def _round_done(target: Message, state: FSMContext, bot: Bot, user):
     repeat_text = anchor_product.get("survey_repeat_text") if anchor_product else None
     if not repeat_text and db.is_stock_product(anchor_product):
         repeat_text = "Добавим ещё что-нибудь в заказ?"
+    if data.get("blogger_invite"):
+        repeat_text = None   # подарок блогеру — ровно один товар (handlers/blogger_order.py)
     if repeat_text:
         await state.set_state(SurveyForm.repeat_choice)
         has_delivery = bool(anchor_product.get("survey_delivery_text")) if anchor_product else False
@@ -434,6 +436,8 @@ async def cb_survey_more(callback: CallbackQuery, state: FSMContext, bot: Bot):
     rounds = data.get("rounds") or [[]]
     round_products = data.get("round_products") or [anchor_id] * len(rounds)
     await callback.answer()
+    if data.get("blogger_invite"):
+        action = "done"   # подарок блогеру — один товар, добавлять нельзя
 
     if action == "add":
         # Повторяем ТОТ товар, чей раунд отвечали последним
@@ -613,6 +617,19 @@ async def _complete_order(target: Message, state: FSMContext, bot: Bot,
     goods_items = _goods_breakdown(round_products, products_by_id)
     total = sum(p["price"] * qty for p, qty in goods_items)
     payment_name = _goods_payment_name(goods_items)
+
+    if data.get("blogger_invite"):   # подарок блогеру — без оплаты
+        from handlers import blogger_order
+        from handlers.delivery import _goods_line
+        await db.save_pending_delivery(
+            user.id, product_id, delivery_str or "не указан",
+            survey_json=json.dumps(rounds, ensure_ascii=False), amount=0,
+            round_products_json=json.dumps(round_products, ensure_ascii=False),
+            blogger=data.get("blogger"))
+        await blogger_order.send_confirm(target, user.id, product_id, data,
+                                         escape(_goods_line(goods_items)),
+                                         f"Доставка: за наш счёт\n{escape(delivery_str or '')}")
+        return
 
     # Ответы и адрес сохраняем до оплаты — уведомление «Новый заказ» уйдёт
     # админу из вебхука, строго после успешной оплаты.
