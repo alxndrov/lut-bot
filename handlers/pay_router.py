@@ -379,8 +379,9 @@ async def _click_notice(request: web.Request, link: dict):
                       f"👀 <b>Переход по ссылке на оплату</b> — {n}-й\n"
                       + ("✋ Ссылка из лички — бот клиенту ничего не пишет\n" if _manual(link) else "")
                       + f"🛍 {escape(link['name'])} — {link['amount']} ₽ · {escape(route)}\n"
-                      f"👤 Ссылка для {escape(who)}\n"
-                      f"📱 {escape(_device(request.headers.get('User-Agent', '')))} · IP {escape(ip)}")
+                      + (f"👤 Ссылка для {escape(who)}\n" if _manual(link)
+                         else f"🤖 Бот выдал ссылку {escape(who)}\n")
+                      + f"📱 {escape(_device(request.headers.get('User-Agent', '')))} · IP {escape(ip)}")
     except Exception as e:
         logger.warning(f"pay: уведомление о переходе {link.get('order_num')} не ушло: {e}")
 

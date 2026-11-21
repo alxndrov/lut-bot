@@ -58,7 +58,7 @@ class PayClickNoticeTest(unittest.IsolatedAsyncioTestCase):
         text = notify.await_args.args[1]
         self.assertIn("Переход по ссылке на оплату</b> — 1-й", text)
         self.assertIn("🎤 Microphone Handled Kit — 1693 ₽ · Prodamus (зарубежная карта)", text)
-        self.assertIn("Ссылка для @iamdariadrn", text)
+        self.assertIn("Бот выдал ссылку @iamdariadrn", text)
         self.assertIn("iPhone · Telegram · IP 5.6.7.8", text)
         _, notify = await self._open(IPHONE_TG, ip="9.9.9.9")
         self.assertIn("— 2-й", notify.await_args.args[1])
@@ -77,6 +77,8 @@ class PayClickNoticeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(paylinks.parse_token(self.token)["manual"])
         _, notify = await self._open(IPHONE_TG)
         self.assertIn("Ссылка из лички", notify.await_args.args[1])
+        self.assertIn("Ссылка для @iamdariadrn", notify.await_args.args[1])
+        self.assertNotIn("Бот выдал", notify.await_args.args[1])
         click = await db.get_pay_click("p_294789073_10")
         self.assertEqual(click["manual"], 1)
         self.assertFalse(await pay_router._backup_allowed(click))
