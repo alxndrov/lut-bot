@@ -13,6 +13,7 @@ import base64
 import hashlib
 import hmac
 import json
+import secrets
 
 import config
 
@@ -25,6 +26,15 @@ def _b64(raw: bytes) -> str:
 
 def _unb64(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def link_code(nbytes: int = 9) -> str:
+    """Случайный код для ссылки (t.me/<бот>?start=…_<код>, /pay/…). Не кончается
+    на «_» или «-»: Telegram и iOS не включают их в ссылку, и код приходит обрезанным."""
+    while True:
+        code = secrets.token_urlsafe(nbytes)
+        if code[-1] not in "-_":
+            return code
 
 
 def _sig(body: str) -> str:

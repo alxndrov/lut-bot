@@ -15,7 +15,6 @@ add_manual_sale; wallet — у кого деньги, для взаиморас�
 """
 import logging
 import re
-import secrets
 from html import escape
 
 from aiogram import F, Router
@@ -28,6 +27,7 @@ import config
 import database as db
 from handlers import course_gift
 from services import course as svc
+from services import paylinks
 from services import npd, npd_receipts
 
 router = Router()   # админский бот
@@ -281,7 +281,7 @@ async def cb_go(callback: CallbackQuery, state: FSMContext):
                 f"(админ {callback.from_user.id})")
     lines = [f"✅ Продажа b2b-{sale['id']} проведена.", ""]
     if option:   # курс — ссылка на доступ для ученика
-        token = secrets.token_urlsafe(9)
+        token = paylinks.link_code()
         await db.create_course_gift(token, sale["purchase_id"], 0, svc.option_sections(option),
                                     d["recipient"])
         await db.update_manual_sale(sale["id"], gift_token=token)

@@ -14,7 +14,6 @@
 import argparse
 import asyncio
 import calendar
-import secrets
 from datetime import datetime
 
 from aiogram import Bot
@@ -23,6 +22,7 @@ import config
 import database as db
 from handlers.course_offer import PREFIX, pay_link
 from services import course as svc
+from services import paylinks
 
 
 def month_end(now: datetime) -> str:
@@ -58,7 +58,7 @@ async def main():
     if not 1 <= price <= full:
         raise SystemExit(f"Странная цена {price} (текущая {full})")
 
-    token = secrets.token_urlsafe(9)
+    token = paylinks.link_code()
     await db.create_course_offer(token, option["id"], price, user["user_id"], until, args.note)
     offer = await db.get_course_offer(token)
     bot = Bot(token=config.BOT_TOKEN)

@@ -19,7 +19,6 @@ t.me/<бот>?start=blog_<token> и присылает готовый текст
 import html
 import json
 import logging
-import secrets
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command, CommandObject
@@ -28,6 +27,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 
 import config
 import database as db
+from services import paylinks
 
 router = Router()         # основной бот: блогер
 admin_router = Router()   # malimadmins: /blogger
@@ -97,7 +97,7 @@ async def cmd_blogger(message: Message, command: CommandObject):
     inv = await db.open_blogger_invite_by_username(nick)
     fresh = inv is None
     if fresh:
-        inv = await db.create_blogger_invite(secrets.token_urlsafe(9), nick, message.from_user.id)
+        inv = await db.create_blogger_invite(paylinks.link_code(), nick, message.from_user.id)
         logger.info(f"blogger: {message.from_user.id} создал приглашение {inv['id']} для @{nick}")
     link = await invite_link(inv["token"])
     await message.answer(

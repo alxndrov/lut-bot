@@ -30,7 +30,6 @@ lava.top (та же ссылка с via offer:<код>:paw|lava, см. pay_route
 import asyncio
 import logging
 import re
-import secrets
 from datetime import date, datetime, timezone
 from html import escape
 
@@ -41,6 +40,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 import config
 import database as db
 from services import course as svc
+from services import paylinks
 from services.sellers import seller_line
 
 router = Router()        # клиентский бот: ?start=offer_<код> и кнопка «Оплатить»
@@ -316,7 +316,7 @@ async def _find_user(arg: str) -> tuple[int | None, dict | None]:
 
 async def create_offer(user_id: int, option: dict, price: int, until: date,
                        note: str | None = None) -> dict:
-    token = secrets.token_urlsafe(9)
+    token = paylinks.link_code()
     await db.create_course_offer(token, option["id"], price, user_id, until.isoformat(), note)
     return await db.get_course_offer(token)
 

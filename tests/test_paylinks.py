@@ -30,5 +30,12 @@ class PaylinkSignatureTest(unittest.TestCase):
         self.assertIsNone(paylinks.parse_token(f"{other}.{sig[:-1]}"))
 
 
+class LinkCodeTest(unittest.TestCase):
+    def test_code_never_ends_with_underscore_or_dash(self):
+        codes = {paylinks.link_code() for _ in range(3000)}
+        self.assertGreater(len(codes), 2990)
+        self.assertTrue(all(len(c) == 12 and c[-1] not in "-_" for c in codes))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -22,7 +22,6 @@ buyer_id — админ, который его создал; в продажах
 """
 import re
 import logging
-import secrets
 from html import escape
 
 from aiogram import Bot, F, Router
@@ -34,6 +33,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 import config
 import database as db
 from services import course as svc
+from services import paylinks
 
 router = Router()   # админский бот
 logger = logging.getLogger(__name__)
@@ -99,7 +99,7 @@ async def cmd_gift(message: Message, command: CommandObject):
     if gift:   # ссылка уже есть — та же, вид подарка меняем на указанный сейчас
         await db.set_gift_recipient(gift["token"], recipient)
     else:
-        gift = {"token": secrets.token_urlsafe(9)}
+        gift = {"token": paylinks.link_code()}
         await db.create_course_gift(gift["token"], purchase["id"], buyer_id, sections, recipient)
     # Придерживаем доступ покупателя к разделам этой покупки
     await db.revoke_course_access(buyer_id, sections)
@@ -247,7 +247,7 @@ async def _make_free_gift(message: Message, admin_id: int, state: FSMContext, us
         await message.answer("Начни заново: /gift")
         return
     sections = FREE_KINDS[kind]
-    token = secrets.token_urlsafe(9)
+    token = paylinks.link_code()
     await db.create_course_gift(token, 0, admin_id, sections, username)
     link = await gift_link(token)
     logger.info(f"gift: подарок от {admin_id} — {kind}, {'@' + username if username else 'свободный'}, {token}")
