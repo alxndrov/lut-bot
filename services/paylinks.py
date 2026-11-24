@@ -45,7 +45,13 @@ def parse_token(token: str) -> dict | None:
     подпись не та. Старые ссылки — без manual (False)."""
     try:
         body, sig = token.split(".", 1)
-        if not hmac.compare_digest(sig, _sig(body)):
+        want = _sig(body)
+        # Telegram и iOS не включают в ссылку «_» или «-» в самом конце — подпись
+        # приходит без последнего символа. Подлинность так же проверена: остальные
+        # 19 символов подписи без ключа не подобрать
+        if want[-1] in "-_" and len(sig) == len(want) - 1:
+            want = want[:-1]
+        if not hmac.compare_digest(sig, want):
             return None
         data = json.loads(_unb64(body))
         order_num, amount, name, via = data[:4]
